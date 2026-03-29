@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+*.local
+
+# Database
+*.sqlite
+*.db
+
+# Node.js
+node_modules/
+frontend/dist/
+frontend/dist-ssr/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+
+# Nimog job state (regenerated at runtime)
+nimog/jobs/*.json
+
+# Data directories (too large for git — see README for setup)
+/data/
+/scratch/
+
+# Container images (multi-GB, download separately)
+*.sif
+
+# Genomic data files (large, private)
+*.bam
+*.bam.bai
+*.bai
+*.cram
+*.crai
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.g.vcf.gz
+*.g.vcf.gz.tbi
+*.pgen
+*.psam
+*.pvar
+*.pvar.zst
+*.fastq.gz
+*.fq.gz
+*.fasta
+*.fa
+*.fai
+
+# Reports (generated per-run, may contain private data)
+/data/
+/scratch/
+
+# Frontend build
+frontend/dist/
