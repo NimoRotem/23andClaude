@@ -41,7 +41,7 @@ nimog/jobs/*.json
 # Container images (multi-GB, download separately)
 *.sif
 
-# Genomic data files (large, private)
+# Genomic data files
 *.bam
 *.bam.bai
 *.bai
@@ -62,9 +62,5 @@ nimog/jobs/*.json
 *.fa
 *.fai
 
-# Reports (generated per-run, may contain private data)
-/data/
-/scratch/
-
-# Frontend build
-frontend/dist/
+# Sex check temp files
+sex_check*

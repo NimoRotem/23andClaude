@@ -163,7 +163,7 @@ def _extract_sample_name(filepath: str, file_type: str) -> str:
 
     Examples:
         /data/aligned_bams/SampleA.bam            -> SampleA
-        /data/.../sample_R1.fastq.gz              -> sample
+        /data/.../sample_R1.fastq.gz           -> sample
         /scratch/nimog_output/SampleA/final.vcf.gz -> SampleA (from parent dir)
         /scratch/nimog_output/SampleA/dv/SampleA.g.vcf.gz -> SampleA
     """

@@ -17,27 +17,20 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional
 
-import shutil
+import shutil as _shutil
 
 def _find_bin(name):
-    """Find a binary in PATH or common conda locations."""
-    found = shutil.which(name)
-    if found:
-        return found
-    from pathlib import Path
-    for base in [
-        Path.home() / "miniconda3" / "envs" / "genomics" / "bin",
-        Path.home() / "miniforge3" / "envs" / "genomics" / "bin",
-        Path("/opt/conda/envs/genomics/bin"),
-    ]:
-        candidate = base / name
-        if candidate.is_file():
-            return str(candidate)
+    found = _shutil.which(name)
+    if found: return found
+    from pathlib import Path as _P
+    for b in [_P.home()/"miniconda3"/"envs"/"genomics"/"bin", _P("/opt/conda/envs/genomics/bin")]:
+        c = b / name
+        if c.is_file(): return str(c)
     return name
 
 BCFTOOLS = _find_bin("bcftools")
 SAMTOOLS = _find_bin("samtools")
-APPTAINER = _find_bin("apptainer")
+APPTAINER = "/usr/bin/apptainer"
 # Container images — GPU and CPU variants
 DV_GPU_SIF = "/data/containers/deepvariant_1.6.1-gpu.sif"
 DV_CPU_SIF = "/data/pgs2/containers/deepvariant.sif"
@@ -46,7 +39,7 @@ DV_CPU_DOCKER = "docker://google/deepvariant:1.6.1"
 GLNEXUS_SIF = "/scratch/tmp/glnexus_v1.4.1.sif"
 GLNEXUS_IMAGE = GLNEXUS_SIF if os.path.exists(GLNEXUS_SIF) else "docker://ghcr.io/dnanexus-rnd/glnexus:v1.4.1"
 # Bind mounts for Apptainer — container needs read/write access to data paths
-APPTAINER_BINDS = f"-B /data:/data -B /scratch:/scratch -B {os.path.expanduser('~')}:{os.path.expanduser('~')}"
+APPTAINER_BINDS = f"-B /data:/data -B /scratch:/scratch -B {os.path.expanduser(chr(126))}:{os.path.expanduser(chr(126))}"
 
 
 def detect_gpu() -> bool:

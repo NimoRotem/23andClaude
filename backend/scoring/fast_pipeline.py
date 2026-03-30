@@ -29,8 +29,9 @@ from ..config import PGEN_CACHE_DIR, PLINK2_SCORING_DIR
 
 logger = logging.getLogger(__name__)
 
-# Thread pool for parallel scoring
-executor = ThreadPoolExecutor(max_workers=8)
+# Thread pool for parallel scoring — use more workers for concurrent PGS
+from backend.config import CPU_COUNT
+executor = ThreadPoolExecutor(max_workers=min(CPU_COUNT, 16))
 
 
 async def run_fast_scoring(
@@ -112,65 +113,80 @@ async def run_fast_scoring(
 
         plink2_scoring_files[pgs_id] = p2_score_path
 
-    # Phase 3: Score all (sample, PGS) combinations
+    # Phase 3: Score all (sample, PGS) combinations — in parallel
     loop = asyncio.get_event_loop()
 
+    async def _score_one(sf, pgs_id):
+        """Score a single (sample, PGS) pair."""
+        sample = sf['sample_name']
+        population = sf.get('population', 'EUR')
+        out_prefix = os.path.join(pgen_dir, sample, f"score_{pgs_id}")
+
+        score_result = await loop.run_in_executor(
+            executor,
+            score_sample_plink2,
+            sf['pgen_prefix'],
+            plink2_scoring_files[pgs_id],
+            out_prefix,
+            pgs_id,
+        )
+
+        matched_vars_file = score_result.get('matched_variants_file')
+        ref_stats = await loop.run_in_executor(
+            executor,
+            get_ref_panel_stats,
+            pgs_id,
+            plink2_scoring_files[pgs_id],
+            population,
+            "GRCh38",
+            matched_vars_file,
+        )
+
+        percentile_data = compute_percentile(score_result['raw_score'], ref_stats)
+        return sf, pgs_id, score_result, percentile_data
+
+    # Build tasks for all combinations
+    tasks = []
     for sf in source_files:
         if 'pgen_prefix' not in sf:
             continue
-
-        sample = sf['sample_name']
-        population = sf.get('population', 'EUR')
-
         for pgs_id in pgs_ids:
             if pgs_id not in plink2_scoring_files:
                 continue
+            tasks.append(_score_one(sf, pgs_id))
 
-            out_prefix = os.path.join(pgen_dir, sample, f"score_{pgs_id}")
+    # Run all scoring tasks concurrently (thread pool handles actual parallelism)
+    gather_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            try:
-                # Score the sample
-                score_result = await loop.run_in_executor(
-                    executor,
-                    score_sample_plink2,
-                    sf['pgen_prefix'],
-                    plink2_scoring_files[pgs_id],
-                    out_prefix,
-                    pgs_id,
-                )
+    for item in gather_results:
+        if isinstance(item, Exception):
+            logger.error(f"Scoring task failed: {item}")
+            continue
 
-                # Get reference panel stats (cached after first computation)
-                # Pass matched variants file to ensure consistent variant sets
-                matched_vars_file = score_result.get('matched_variants_file')
-                ref_stats = await loop.run_in_executor(
-                    executor,
-                    get_ref_panel_stats,
-                    pgs_id,
-                    plink2_scoring_files[pgs_id],
-                    population,
-                    "GRCh38",
-                    matched_vars_file,
-                )
+        sf, pgs_id, score_result, percentile_data = item
+        sample = sf['sample_name']
 
-                # Compute percentile
-                percentile_data = compute_percentile(score_result['raw_score'], ref_stats)
+        try:
+            result = {
+                'sample_name': sample,
+                'source_path': sf['path'],
+                'source_type': 'gvcf',
+                'pgs_id': pgs_id,
+                'pipeline': 'plink2_native',
+                **score_result,
+                **percentile_data,
+            }
+            results.append(result)
+            logger.info(f"Scored {sample} x {pgs_id}: percentile={percentile_data['percentile']:.1f}%")
+        except Exception as e:
+            logger.error(f"Result processing failed for {sample} x {pgs_id}: {e}")
 
-                result = {
-                    'sample_name': sample,
-                    'source_path': sf['path'],
-                    'source_type': 'gvcf',
-                    'pgs_id': pgs_id,
-                    'pipeline': 'plink2_native',
-                    **score_result,
-                    **percentile_data,
-                }
-                results.append(result)
-
-                await report(f"Scored {sample} x {pgs_id}: percentile={percentile_data['percentile']:.1f}%")
-
-            except Exception as e:
-                logger.error(f"Scoring failed for {sample} x {pgs_id}: {e}")
-                await report(f"Failed: {sample} x {pgs_id}: {str(e)}")
+    # Report progress after all tasks complete
+    for i, r in enumerate(results):
+        completed += 1
+        if progress_callback:
+            await progress_callback(completed, total_tasks,
+                f"Scored {r['sample_name']} x {r['pgs_id']}: percentile={r.get('percentile', 0):.1f}%")
 
     return results
 

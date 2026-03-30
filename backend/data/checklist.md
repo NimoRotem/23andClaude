@@ -342,14 +342,36 @@ Run these first for every sample before any downstream analysis. These establish
 | [ ] | PGS002596 (genome-wide) | 1,103,034 | R2=0.654 | Weissbrod O et al., *Nat Genet* 2022 | EUR |
 | [ ] | PGS002305 (multi-ancestry) | 1,259,754 | R2=0.61 | Ge T et al., *Genome Med* 2022 | Multi |
 
-### Intelligence / Education
-> Educational attainment and fluid intelligence are among the most polygenic traits (thousands of contributing variants). The 2024 fluid intelligence PGS explains 22% of variance. These scores are influenced by population stratification and should be interpreted carefully.
+### Intelligence / Cognitive Ability
+> Fluid intelligence (gF) measures reasoning ability independent of learned knowledge. It is highly heritable (~50-80%) and among the most polygenic traits known. The best PGS now explains ~22% of variance in Europeans. Multiple scores exist using different GWAS sources and methods — running several provides a more robust estimate. These scores capture population-level statistical associations and should not be interpreted as deterministic individual predictions.
 
 | Done | PGS ID | Variants | Performance | Study | Pop |
 |:----:|--------|----------|-------------|-------|-----|
-| [ ] | **PGS004427** (fluid intelligence) | 1,059,939 | R2=0.223 | Jung H et al., *Commun Biol* 2024 | EUR |
+| [ ] | **PGS004427** (fluid intelligence, best) | 1,059,939 | R2=0.223 (EUR) | Jung H et al., *Commun Biol* 2024 | EUR |
+| [ ] | PGS003724 (IQ) | 6,680,000 | R2=0.12 | Hatoum AS et al., *Nat Genet* 2022 | EUR |
+| [ ] | PGS003723 (cognitive performance / cEF) | 6,680,000 | R2=0.11 | Hatoum AS et al., *Nat Genet* 2022 | EUR |
+| [ ] | PGS003510 (verbal-numerical reasoning) | 979,739 | R2=0.15 | Ding Y et al., *bioRxiv* 2022 | EUR |
+| [ ] | PGS002135 (fluid intelligence) | 903,000 | R2=0.10 | Prive F et al., *AJHG* 2022 | EUR |
+| [ ] | PGS001919 (fluid intelligence) | 26,000 | R2=0.06 | Prive F et al., *AJHG* 2022 | EUR |
+| [ ] | PGS001232 (fluid intelligence) | 10,000 | R2=0.04 | Tanigawa Y et al., *PLoS Genet* 2022 | EUR |
+| [ ] | PGS001550 (working memory) | varies | R2=0.02 | Tanigawa Y et al., *PLoS Genet* 2022 | EUR |
+| [ ] | PGS001923 (reaction time) | varies | R2=0.01 | Prive F et al., *AJHG* 2022 | EUR |
+| [ ] | PGS001230 (mathematical ability) | varies | R2=0.03 | Tanigawa Y et al., *PLoS Genet* 2022 | EUR |
+| [ ] | PGS001541 (brain volume) | varies | R2=0.05 | Tanigawa Y et al., *PLoS Genet* 2022 | EUR |
+
+### Educational Attainment & Socioeconomic Proxies
+> Years of education completed — correlates ~r=0.70 with intelligence and has the largest GWAS sample sizes (N>3M). Socioeconomic proxies (income, occupation) track real-world cognitive outcomes but are heavily confounded by environment.
+
+| Done | PGS ID | Variants | Performance | Study | Pop |
+|:----:|--------|----------|-------------|-------|-----|
+| [ ] | **PGS003390** (EA4, latest) | varies | r=0.19 (EUR) | Okbay A et al., *Nat Genet* 2022 | EUR |
 | [ ] | PGS002012 (educational attainment) | 50,413 | r=0.175 | Prive F et al., *AJHG* 2022 | EUR |
-| [ ] | PGS003390 (EA4) | varies | r=0.19 | Okbay A et al., *Nat Genet* 2022 | EUR |
+| [ ] | PGS002231 (years of schooling) | varies | r=0.17 | Prive F et al., *AJHG* 2022 | EUR |
+| [ ] | PGS002235 (household income) | varies | R2=0.03 | Prive F et al., *AJHG* 2022 | EUR |
+| [ ] | PGS002232 (occupational status) | varies | R2=0.02 | Prive F et al., *AJHG* 2022 | EUR |
+| [ ] | PGS001712 (highest math class) | varies | R2=0.02 | Tanigawa Y et al., *PLoS Genet* 2022 | EUR |
+| [ ] | PGS000947 (reading/literacy) | varies | R2=0.03 | Tanigawa Y et al., *PLoS Genet* 2022 | EUR |
+| [ ] | PGS003306 (openness to experience) | varies | R2=0.02 | Ding Y et al., *bioRxiv* 2022 | EUR |
 
 ### Other traits (single PGS each)
 

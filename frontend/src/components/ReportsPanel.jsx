@@ -51,6 +51,9 @@ function mdToHtml(md) {
 const CAT_STYLES = {
   pgs: { bg: 'rgba(63,185,80,0.15)', fg: '#3fb950' },
   run: { bg: 'rgba(88,166,255,0.15)', fg: '#58a6ff' },
+  sample: { bg: 'rgba(240,136,62,0.15)', fg: '#f0883e' },
+  section: { bg: 'rgba(56,189,248,0.15)', fg: '#38bdf8' },
+  qc: { bg: 'rgba(188,140,255,0.15)', fg: '#bc8cff' },
   custom: { bg: 'rgba(210,168,255,0.15)', fg: '#d2a8ff' },
   summary: { bg: 'rgba(240,136,62,0.15)', fg: '#f0883e' },
 };
@@ -159,7 +162,7 @@ export default function ReportsPanel() {
             </svg>
           </div>
           <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            {[null, 'pgs', 'run', 'custom'].map(cat => (
+            {[null, 'pgs', 'run', 'section', 'sample', 'qc', 'custom'].map(cat => (
               <button key={cat || 'all'} onClick={() => setFilter(cat)}
                 style={{
                   padding: '3px 8px', borderRadius: 4, fontSize: 10, cursor: 'pointer',

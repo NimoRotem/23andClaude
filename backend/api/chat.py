@@ -2,9 +2,9 @@
 
 import hashlib
 import json
+import shutil
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import time
@@ -21,7 +21,7 @@ from pydantic import BaseModel
 SESSION_NAME = "genomics-claude"
 CLAUDE_CMD = os.getenv("CLAUDE_CMD", shutil.which("claude") or "claude")
 WORK_DIR = os.getenv("GENOMICS_WORK_DIR", str(Path(__file__).parent.parent.parent))
-MESSAGES_FILE = Path(os.getenv("GENOMICS_DATA_DIR", "/data")) / "app" / "chat_messages.json"
+MESSAGES_FILE = Path("/data/app/chat_messages.json")
 
 router = APIRouter()
 

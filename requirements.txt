@@ -35,3 +35,6 @@ zstandard>=0.25.0
 
 # File handling
 aiofiles>=25.0
+
+# AI report generation
+anthropic>=0.45.0
