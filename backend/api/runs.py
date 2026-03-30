@@ -493,12 +493,24 @@ async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
                         for (pgs_id, source_path), group in grouped.items():
                             scores = []
                             for r_data in group:
+                                # Handle both flat (fast_pipeline) and nested (pipeline_e_plus) structures
+                                sample_name = r_data.get("sample_name")
+                                raw_score = r_data.get("raw_score")
+                                z_score = r_data.get("z_score")
+                                percentile = r_data.get("percentile")
+                                # For pipeline_e_plus, scores are nested
+                                if "scores" in r_data and isinstance(r_data["scores"], list) and r_data["scores"]:
+                                    se = r_data["scores"][0]
+                                    sample_name = sample_name or se.get("sample")
+                                    raw_score = raw_score or se.get("raw_score")
+                                    z_score = z_score or se.get("z_score") or se.get("pop_z_score")
+                                    percentile = percentile or se.get("percentile")
                                 scores.append({
-                                    "sample": r_data.get("sample_name"),
-                                    "raw_score": r_data.get("raw_score"),
-                                    "z_score": r_data.get("z_score"),
-                                    "percentile": r_data.get("percentile"),
-                                    "rank": r_data.get("percentile"),
+                                    "sample": sample_name,
+                                    "raw_score": raw_score,
+                                    "z_score": z_score,
+                                    "percentile": percentile,
+                                    "rank": percentile,
                                     "ref_mean": r_data.get("ref_mean"),
                                     "ref_std": r_data.get("ref_std"),
                                     "ref_population": r_data.get("ref_population"),

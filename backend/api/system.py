@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import time
+from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -267,6 +268,150 @@ async def run_setup():
         yield f"data: [SETUP_EXIT_CODE:{proc.returncode}]\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+# ── Settings / Environment Management ──────────────────────────────
+
+_ENV_FILE = Path(__file__).parent.parent.parent / ".env"
+_SAFE_KEYS = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "JWT_SECRET", "REDIS_URL",
+              "GENOMICS_DATA_DIR", "GENOMICS_SCRATCH_DIR", "GENOMICS_PORT",
+              "AI_REPORT_MODEL"}
+
+
+def _load_env_file() -> dict:
+    """Load .env file as dict."""
+    env = {}
+    if _ENV_FILE.exists():
+        for line in _ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+def _save_env_file(env: dict):
+    """Save dict to .env file."""
+    lines = []
+    for k, v in sorted(env.items()):
+        lines.append(f'{k}="{v}"')
+    _ENV_FILE.write_text("\n".join(lines) + "\n")
+
+
+@router.get("/settings")
+async def get_settings():
+    """Return current settings (env vars). Masks sensitive values."""
+    env = _load_env_file()
+    # Also check actual os.environ for keys not in .env
+    for k in _SAFE_KEYS:
+        if k not in env and os.environ.get(k):
+            env[k] = os.environ[k]
+
+    # Mask sensitive values
+    masked = {}
+    for k, v in env.items():
+        if k in _SAFE_KEYS:
+            if "KEY" in k or "SECRET" in k:
+                masked[k] = v[:8] + "..." + v[-4:] if len(v) > 12 else ("***" if v else "")
+            else:
+                masked[k] = v
+    # Add empty entries for unset keys
+    for k in _SAFE_KEYS:
+        if k not in masked:
+            masked[k] = ""
+
+    return {"settings": masked, "ai_enabled": bool(os.environ.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_API_KEY"))}
+
+
+from pydantic import BaseModel as _BM
+
+class _SetEnvReq(_BM):
+    key: str
+    value: str
+
+
+@router.post("/settings")
+async def set_setting(req: _SetEnvReq):
+    """Set an environment variable. Persists to .env file and applies immediately."""
+    if req.key not in _SAFE_KEYS:
+        return JSONResponse({"error": f"Key '{req.key}' is not allowed. Allowed: {sorted(_SAFE_KEYS)}"}, 400)
+
+    # Save to .env file
+    env = _load_env_file()
+    if req.value:
+        env[req.key] = req.value
+    else:
+        env.pop(req.key, None)
+    _save_env_file(env)
+
+    # Apply to current process
+    if req.value:
+        os.environ[req.key] = req.value
+    else:
+        os.environ.pop(req.key, None)
+
+    # Reload AI client if API key changed
+    if req.key == "ANTHROPIC_API_KEY":
+        try:
+            import backend.config as _cfg
+            _cfg.ANTHROPIC_API_KEY = req.value
+            import backend.api.ai_reports as _ai
+            _ai._client = None  # Force re-init
+        except Exception:
+            pass
+
+    return {"ok": True, "key": req.key, "applied": True}
+
+
+@router.post("/claude-login")
+async def claude_login():
+    """Start Claude Code login flow in the tmux session."""
+    import subprocess
+    try:
+        # Check if tmux session exists
+        result = subprocess.run(["tmux", "has-session", "-t", "genomics-claude"],
+                                capture_output=True, timeout=5)
+        if result.returncode != 0:
+            # Create session
+            subprocess.run(["tmux", "new-session", "-d", "-s", "genomics-claude", "-c", str(Path(__file__).parent.parent.parent)],
+                           capture_output=True, timeout=5)
+        # Send claude login command
+        subprocess.run(["tmux", "send-keys", "-t", "genomics-claude", "claude login", "Enter"],
+                        capture_output=True, timeout=5)
+        return {"ok": True, "message": "Claude login started. Check the AI Assistant terminal tab for the login prompt."}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, 500)
+
+
+@router.get("/claude-status")
+async def claude_status():
+    """Check if Claude Code is authenticated."""
+    import subprocess
+    try:
+        result = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5)
+        installed = result.returncode == 0
+        version = result.stdout.strip() if installed else None
+    except Exception:
+        installed = False
+        version = None
+
+    return {
+        "installed": installed,
+        "version": version,
+        "session_active": _check_tmux_session(),
+    }
+
+
+def _check_tmux_session():
+    import subprocess
+    try:
+        result = subprocess.run(["tmux", "has-session", "-t", "genomics-claude"],
+                                capture_output=True, timeout=5)
+        return result.returncode == 0
+    except Exception:
+        return False
 
 # --- Analysis docs endpoint ---
 import pathlib as _pathlib

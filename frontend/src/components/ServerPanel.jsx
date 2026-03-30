@@ -44,6 +44,147 @@ function formatAge(ts) {
   return `${Math.floor(secs / 3600)}h ago`;
 }
 
+function SettingsSection() {
+  const [settings, setSettings] = useState({});
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [claudeStatus, setClaudeStatus] = useState(null);
+  const [editingKey, setEditingKey] = useState(null);
+  const [editValue, setEditValue] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [toast, setToast] = useState('');
+
+  useEffect(() => {
+    fetch('/genomics/api/system/settings').then(r => r.json())
+      .then(d => { setSettings(d.settings || {}); setAiEnabled(d.ai_enabled); })
+      .catch(() => {});
+    fetch('/genomics/api/system/claude-status').then(r => r.json())
+      .then(setClaudeStatus)
+      .catch(() => {});
+  }, []);
+
+  const handleSave = async (key) => {
+    setSaving(true);
+    try {
+      const res = await fetch('/genomics/api/system/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, value: editValue }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setSettings(prev => ({ ...prev, [key]: editValue ? (key.includes('KEY') || key.includes('SECRET') ? editValue.slice(0, 8) + '...' : editValue) : '' }));
+        if (key === 'ANTHROPIC_API_KEY') setAiEnabled(!!editValue);
+        setToast(`${key} saved`);
+        setTimeout(() => setToast(''), 3000);
+      }
+    } catch {}
+    setSaving(false);
+    setEditingKey(null);
+  };
+
+  const handleClaudeLogin = async () => {
+    const res = await fetch('/genomics/api/system/claude-login', { method: 'POST' });
+    const data = await res.json();
+    setToast(data.message || data.error || 'Login started');
+    setTimeout(() => setToast(''), 5000);
+  };
+
+  const keyLabels = {
+    ANTHROPIC_API_KEY: { label: 'Anthropic API Key', desc: 'Enables AI-written report narratives. Get from console.anthropic.com', sensitive: true },
+    OPENAI_API_KEY: { label: 'OpenAI API Key', desc: 'Optional alternative AI provider', sensitive: true },
+    JWT_SECRET: { label: 'JWT Secret', desc: 'Authentication signing key', sensitive: true },
+    AI_REPORT_MODEL: { label: 'AI Report Model', desc: 'Claude model for reports (default: claude-sonnet-4-20250514)' },
+    REDIS_URL: { label: 'Redis URL', desc: 'Cache and pub/sub (default: redis://localhost:6379/0)' },
+    GENOMICS_DATA_DIR: { label: 'Data Directory', desc: 'Persistent storage root (default: /data)' },
+    GENOMICS_SCRATCH_DIR: { label: 'Scratch Directory', desc: 'Fast ephemeral storage (default: /scratch)' },
+    GENOMICS_PORT: { label: 'Server Port', desc: 'Backend port (default: 8600)' },
+  };
+
+  return (
+    <div className="srv-section">
+      <h3 className="srv-section-title">Settings & Configuration</h3>
+
+      {toast && (
+        <div style={{ padding: '6px 12px', background: '#23863622', color: '#3fb950', borderRadius: 6, fontSize: 13, marginBottom: 10 }}>
+          {toast}
+        </div>
+      )}
+
+      {/* Claude Code Status */}
+      <div style={{ marginBottom: 16, padding: 12, background: '#0d1117', borderRadius: 8, border: '1px solid #21262d' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <span style={{ fontWeight: 600, color: '#e6edf3', fontSize: 14 }}>Claude Code</span>
+            {claudeStatus && (
+              <span style={{ marginLeft: 8, fontSize: 12, color: claudeStatus.installed ? '#3fb950' : '#f85149' }}>
+                {claudeStatus.installed ? `v${claudeStatus.version || '?'}` : 'Not installed'}
+              </span>
+            )}
+            {claudeStatus?.session_active && (
+              <span style={{ marginLeft: 8, fontSize: 11, padding: '1px 6px', borderRadius: 8, background: '#23863622', color: '#3fb950' }}>Session active</span>
+            )}
+          </div>
+          <button onClick={handleClaudeLogin} style={{
+            padding: '5px 12px', borderRadius: 6, border: '1px solid #30363d', background: '#21262d',
+            color: '#c9d1d9', fontSize: 12, cursor: 'pointer',
+          }}>
+            {claudeStatus?.session_active ? 'Re-login' : 'Login to Claude'}
+          </button>
+        </div>
+      </div>
+
+      {/* AI Reports Status */}
+      <div style={{ marginBottom: 16, padding: 12, background: '#0d1117', borderRadius: 8, border: `1px solid ${aiEnabled ? '#238636' : '#30363d'}` }}>
+        <span style={{ fontSize: 13, color: aiEnabled ? '#3fb950' : '#d29922' }}>
+          {aiEnabled ? 'AI Reports: Enabled — reports include AI-written narratives' : 'AI Reports: Disabled — set ANTHROPIC_API_KEY to enable'}
+        </span>
+      </div>
+
+      {/* Environment Variables */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {Object.entries(keyLabels).map(([key, info]) => (
+          <div key={key} style={{
+            display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
+            background: '#0d1117', borderRadius: 6, border: '1px solid #21262d',
+          }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: '#e6edf3' }}>{info.label}</div>
+              <div style={{ fontSize: 11, color: '#484f58' }}>{info.desc}</div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+              {editingKey === key ? (
+                <>
+                  <input value={editValue} onChange={e => setEditValue(e.target.value)}
+                    type={info.sensitive ? 'password' : 'text'}
+                    placeholder={info.sensitive ? 'Enter key...' : 'Enter value...'}
+                    style={{ width: 200, padding: '4px 8px', fontSize: 12, background: '#161b22', border: '1px solid #30363d', color: '#c9d1d9', borderRadius: 4 }}
+                    autoFocus
+                    onKeyDown={e => { if (e.key === 'Enter') handleSave(key); if (e.key === 'Escape') setEditingKey(null); }}
+                  />
+                  <button onClick={() => handleSave(key)} disabled={saving}
+                    style={{ padding: '3px 8px', fontSize: 11, borderRadius: 4, border: '1px solid #2ea043', background: '#238636', color: '#fff', cursor: 'pointer' }}>Save</button>
+                  <button onClick={() => setEditingKey(null)}
+                    style={{ padding: '3px 8px', fontSize: 11, borderRadius: 4, border: '1px solid #30363d', background: '#21262d', color: '#8b949e', cursor: 'pointer' }}>Cancel</button>
+                </>
+              ) : (
+                <>
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: settings[key] ? '#8b949e' : '#484f58', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {settings[key] || '(not set)'}
+                  </span>
+                  <button onClick={() => { setEditingKey(key); setEditValue(''); }}
+                    style={{ padding: '3px 8px', fontSize: 11, borderRadius: 4, border: '1px solid #30363d', background: '#21262d', color: '#c9d1d9', cursor: 'pointer' }}>
+                    {settings[key] ? 'Change' : 'Set'}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function ServerPanel() {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -257,6 +398,9 @@ export default function ServerPanel() {
           />
         ))}
       </div>
+
+      {/* Settings & Configuration */}
+      <SettingsSection />
 
       {/* Row 4: Process Table */}
       <div className="srv-procs">

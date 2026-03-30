@@ -259,7 +259,7 @@ setup_reference() {
   fi
 
   # Also check for existing reference at common paths
-  for candidate in "$DATA_DIR/refs/GRCh38.fa" "$DATA_DIR/reference/GRCh38.fasta" "$HOME/reference/GRCh38.fa"; do
+  for candidate in "$DATA_DIR/refs/GRCh38.fa" "$DATA_DIR/refs/GRCh38.fa" "$HOME/reference/GRCh38.fa"; do
     if [ -f "$candidate" ] && [ -f "${candidate}.fai" ]; then
       info "Found existing reference at $candidate"
       if [ "$candidate" != "$ref_fa" ]; then

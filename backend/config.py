@@ -50,6 +50,10 @@ PGS_SEARCH_CACHE_TTL = 60 * 60 * 24  # 24 hours
 # --- PGS Catalog ---
 PGS_CATALOG_API = "https://www.pgscatalog.org/rest"
 
+# --- AI Report Generation ---
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+AI_REPORT_MODEL = os.getenv("AI_REPORT_MODEL", "claude-sonnet-4-20250514")
+
 
 # ── Hardware Detection ─────────────────────────────────────────────
 

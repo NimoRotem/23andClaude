@@ -65,6 +65,12 @@ def _categorize(filename: str) -> tuple[str, str | None, str | None]:
     if re.match(r"^run_", filename):
         run_id = filename.replace("run_", "").replace(".md", "")
         return "run", None, run_id
+    if filename.startswith("sample_") and "_summary" in filename:
+        return "sample", None, None
+    if filename.startswith("section_"):
+        return "section", None, None
+    if re.match(r"^(sex|qc|ancestry|monogenic|pharmacogenomics|variant|trait|cancer|cardiac|neuro)_", filename):
+        return "qc", None, None
     if filename.startswith("summary_") or filename.startswith("overview"):
         return "summary", None, None
     return "custom", None, None
@@ -136,7 +142,8 @@ def generate_run_report(run_id: str) -> str:
             for s in scores:
                 raw = f"{s.get('raw_score', 0):.6f}" if s.get("raw_score") is not None else "--"
                 z = f"{s.get('z_score', 0):.2f}" if s.get("z_score") is not None else "--"
-                pct = f"{s.get('rank', s.get('percentile', 0)):.1f}%" if s.get("rank", s.get("percentile")) is not None else "--"
+                pct_val = s.get('percentile') or s.get('rank')
+                pct = f"{pct_val:.1f}%" if pct_val is not None else "--"
                 mr = f"{r.match_rate * 100:.0f}%" if r.match_rate else "--"
                 sample = s.get("sample", "?")
                 lines.append(f"| {r.pgs_id} | {trait} | {sample} | {raw} | {z} | {pct} | {mr} |")
@@ -173,7 +180,8 @@ def generate_run_report(run_id: str) -> str:
                     raw = f"{s.get('raw_score', 0):.6f}" if s.get("raw_score") is not None else "--"
                     z_val = s.get("z_score")
                     z = f"{z_val:.2f}" if z_val is not None else "--"
-                    pct = f"{s.get('rank', s.get('percentile', 0)):.1f}%" if s.get("rank", s.get("percentile")) is not None else "--"
+                    pct_val = s.get('percentile') or s.get('rank')
+                    pct = f"{pct_val:.1f}%" if pct_val is not None else "--"
 
                     # Risk level
                     risk = "Average"

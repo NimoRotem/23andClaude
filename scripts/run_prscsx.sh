@@ -6,7 +6,7 @@
 # then computes per-sample scores with plink2.
 #
 # Prerequisites:
-#   - PRS-CSx installed at ${SCRIPT_DIR}/../tools/PRScsx/
+#   - PRS-CSx installed at ./tools/PRScsx/
 #   - LD reference panels downloaded
 #   - GWAS sumstats at /data/gwas_sumstats/{trait}/{POP}.txt.gz
 #   - Target samples BIM at /data/ancestry/all_samples.bim
@@ -16,8 +16,9 @@ set -euo pipefail
 TRAIT=${1:?Usage: $0 <trait_name>}
 
 # Paths
-PRSCSX=${SCRIPT_DIR}/../tools/PRScsx/PRScsx.py
-REF_DIR=${SCRIPT_DIR}/../tools/PRScsx
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PRSCSX="${SCRIPT_DIR}/../tools/PRScsx/PRScsx.py"
+REF_DIR="${SCRIPT_DIR}/../tools/PRScsx"
 SUMSTATS_DIR=/data/gwas_sumstats
 OUT_DIR=/data/prs_csx_output/${TRAIT}
 BIM_PREFIX=/data/ancestry/all_samples
@@ -30,7 +31,7 @@ echo "=================================================="
 # Check prerequisites
 if [ ! -f "${PRSCSX}" ]; then
     echo "ERROR: PRS-CSx not found at ${PRSCSX}"
-    echo "Install: cd "$(dirname "$(dirname "$(readlink -f "$0")")")"/tools && git clone https://github.com/getian107/PRScsx.git"
+    echo "Install: cd $(pwd)/tools && git clone https://github.com/getian107/PRScsx.git"
     exit 1
 fi
 

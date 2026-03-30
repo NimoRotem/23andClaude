@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import ConfidenceDots from './ConfidenceDots.jsx';
 
 const BASE = '/genomics/api/checklist';
@@ -40,9 +40,9 @@ function PercentilePills({ scores }) {
   );
 }
 
-function TraitCard({ title, description, table, sectionId, checkedMap, notesMap, scoresMap, cmdResults, samples, onViewReport, onRun, onRunCommand, runningPgs, runningCmds }) {
-  const [open, setOpen] = useState(false);
-  const [selectedSample, setSelectedSample] = useState('');
+function TraitCard({ title, description, table, sectionId, checkedMap, notesMap, scoresMap, cmdResults, samples, globalSample, onViewReport, onRun, onRunCommand, onRunSection, runningPgs, runningCmds }) {
+  const [open, setOpen] = useState(!title);
+  const selectedSample = globalSample || '';
 
   const parseRow = (row) => row.split('|').slice(1, -1).map(c => c.trim());
   const headers = table.length > 0 ? parseRow(table[0]) : [];
@@ -53,7 +53,14 @@ function TraitCard({ title, description, table, sectionId, checkedMap, notesMap,
   const varColIdx = headers.findIndex(h => /variant/i.test(h));
   const doneColIdx = headers.findIndex(h => /done/i.test(h));
   // Find the "name" column: Check, Condition, Trait, Marker, Disease, Gene, Database, Tool, etc.
-  const nameColIdx = headers.findIndex(h => /^(check|condition|trait|marker|disease|analysis|decision|database|tool|pathway|gene)$/i.test(h.replace(/\*\*/g, '').trim()));
+  // Find the "name" column — the first non-Done column with a text label
+  const nameColIdx = (() => {
+    // Try specific known header names first
+    const idx = headers.findIndex(h => /^(check|condition|trait|marker|disease|analysis|decision|database|tool|pathway|gene)$/i.test(h.replace(/\*\*/g, '').trim()));
+    if (idx >= 0) return idx;
+    // Fallback: first column after Done
+    return doneColIdx >= 0 ? doneColIdx + 1 : (headers.length > 1 ? 1 : 0);
+  })();
   const isPgsTable = pgsColIdx >= 0;
 
   let pgsCount = 0;
@@ -61,35 +68,37 @@ function TraitCard({ title, description, table, sectionId, checkedMap, notesMap,
   let checkedCount = 0;
   let hasReport = false;
   const allPgsIds = [];
-  const allCmdRows = []; // {ri, checkName, pgsId?}
+  const allCmdRows = []; // {ri, checkName}
 
-  for (let ri = 0; ri < dataRows.length; ri++) {
-    const row = dataRows[ri];
-    let rowPgsId = null;
-
-    // Extract PGS ID from any cell
+  // Per-row data for rendering
+  const rowData = dataRows.map((row, ri) => {
+    let pgsId = null;
     for (const cell of row) {
       const m = cell.match(/(PGS\d{6,})/);
-      if (m) { rowPgsId = m[1]; break; }
+      if (m) { pgsId = m[1]; break; }
     }
-    if (rowPgsId) { pgsCount++; allPgsIds.push(rowPgsId); }
+    if (pgsId) { pgsCount++; allPgsIds.push(pgsId); }
 
     if (varColIdx >= 0 && row[varColIdx]) {
       const num = parseInt(row[varColIdx].replace(/,/g, ''));
       if (!isNaN(num)) totalVariants += num;
     }
 
-    // Every row is potentially runnable — extract a check name from the name column or first text column
-    const nameIdx = nameColIdx >= 0 ? nameColIdx : (doneColIdx >= 0 ? doneColIdx + 1 : 1);
-    const checkName = (row[nameIdx] || '').replace(/\*\*/g, '').trim();
-    if (checkName && !rowPgsId) {
-      allCmdRows.push({ ri, checkName, pgsId: null });
+    // Extract a human-readable name from the first meaningful text column after Done
+    const nameIdx = nameColIdx >= 0 ? nameColIdx : (doneColIdx >= 0 ? doneColIdx + 1 : (row.length > 1 ? 1 : 0));
+    const checkName = (row[nameIdx] || '').replace(/\*\*/g, '').replace(/\(.*?\)/g, '').trim();
+
+    // Every non-PGS row is a command row
+    if (!pgsId && checkName) {
+      allCmdRows.push({ ri, checkName });
     }
 
     const itemId = sectionId ? `${sectionId}:${ri}` : null;
     if (itemId && checkedMap[itemId]) checkedCount++;
     if (itemId && notesMap[itemId] && notesMap[itemId].includes('Report')) hasReport = true;
-  }
+
+    return { pgsId, checkName, itemId };
+  });
 
   const totalItems = dataRows.length;
   const allDone = totalItems > 0 && checkedCount === totalItems;
@@ -98,21 +107,25 @@ function TraitCard({ title, description, table, sectionId, checkedMap, notesMap,
 
   const varStr = totalVariants >= 1e6 ? `${(totalVariants / 1e6).toFixed(1)}M` : totalVariants >= 1e3 ? `${(totalVariants / 1e3).toFixed(0)}K` : `${totalVariants}`;
 
-  const handleRunAll = (e) => {
+  const [runningSection, setRunningSection] = useState(false);
+
+  const handleRunAll = async (e) => {
     e.stopPropagation();
-    if (!selectedSample) return;
+    if (!selectedSample || runningSection) return;
     const sample = samples.find(s => s.name === selectedSample);
     if (!sample) return;
-    if (allPgsIds.length > 0 && onRun) {
-      onRun(allPgsIds, sample);
-    }
-    if (allCmdRows.length > 0 && onRunCommand) {
-      for (const cr of allCmdRows) {
-        const itemId = sectionId ? `${sectionId}:${cr.ri}` : null;
-        if (itemId && !checkedMap[itemId]) {
-          onRunCommand(itemId, cr.cmd, sample, cr.checkName);
-        }
-      }
+
+    const items = rowData.map(rd => ({
+      item_id: rd.itemId,
+      check_name: rd.checkName,
+      ...(rd.pgsId ? { pgs_id: rd.pgsId } : {}),
+    })).filter(i => i.check_name || i.pgs_id);
+
+    if (items.length === 0) return;
+    if (onRunSection) {
+      setRunningSection(true);
+      await onRunSection(sectionId, title, items, sample);
+      setRunningSection(false);
     }
   };
 
@@ -156,6 +169,23 @@ function TraitCard({ title, description, table, sectionId, checkedMap, notesMap,
           {totalVariants > 0 && (
             <span style={{ fontSize: 11, color: '#484f58' }}>{varStr} variants</span>
           )}
+          {/* Show Section Report button */}
+          {someDone && (() => {
+            // Look for section report first, then fall back to any item report
+            const sectionKey = `${sectionId}:_section_report`;
+            const sectionNote = (notesMap || {})[sectionKey];
+            const reportLink = sectionNote || Object.values(notesMap || {}).find(v =>
+              typeof v === 'string' && v.includes('Report') && v.includes('section_')
+            );
+            if (!reportLink) return null;
+            const match = String(reportLink).match(/\/report\/([^)]+)/);
+            return match ? (
+              <span onClick={(e) => { e.stopPropagation(); onViewReport && onViewReport(match[1]); }}
+                style={{ fontSize: 11, padding: '2px 8px', borderRadius: 8, background: '#23863622', color: '#3fb950', cursor: 'pointer', border: '1px solid #23863644', fontWeight: 600 }}>
+                Section Report
+              </span>
+            ) : null;
+          })()}
         </div>
       </div>
       {!open && description && (
@@ -168,20 +198,15 @@ function TraitCard({ title, description, table, sectionId, checkedMap, notesMap,
           {description && (
             <p style={{ fontSize: 13, color: '#8b949e', margin: '6px 0 8px', lineHeight: 1.5 }}>{description}</p>
           )}
-          {/* Run controls — shown for any table with runnable items */}
-          {(allPgsIds.length > 0 || allCmdRows.length > 0) && samples && samples.length > 0 && (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10, flexWrap: 'wrap' }}>
-              <select value={selectedSample} onChange={e => setSelectedSample(e.target.value)}
-                style={{ padding: '4px 8px', fontSize: 12, background: '#0d1117', border: '1px solid #30363d', color: '#c9d1d9', borderRadius: 6, minWidth: 120 }}>
-                <option value="">Select sample...</option>
-                {samples.map(s => <option key={s.name} value={s.name}>[{s.type.toUpperCase()}] {s.name}</option>)}
-              </select>
-              <button onClick={handleRunAll} disabled={!selectedSample}
+          {/* Run Section button — uses global sample selector */}
+          {(allPgsIds.length > 0 || allCmdRows.length > 0) && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+              <button onClick={handleRunAll} disabled={!selectedSample || runningSection}
                 style={{
-                  padding: '4px 10px', fontSize: 11, borderRadius: 6, border: '1px solid #2ea043', cursor: 'pointer',
-                  background: selectedSample ? '#238636' : '#21262d', color: selectedSample ? '#fff' : '#484f58',
+                  padding: '5px 14px', fontSize: 12, borderRadius: 6, border: '1px solid #2ea043', cursor: 'pointer',
+                  background: selectedSample && !runningSection ? '#238636' : '#21262d', color: selectedSample && !runningSection ? '#fff' : '#484f58',
                 }}>
-                Run All ({allPgsIds.length > 0 ? `${allPgsIds.length} PGS` : ''}{allPgsIds.length > 0 && allCmdRows.length > 0 ? ' + ' : ''}{allCmdRows.length > 0 ? `${allCmdRows.length} checks` : ''})
+                {runningSection ? 'Running...' : selectedSample ? `Run Section for ${selectedSample} (${dataRows.length} items)` : 'Select a sample above to run'}
               </button>
             </div>
           )}
@@ -205,21 +230,15 @@ function TraitCard({ title, description, table, sectionId, checkedMap, notesMap,
                 </thead>
                 <tbody>
                   {dataRows.map((row, ri) => {
-                    const itemId = sectionId ? `${sectionId}:${ri}` : null;
+                    const rd = rowData[ri] || {};
+                    const itemId = rd.itemId;
+                    const rowPgsId = rd.pgsId;
+                    const rowCheckName = rd.checkName;
                     const isChecked = itemId && checkedMap[itemId];
                     const note = itemId && notesMap[itemId];
                     const rowHasReport = note && note.includes('Report');
                     const rowScores = itemId && scoresMap ? scoresMap[itemId] : null;
-                    const doneIdx = headers.findIndex(h => /done/i.test(h));
-                    // Extract PGS ID from any cell in this row
-                    let rowPgsId = null;
-                    for (const cell of row) {
-                      const m = cell.match(/(PGS\d{6,})/);
-                      if (m) { rowPgsId = m[1]; break; }
-                    }
-                    // Extract check name for non-PGS rows
-                    const rowNameIdx = nameColIdx >= 0 ? nameColIdx : (doneIdx >= 0 ? doneIdx + 1 : 1);
-                    const rowCheckName = (row[rowNameIdx] || '').replace(/\*\*/g, '').trim();
+                    const doneIdx = doneColIdx;
 
                     return (
                       <tr key={ri} style={{
@@ -254,27 +273,43 @@ function TraitCard({ title, description, table, sectionId, checkedMap, notesMap,
                             </td>
                           );
                         })}
-                        {/* Inline results */}
+                        {/* Inline results + Report badge */}
                         <td style={{ padding: '4px 6px' }}>
-                          {rowScores && <PercentilePills scores={rowScores} />}
-                          {!rowScores && itemId && cmdResults && cmdResults[itemId] && (
-                            <span style={{ fontSize: 10, color: cmdResults[itemId].exit_code === 0 ? '#3fb950' : cmdResults[itemId].exit_code === -1 ? '#8b949e' : '#f85149', fontFamily: 'monospace' }}
-                              title={cmdResults[itemId].output}>
-                              {cmdResults[itemId].exit_code === -1 ? 'manual' : `${cmdResults[itemId].sample}: ${cmdResults[itemId].output?.split('\n')[0]?.slice(0, 40) || 'done'}`}
-                            </span>
-                          )}
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+                            {rowScores && <PercentilePills scores={rowScores} />}
+                            {!rowScores && itemId && cmdResults && cmdResults[itemId] && (
+                              <span style={{ fontSize: 10, color: cmdResults[itemId].exit_code === 0 ? '#3fb950' : cmdResults[itemId].exit_code === -1 ? '#8b949e' : '#f85149', fontFamily: 'monospace' }}
+                                title={cmdResults[itemId].output}>
+                                {cmdResults[itemId].exit_code === -1 ? 'manual' : `${cmdResults[itemId].output?.split('\n')[0]?.slice(0, 35) || 'done'}`}
+                              </span>
+                            )}
+                            {note && note.includes('Report') && (
+                              <span onClick={(e) => {
+                                e.stopPropagation();
+                                const match = note.match(/\/report\/([^)]+)/);
+                                if (match && onViewReport) onViewReport(match[1]);
+                              }} style={{
+                                fontSize: 9, padding: '1px 5px', borderRadius: 6,
+                                background: 'rgba(63,185,80,0.12)', color: '#3fb950',
+                                border: '1px solid rgba(63,185,80,0.25)', cursor: 'pointer',
+                              }}>Report</span>
+                            )}
+                          </span>
                         </td>
-                        {/* Run button — works for PGS rows AND command rows */}
+                        {/* Run button — every row is runnable */}
                         <td style={{ padding: '4px 6px', textAlign: 'center' }}>
-                          {selectedSample && !(runningPgs[rowPgsId] || (runningCmds && runningCmds[itemId])) && (
+                          {selectedSample && (rowPgsId || rowCheckName) && !(runningPgs[rowPgsId] || (runningCmds && runningCmds[itemId])) && (
                             <span onClick={() => {
                               if (rowPgsId) { handleRunOne(rowPgsId); }
-                              else if (rowCheckName) { handleRunCmd(ri, rowCheckName, rowCheckName); }
+                              else { handleRunCmd(ri, rowCheckName, rowCheckName); }
                             }}
                               style={{ cursor: 'pointer', fontSize: 14, color: rowPgsId ? '#3fb950' : '#58a6ff' }}
-                              title={rowPgsId ? `Run ${rowPgsId}` : `Run: ${rowCheckName}`}>
+                              title={rowPgsId ? `Run ${rowPgsId} for ${selectedSample}` : `Run "${rowCheckName}" for ${selectedSample}`}>
                               &#9654;
                             </span>
+                          )}
+                          {!selectedSample && (rowPgsId || rowCheckName) && (
+                            <span style={{ fontSize: 11, color: '#30363d' }} title="Select a sample first">&#9654;</span>
                           )}
                           {(runningPgs[rowPgsId] || (runningCmds && runningCmds[itemId])) && (
                             <span style={{ fontSize: 11, color: '#d29922' }}>...</span>
@@ -318,7 +353,7 @@ function SectionRunBar({ pgsIds, samples, onRun, runningPgs }) {
   );
 }
 
-function RenderedMarkdown({ markdown, checkedMap = {}, notesMap = {}, scoresMap = {}, cmdResults = {}, samples = [], onViewReport, onRun, onRunCommand, runningPgs = {}, runningCmds = {} }) {
+function RenderedMarkdown({ markdown, checkedMap = {}, notesMap = {}, scoresMap = {}, cmdResults = {}, samples = [], globalSample = '', onViewReport, onRun, onRunCommand, onRunSection, runningPgs = {}, runningCmds = {} }) {
   const lines = markdown.split('\n');
   const elements = [];
   let currentSectionId = null;
@@ -406,7 +441,7 @@ function RenderedMarkdown({ markdown, checkedMap = {}, notesMap = {}, scoresMap 
           <TraitCard key={h3Idx} title={title} description={description}
             table={tableLines} sectionId={currentSectionId}
             checkedMap={checkedMap} notesMap={notesMap} scoresMap={scoresMap} cmdResults={cmdResults}
-            samples={samples} onViewReport={onViewReport} onRun={onRun} onRunCommand={onRunCommand}
+            samples={samples} globalSample={globalSample} onViewReport={onViewReport} onRun={onRun} onRunCommand={onRunCommand} onRunSection={onRunSection}
             runningPgs={runningPgs} runningCmds={runningCmds} />
         );
       } else {
@@ -440,7 +475,7 @@ function RenderedMarkdown({ markdown, checkedMap = {}, notesMap = {}, scoresMap 
       continue;
     }
 
-    // Table
+    // Table — if it has a Done column, render as a TraitCard for full run support
     if (line.startsWith('|')) {
       const tableLines = [];
       const tableStartIdx = i;
@@ -448,13 +483,30 @@ function RenderedMarkdown({ markdown, checkedMap = {}, notesMap = {}, scoresMap 
         tableLines.push(lines[i]);
         i++;
       }
-      // Reset row index for each new table
       tableRowIdx = -1;
       if (tableLines.length >= 2) {
         const parseRow = (row) => row.split('|').slice(1, -1).map(c => c.trim());
-        const headers = parseRow(tableLines[0]);
+        const testHeaders = parseRow(tableLines[0]);
+        const hasDone = testHeaders.some(h => /done/i.test(h));
+
+        // If table has a Done column, render as TraitCard (with run controls)
+        if (hasDone) {
+          // Use the last description text we collected (paragraph before the table)
+          const lastDesc = '';
+          elements.push(
+            <TraitCard key={`tbl-${tableStartIdx}`} title="" description={lastDesc}
+              table={tableLines} sectionId={currentSectionId}
+              checkedMap={checkedMap} notesMap={notesMap} scoresMap={scoresMap} cmdResults={cmdResults}
+              samples={samples} globalSample={globalSample} onViewReport={onViewReport} onRun={onRun} onRunCommand={onRunCommand} onRunSection={onRunSection}
+              runningPgs={runningPgs} runningCmds={runningCmds} />
+          );
+          continue;
+        }
+
+        // Non-Done tables: render as plain tables (databases, tools, etc.)
+        const headers = testHeaders;
         const dataRows = tableLines.slice(2).map(parseRow);
-        const doneColIdx = headers.findIndex(h => h.toLowerCase() === 'done');
+        const doneColIdx = -1;
         const savedSectionId = currentSectionId;
 
         elements.push(
@@ -466,7 +518,6 @@ function RenderedMarkdown({ markdown, checkedMap = {}, notesMap = {}, scoresMap 
                     <th key={hi} style={{
                       padding: '7px 10px', textAlign: 'left', color: '#8b949e', fontWeight: 600,
                       borderBottom: '2px solid #21262d', whiteSpace: 'nowrap', fontSize: 12,
-                      ...(hi === doneColIdx ? { width: 40, textAlign: 'center' } : {}),
                     }}>
                       <span dangerouslySetInnerHTML={{ __html: renderInline(h) }} />
                     </th>
@@ -593,6 +644,8 @@ export default function ChecklistPanel() {
   const [saving, setSaving] = useState(false);
   const [viewingReport, setViewingReport] = useState(null);
   const [samples, setSamples] = useState([]);
+  const [selectedSample, setSelectedSample] = useState('');
+  const [samplesWithData, setSamplesWithData] = useState([]);
   const [runningPgs, setRunningPgs] = useState({});
   const [runningCmds, setRunningCmds] = useState({});
   const [cmdResults, setCmdResults] = useState({});
@@ -611,19 +664,21 @@ export default function ChecklistPanel() {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(BASE);
+      const url = selectedSample ? `${BASE}?sample=${encodeURIComponent(selectedSample)}` : BASE;
+      const res = await fetch(url);
       const data = await res.json();
       if (data.markdown) {
         setMarkdown(data.markdown);
         setEditMd(data.markdown);
       }
-      if (data.checked) setCheckedMap(data.checked);
-      if (data.notes) setNotesMap(data.notes);
-      if (data.scores) setScoresMap(data.scores);
-      if (data.command_results) setCmdResults(data.command_results);
+      setCheckedMap(data.checked || {});
+      setNotesMap(data.notes || {});
+      setScoresMap(data.scores || {});
+      setCmdResults(data.command_results || {});
+      if (data.available_samples) setSamplesWithData(data.available_samples);
     } catch {}
     setLoading(false);
-  }, []);
+  }, [selectedSample]);
 
   useEffect(() => {
     load();
@@ -706,6 +761,13 @@ export default function ChecklistPanel() {
     }
   };
 
+  // Debounced reload — only reload once after all concurrent commands finish
+  const reloadTimerRef = useRef(null);
+  const scheduleReload = useCallback(() => {
+    if (reloadTimerRef.current) clearTimeout(reloadTimerRef.current);
+    reloadTimerRef.current = setTimeout(() => { load(); }, 1000);
+  }, [load]);
+
   const handleRunCommand = async (itemId, cmd, sample, checkName) => {
     setRunningCmds(prev => ({ ...prev, [itemId]: true }));
     try {
@@ -721,14 +783,67 @@ export default function ChecklistPanel() {
         }),
       });
       const data = await res.json();
+      // Update local state immediately with this result
       if (data.ok) {
-        // Reload to get updated state
-        await load();
+        if (data.exit_code === 0) {
+          setCheckedMap(prev => ({ ...prev, [itemId]: true }));
+        }
+        setCmdResults(prev => ({
+          ...prev,
+          [itemId]: { sample: sample.name, check: checkName, output: data.output || '', exit_code: data.exit_code }
+        }));
+        // If a report was generated, add it to notes for the Report badge
+        if (data.report) {
+          setNotesMap(prev => ({
+            ...prev,
+            [itemId]: `[Report](/genomics/api/checklist/report/${data.report}) | ${sample.name}: ${(data.output || '').split('\n')[0]?.slice(0, 50)}`,
+          }));
+        }
       }
+      scheduleReload();
     } catch (err) {
       console.error('Command error:', err);
     } finally {
       setRunningCmds(prev => { const next = { ...prev }; delete next[itemId]; return next; });
+    }
+  };
+
+  const handleRunSection = async (sectionId, sectionTitle, items, sample) => {
+    try {
+      const res = await fetch(`${BASE}/run-section`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          section_id: sectionId,
+          section_title: sectionTitle,
+          items,
+          sample_name: sample.name,
+          sample_path: sample.path,
+          sample_type: sample.type,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        // Update local state with all results at once
+        const newChecked = {};
+        const newCmd = {};
+        const newNotes = {};
+        for (const r of (data.results || [])) {
+          if (r.item_id && r.exit_code === 0) newChecked[r.item_id] = true;
+          if (r.item_id) newCmd[r.item_id] = { sample: sample.name, check: r.check, output: r.output || '', exit_code: r.exit_code };
+        }
+        setCheckedMap(prev => ({ ...prev, ...newChecked }));
+        setCmdResults(prev => ({ ...prev, ...newCmd }));
+        // Store section report link using a special key so the header badge finds it
+        if (data.report) {
+          newNotes[`${sectionId}:_section_report`] = `[Report](/genomics/api/checklist/report/${data.report})`;
+          // Also store in state for the notes map
+          setNotesMap(prev => ({ ...prev, ...newNotes }));
+        }
+      }
+      await load(); // Full reload to get synced state
+    } catch (err) {
+      console.error('Section run error:', err);
     }
   };
 
@@ -786,27 +901,53 @@ export default function ChecklistPanel() {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        {checkedCount > 0 && (
-          <span style={{ fontSize: 13, color: '#3fb950' }}>
-            {checkedCount} analysis{checkedCount !== 1 ? 'es' : ''} completed
+      {/* Global sample selector */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', marginBottom: 12,
+        background: '#161b22', border: '1px solid #30363d', borderRadius: 8,
+      }}>
+        <span style={{ fontSize: 14, fontWeight: 600, color: '#e6edf3', whiteSpace: 'nowrap' }}>Sample:</span>
+        <select value={selectedSample} onChange={e => setSelectedSample(e.target.value)}
+          style={{
+            flex: 1, maxWidth: 300, padding: '8px 12px', fontSize: 14, fontWeight: 600,
+            background: '#0d1117', border: '1px solid #58a6ff', color: '#e6edf3',
+            borderRadius: 6, cursor: 'pointer',
+          }}>
+          <option value="">Select a sample...</option>
+          {samples.map((s, i) => (
+            <option key={`${s.name}-${s.type}-${i}`} value={s.name}>
+              {s.name} [{s.type.toUpperCase()}] — {s.path.split('/').pop()}{samplesWithData.includes(s.name) ? ' (has results)' : ''}
+            </option>
+          ))}
+        </select>
+        {selectedSample && (
+          <span style={{ fontSize: 13, color: '#8b949e' }}>
+            Showing results for <strong style={{ color: '#58a6ff' }}>{selectedSample}</strong> only
           </span>
         )}
-        <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
+        {checkedCount > 0 && (
+          <span style={{ fontSize: 12, color: '#3fb950', marginLeft: 'auto' }}>
+            {checkedCount} completed
+          </span>
+        )}
+        <div style={{ display: 'flex', gap: 6, marginLeft: checkedCount ? 0 : 'auto' }}>
           <button onClick={load}
-            style={{ padding: '5px 14px', borderRadius: 6, border: '1px solid #30363d', background: '#21262d', color: '#c9d1d9', cursor: 'pointer', fontSize: 12 }}>
+            style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid #30363d', background: '#21262d', color: '#c9d1d9', cursor: 'pointer', fontSize: 11 }}>
             Refresh
           </button>
           <button onClick={() => setEditing(true)}
-            style={{ padding: '5px 14px', borderRadius: 6, border: '1px solid #30363d', background: '#21262d', color: '#c9d1d9', cursor: 'pointer', fontSize: 12 }}>
+            style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid #30363d', background: '#21262d', color: '#c9d1d9', cursor: 'pointer', fontSize: 11 }}>
             Edit
           </button>
         </div>
       </div>
+
+      <div style={{ display: 'none' /* old header removed */ }}>
+      </div>
       <RenderedMarkdown markdown={markdown} checkedMap={checkedMap} notesMap={notesMap}
-        scoresMap={scoresMap} cmdResults={cmdResults} samples={samples}
+        scoresMap={scoresMap} cmdResults={cmdResults} samples={samples} globalSample={selectedSample}
         onViewReport={(filename) => setViewingReport(filename)}
-        onRun={handleRun} onRunCommand={handleRunCommand}
+        onRun={handleRun} onRunCommand={handleRunCommand} onRunSection={handleRunSection}
         runningPgs={runningPgs} runningCmds={runningCmds} />
       {viewingReport && (
         <ReportViewer filename={viewingReport} onClose={() => setViewingReport(null)} />
@@ -814,3 +955,4 @@ export default function ChecklistPanel() {
     </div>
   );
 }
+// rebuilt 1774833695

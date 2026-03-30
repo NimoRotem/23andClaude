@@ -42,7 +42,8 @@ def gvcf_to_pgen(gvcf_path: str, output_prefix: str, ref_fasta: str = None) -> d
     # Index the normalized VCF
     subprocess.run([BCFTOOLS, "index", "-t", normalized_vcf], check=True)
 
-    # Step 2: Convert to plink2 format
+    # Step 2: Convert to plink2 format (use all available threads)
+    from ..config import CPU_COUNT
     plink_cmd = [
         PLINK2,
         "--vcf", normalized_vcf,
@@ -53,6 +54,7 @@ def gvcf_to_pgen(gvcf_path: str, output_prefix: str, ref_fasta: str = None) -> d
         "--autosome",
         "--set-all-var-ids", "chr@:#",
         "--rm-dup", "force-first",
+        "--threads", str(min(CPU_COUNT, 16)),
     ]
     logger.info(f"Converting to pgen: {' '.join(plink_cmd)}")
     subprocess.run(plink_cmd, check=True, capture_output=True, text=True)

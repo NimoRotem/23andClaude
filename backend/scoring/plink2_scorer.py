@@ -135,6 +135,10 @@ def score_sample_plink2(
     if vzs_flag:
         pfile_args.append(vzs_flag)
 
+    # Use multiple threads for plink2 scoring
+    from backend.config import CPU_COUNT
+    threads = min(CPU_COUNT, 16)  # Cap at 16 to leave headroom
+
     cmd = [
         PLINK2,
         "--pfile", *pfile_args,
@@ -146,6 +150,7 @@ def score_sample_plink2(
         "cols=+scoresums",
         "no-mean-imputation",
         "list-variants",
+        "--threads", str(threads),
         "--allow-extra-chr",
         "--out", output_prefix,
     ]

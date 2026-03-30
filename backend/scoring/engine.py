@@ -1798,6 +1798,18 @@ async def run_scoring_job(run_id: str) -> None:
             run_id, duration_sec, len(all_results), len(samples),
         )
 
+        # Generate report in shared reports directory and sync checklist
+        try:
+            from backend.api.reports import generate_run_report
+            generate_run_report(run_id)
+        except Exception as e:
+            logger.warning("Failed to generate run report for %s: %s", run_id, e)
+        try:
+            from backend.api.checklist import sync_checklist_from_db
+            sync_checklist_from_db()
+        except Exception as e:
+            logger.warning("Failed to sync checklist for %s: %s", run_id, e)
+
     except Exception as exc:
         duration_sec = round(time.monotonic() - t0, 2)
         error_msg = f"{type(exc).__name__}: {exc}"

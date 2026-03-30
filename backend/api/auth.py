@@ -1,7 +1,7 @@
 """Authentication API — login, register, refresh, and user profile."""
 
-import os
 from datetime import datetime, timezone
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, status
 import bcrypt
