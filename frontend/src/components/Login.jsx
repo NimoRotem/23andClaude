@@ -123,7 +123,7 @@ export default function Login({ onLogin }) {
       <form style={S.card} onSubmit={handleSubmit}>
         <div style={S.logo}>
           <div style={S.logoIcon}>&#x1F9EC;</div>
-          <h1 style={S.title}>Genomics Dashboard</h1>
+          <h1 style={S.title}>23andClaude</h1>
           <div style={S.subtitle}>Sign in to continue</div>
         </div>
 

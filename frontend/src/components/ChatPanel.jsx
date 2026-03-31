@@ -30,7 +30,7 @@ function formatTime(ts) {
 function WelcomeMessage() {
   return (
     <div className="chat-welcome">
-      <h3>Welcome to the Genomics AI Assistant</h3>
+      <h3>Welcome to the 23andClaude AI Assistant</h3>
       <p>I can help you with:</p>
       <ul>
         <li>Running PGS scoring on your BAM/VCF files</li>

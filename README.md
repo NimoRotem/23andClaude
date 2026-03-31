@@ -1,4 +1,4 @@
-# genomeClaw
+# 23andClaude
 
 A full-stack web application for whole-genome sequencing (WGS) analysis, variant calling, and polygenic score (PGS) computation. Built for personal and family genomics studies on GRCh38 data.
 
@@ -46,8 +46,8 @@ A full-stack web application for whole-genome sequencing (WGS) analysis, variant
 ### 1. Clone and run auto-setup
 
 ```bash
-git clone https://github.com/NimoRotem/genomeClaw.git
-cd genomeClaw
+git clone https://github.com/NimoRotem/23andClaude.git
+cd 23andClaude
 
 # Auto-setup: detects hardware, installs conda env, downloads reference data
 # Creates /data and /scratch directories, builds frontend
