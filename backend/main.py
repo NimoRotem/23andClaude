@@ -1,5 +1,5 @@
 from pathlib import Path
-"""Genomics App — main FastAPI application."""
+"""23andClaude — main FastAPI application."""
 
 from contextlib import asynccontextmanager
 
@@ -56,8 +56,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Genomics App",
-    description="Multi-user genomics scoring platform",
+    title="23andClaude",
+    description="Personal genomics scoring platform",
     version="1.0.0",
     lifespan=lifespan,
     redirect_slashes=False,
