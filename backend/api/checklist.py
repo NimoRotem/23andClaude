@@ -359,7 +359,7 @@ def sync_checklist_from_db():
 
                     # Update note with report link
                     report_name = os.path.basename(report_path)
-                    note = f"[Report](/genomics/api/checklist/report/{report_name}) ({current_count} result{'s' if current_count != 1 else ''})"
+                    note = f"[Report](/api/checklist/report/{report_name}) ({current_count} result{'s' if current_count != 1 else ''})"
                     state.setdefault("notes", {})[item_id] = note
                     changed = True
                 except Exception:
@@ -644,7 +644,7 @@ COMMAND_REGISTRY = {
 
     # --- Ancestry & Population Assignment ---
     # Ancestry script auto-detects input type: VCF/gVCF (fast) or BAM/CRAM (mpileup at ref sites)
-    "PCA projection onto 1000G": "cd {os.getenv("GENOMICS_WORK_DIR", ".")} && python scripts/run_ancestry.py --sample-name {sample} --vcf {vcf} --bam {bam} --threads 16",
+    "PCA projection onto 1000G": 'cd ' + os.getenv("GENOMICS_WORK_DIR", ".") + ' && python scripts/run_ancestry.py --sample-name {sample} --vcf {vcf} --bam {bam} --threads 16',
     "Runs of homozygosity": "plink2 --pfile /data/pgen_cache/{sample}/{sample} vzs --het --autosome --out /tmp/het_{sample} --threads 8 2>/dev/null && cat /tmp/het_{sample}.het || echo 'Heterozygosity analysis complete'",
     "ROH": "plink2 --pfile /data/pgen_cache/{sample}/{sample} vzs --het --autosome --out /tmp/het_{sample} --threads 8 2>/dev/null && cat /tmp/het_{sample}.het",
     "Y-DNA haplogroup": "bcftools view -r chrY {vcf} 2>/dev/null | bcftools view -v snps -H 2>/dev/null | head -20 | awk '{{print $1\":\"$2, $4\">\"$5}}' | head -10; echo '---'; samtools idxstats {bam} 2>/dev/null | awk '$1==\"chrY\"||$1==\"Y\"{{print \"Y reads: \"$3}}'",
@@ -654,12 +654,12 @@ COMMAND_REGISTRY = {
     "IBD with other samples": None,
     "IBD segments": None,
     "HLA typing": None,
-    "ADMIXTURE (K=5)": "cd {os.getenv("GENOMICS_WORK_DIR", ".")} && python scripts/run_ancestry.py --sample-name {sample} --vcf {vcf} --bam {bam} --threads 16",
-    "ADMIXTURE (K=7 to K=12)": "cd {os.getenv("GENOMICS_WORK_DIR", ".")} && python scripts/run_ancestry.py --sample-name {sample} --vcf {vcf} --bam {bam} --threads 16",
+    "ADMIXTURE (K=5)": 'cd ' + os.getenv("GENOMICS_WORK_DIR", ".") + ' && python scripts/run_ancestry.py --sample-name {sample} --vcf {vcf} --bam {bam} --threads 16',
+    "ADMIXTURE (K=7 to K=12)": 'cd ' + os.getenv("GENOMICS_WORK_DIR", ".") + ' && python scripts/run_ancestry.py --sample-name {sample} --vcf {vcf} --bam {bam} --threads 16',
     "ADMIXTURE": None,
     "Deep ancestry": None,
     "Admixture": None,
-    "Ancestry PCA": "cd {os.getenv("GENOMICS_WORK_DIR", ".")} && python scripts/run_ancestry.py --sample-name {sample} --vcf {vcf} --bam {bam} --threads 16",
+    "Ancestry PCA": 'cd ' + os.getenv("GENOMICS_WORK_DIR", ".") + ' && python scripts/run_ancestry.py --sample-name {sample} --vcf {vcf} --bam {bam} --threads 16',
 
     # --- Single Variant checks ---
     "APOE e4 (Alzheimer's)": "bcftools query -f '[%SAMPLE %GT]\\n' -r chr19:44908684 {vcf} 2>/dev/null && bcftools query -f '[%SAMPLE %GT]\\n' -r chr19:44908822 {vcf} 2>/dev/null || echo 'Check rs429358 + rs7412 manually'",
@@ -1345,7 +1345,7 @@ async def run_command_from_checklist(req: RunCommandRequest):
         # Update notes with report link
         if report_filename:
             summary = result_text.split("\n")[0][:60] if result_text else "done"
-            state.setdefault("notes", {})[req.item_id] = f"[Report](/genomics/api/checklist/report/{report_filename}) | {req.sample_name}: {summary}"
+            state.setdefault("notes", {})[req.item_id] = f"[Report](/api/checklist/report/{report_filename}) | {req.sample_name}: {summary}"
         else:
             summary = result_text.split("\n")[0][:100] if result_text else "completed"
             existing_note = state.get("notes", {}).get(req.item_id, "")
@@ -1648,7 +1648,7 @@ async def run_section(req: RunSectionRequest):
                     command=cmd, output=output, exit_code=exit_code, category=cat,
                 )
                 if report_fn:
-                    state.setdefault("notes", {})[item_id] = f"[Report](/genomics/api/checklist/report/{report_fn}) | {req.sample_name}: {(output or 'done')[:50]}"
+                    state.setdefault("notes", {})[item_id] = f"[Report](/api/checklist/report/{report_fn}) | {req.sample_name}: {(output or 'done')[:50]}"
             except:
                 pass
 
@@ -1703,7 +1703,7 @@ async def run_section(req: RunSectionRequest):
         # Save section report link in state so the UI can find it
         if report_filename:
             state = _load_state()
-            state.setdefault("notes", {})[f"{req.section_id}:_section_report"] = f"[Report](/genomics/api/checklist/report/{report_filename})"
+            state.setdefault("notes", {})[f"{req.section_id}:_section_report"] = f"[Report](/api/checklist/report/{report_filename})"
             _save_state(state)
     except Exception:
         pass

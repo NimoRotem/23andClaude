@@ -6,6 +6,8 @@ import ChatPanel from './components/ChatPanel.jsx';
 import ServerPanel from './components/ServerPanel.jsx';
 import ChecklistPanel from './components/ChecklistPanel.jsx';
 import ReportsPanel from './components/ReportsPanel.jsx';
+import StatusBar from './components/StatusBar.jsx';
+import useSystemStats from './hooks/useSystemStats.js';
 import './App.css';
 
 import Login from './components/Login';
@@ -37,7 +39,7 @@ function App() {
   React.useEffect(() => {
     const token = localStorage.getItem('auth_token');
     if (!token) { setAuthChecked(true); return; }
-    const base = '/genomics/';
+    const base = '/';
     fetch(base + 'api/auth/me', { headers: { Authorization: 'Bearer ' + token } })
       .then(r => { if (!r.ok) throw new Error(); return r.json(); })
       .then(data => { setUser({ token, ...data }); setAuthChecked(true); })
@@ -55,6 +57,7 @@ function App() {
 
   const { activeTab } = useAppState();
   const dispatch = useAppDispatch();
+  const { stats: sysStats, loading: sysLoading, error: sysError } = useSystemStats(5000);
 
   const panels = [
     <ChatPanel key="chat" />,
@@ -62,7 +65,7 @@ function App() {
     <ChecklistPanel key="checklist" />,
     <PGSRunsPanel key="pgs-runs" />,
     <ReportsPanel key="reports" />,
-    <ServerPanel key="server" />,
+    <ServerPanel key="server" stats={sysStats} loading={sysLoading} error={sysError} />,
   ];
 
   return (
@@ -73,7 +76,7 @@ function App() {
             <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/>
             <path d="M8 12s1-4 4-4 4 4 4 4-1 4-4 4-4-4-4-4z"/>
           </svg>
-          <span className="app-title">Genomics Dashboard</span>
+          <span className="app-title">23andClaude</span>
         </div>
         <nav className="tab-nav">
           {TABS.map((tab, i) => (
@@ -94,6 +97,7 @@ function App() {
           marginLeft: 'auto', marginRight: 12,
         }}>Logout</button>
 </header>
+      <StatusBar stats={sysStats} loading={sysLoading} />
       <main className="app-main">
         {panels[activeTab]}
       </main>

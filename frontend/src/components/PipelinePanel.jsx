@@ -270,7 +270,7 @@ export default function PipelinePanel() {
     setSyncing(true);
     setSyncMsg('');
     try {
-      const res = await fetch('/genomics/api/vcfs/sync-nimog', { method: 'POST' });
+      const res = await fetch('/api/vcfs/sync-nimog', { method: 'POST' });
       const data = await res.json();
       setSyncMsg(data.synced ? `Synced ${data.synced} VCF(s)` : 'No new VCFs to sync');
     } catch {

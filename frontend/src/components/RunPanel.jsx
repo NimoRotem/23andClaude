@@ -34,11 +34,11 @@ export default function RunPanel() {
 
   // Load VCFs and runs
   useEffect(() => {
-    fetch('/genomics/api/vcfs/').then(r => r.json()).then(data => {
+    fetch('/api/vcfs/').then(r => r.json()).then(data => {
       setVcfs(Array.isArray(data) ? data : []);
     }).catch(() => {});
 
-    fetch('/genomics/api/runs/').then(r => r.json()).then(data => {
+    fetch('/api/runs/').then(r => r.json()).then(data => {
       setRuns(Array.isArray(data) ? data : (data?.runs || []));
     }).catch(() => {});
   }, []);
@@ -81,7 +81,7 @@ export default function RunPanel() {
       () => {
         // WS closed — poll the run status once to get final state
         if (timerRef.current) clearInterval(timerRef.current);
-        fetch(`/genomics/api/runs/${runId}`).then(r => r.json()).then(run => {
+        fetch(`/api/runs/${runId}`).then(r => r.json()).then(run => {
           setProgress(prev => ({
             ...prev,
             status: run.status,
@@ -98,7 +98,7 @@ export default function RunPanel() {
   }, []);
 
   function refreshRuns() {
-    fetch('/genomics/api/runs/').then(r => r.json()).then(data => {
+    fetch('/api/runs/').then(r => r.json()).then(data => {
       setRuns(Array.isArray(data) ? data : (data?.runs || []));
     }).catch(() => {});
   }

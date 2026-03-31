@@ -59,7 +59,7 @@ function VariantDetailLog({ runId, pgsId, sourceType, sourcePath }) {
     if (data) { setOpen(o => !o); return; }
     setLoading(true);
     setError(null);
-    fetch(`/genomics/api/runs/${runId}/results/detail/${pgsId}`)
+    fetch(`/api/runs/${runId}/results/detail/${pgsId}`)
       .then(r => { if (r.status === 404) throw new Error('not_found'); if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(d => { setData(d); setOpen(true); })
       .catch(e => setError(e.message === 'not_found' ? 'No variant detail available.' : e.message))

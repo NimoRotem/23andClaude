@@ -8,7 +8,7 @@ export default function BAMtoVCFPanel() {
 
   async function loadVcfs() {
     try {
-      const res = await fetch('/genomics/api/vcfs/');
+      const res = await fetch('/api/vcfs/');
       const data = await res.json();
       setVcfs(Array.isArray(data) ? data : []);
     } catch {}
@@ -16,7 +16,7 @@ export default function BAMtoVCFPanel() {
 
   async function syncNimog() {
     try {
-      const res = await fetch('/genomics/api/vcfs/sync-nimog', { method: 'POST' });
+      const res = await fetch('/api/vcfs/sync-nimog', { method: 'POST' });
       const data = await res.json();
       setSynced(data);
       loadVcfs();

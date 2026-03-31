@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-const BASE = '/genomics/api/reports';
+const BASE = '/api/reports';
 
 /* ── Lightweight Markdown → HTML ──────────────────────────────── */
 
@@ -220,7 +220,7 @@ export default function ReportsPanel() {
             }}>
             {regenerating ? 'Regenerating...' : 'Regenerate All Run Reports'}
           </button>
-          <a href="/genomics/reports/" target="_blank" rel="noopener"
+          <a href="/reports/" target="_blank" rel="noopener"
             style={{
               display: 'block', textAlign: 'center', marginTop: 6,
               fontSize: 11, color: '#58a6ff', textDecoration: 'none',

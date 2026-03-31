@@ -1,5 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
-import { systemApi } from '../api.js';
+import { useState, useEffect } from 'react';
 
 function UsageBar({ label, used, total, unit = 'GB', color = '#58a6ff', segments = null }) {
   const pct = total > 0 ? (used / total * 100) : 0;
@@ -54,10 +53,10 @@ function SettingsSection() {
   const [toast, setToast] = useState('');
 
   useEffect(() => {
-    fetch('/genomics/api/system/settings').then(r => r.json())
+    fetch('/api/system/settings').then(r => r.json())
       .then(d => { setSettings(d.settings || {}); setAiEnabled(d.ai_enabled); })
       .catch(() => {});
-    fetch('/genomics/api/system/claude-status').then(r => r.json())
+    fetch('/api/system/claude-status').then(r => r.json())
       .then(setClaudeStatus)
       .catch(() => {});
   }, []);
@@ -65,7 +64,7 @@ function SettingsSection() {
   const handleSave = async (key) => {
     setSaving(true);
     try {
-      const res = await fetch('/genomics/api/system/settings', {
+      const res = await fetch('/api/system/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key, value: editValue }),
@@ -83,7 +82,7 @@ function SettingsSection() {
   };
 
   const handleClaudeLogin = async () => {
-    const res = await fetch('/genomics/api/system/claude-login', { method: 'POST' });
+    const res = await fetch('/api/system/claude-login', { method: 'POST' });
     const data = await res.json();
     setToast(data.message || data.error || 'Login started');
     setTimeout(() => setToast(''), 5000);
@@ -185,34 +184,9 @@ function SettingsSection() {
   );
 }
 
-export default function ServerPanel() {
-  const [stats, setStats] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
-  const [lastUpdate, setLastUpdate] = useState(0);
+export default function ServerPanel({ stats, loading, error }) {
   const [now, setNow] = useState(Date.now());
-
-  const fetchStats = useCallback(async () => {
-    try {
-      const data = await systemApi.stats();
-      setStats(data);
-      setLastUpdate(data.timestamp || Date.now() / 1000);
-      setError(false);
-      setLoading(false);
-    } catch (e) {
-      console.error('Failed to fetch system stats:', e);
-      if (loading) {
-        setError(true);
-        setLoading(false);
-      }
-    }
-  }, [loading]);
-
-  useEffect(() => {
-    fetchStats();
-    const iv = setInterval(fetchStats, 3000);
-    return () => clearInterval(iv);
-  }, [fetchStats]);
+  const lastUpdate = stats?.timestamp || 0;
 
   // Update "last updated" display every second
   useEffect(() => {

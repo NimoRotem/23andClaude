@@ -1,5 +1,5 @@
 // Use relative URLs so nginx proxy handles routing
-const BASE = '/genomics/api';
+const BASE = '/api';
 
 async function request(path, options = {}) {
   const url = `${BASE}${path}`;
@@ -63,7 +63,7 @@ export const runApi = {
 export function connectRunProgress(runId, onMessage, onClose) {
   const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsHost = window.location.host;
-  const ws = new WebSocket(`${wsProto}//${wsHost}/genomics/api/runs/${runId}/progress`);
+  const ws = new WebSocket(`${wsProto}//${wsHost}/api/runs/${runId}/progress`);
   ws.onmessage = (e) => { try { onMessage(JSON.parse(e.data)); } catch { onMessage({ raw: e.data }); } };
   ws.onclose = () => { if (onClose) onClose(); };
   ws.onerror = (err) => console.error('WS error:', err);

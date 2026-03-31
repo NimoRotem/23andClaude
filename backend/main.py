@@ -71,7 +71,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# API routes — mount at both /api and /genomics/api (frontend uses /genomics/api base)
+# API routes at /api (primary)
 _api_routers = [
     (auth_router, "/auth", ["auth"]),
     (vcfs_router, "/vcfs", ["vcfs"]),
@@ -87,7 +87,6 @@ _api_routers = [
 ]
 for _router, _path, _tags in _api_routers:
     app.include_router(_router, prefix=f"/api{_path}", tags=_tags)
-    app.include_router(_router, prefix=f"/genomics/api{_path}", tags=_tags)
 
 
 # Mount nimog BAM-to-VCF converter as sub-app at /nimog
@@ -103,8 +102,8 @@ if _nimog_dir.exists():
     _sys.modules["nimog_app"] = _sys.modules.pop("app", _nimog_mod)
 
 # Serve standalone reports site
-@app.get("/genomics/reports/")
-@app.get("/genomics/reports")
+@app.get("/reports/")
+@app.get("/reports")
 async def serve_reports_site():
     reports_html = Path(__file__).parent / "static" / "reports.html"
     if reports_html.exists():
@@ -115,7 +114,7 @@ async def serve_reports_site():
 # Serve raw markdown docs
 _docs_dir = Path(__file__).parent / "data"
 
-@app.get("/genomics/masterlist.md")
+@app.get("/masterlist.md")
 async def serve_masterlist():
     md_path = _docs_dir / "genomics_analysis_master_list.md"
     if md_path.exists():
@@ -127,19 +126,14 @@ async def serve_masterlist():
 _frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
 if _frontend_dist.exists():
     # Serve static assets (JS, CSS, images)
-    app.mount("/genomics/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="static-assets")
+    app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="static-assets")
 
-    # Serve other static files (favicon, icons)
-    @app.get("/genomics/{filename:path}")
+    # SPA fallback: serve index.html for all non-API routes
+    @app.get("/{filename:path}")
     async def serve_frontend(filename: str):
         filepath = _frontend_dist / filename
         if filepath.exists() and filepath.is_file():
             return FileResponse(str(filepath))
-        # SPA fallback: serve index.html for all non-API routes
-        return FileResponse(str(_frontend_dist / "index.html"))
-
-    @app.get("/genomics")
-    async def serve_root():
         return FileResponse(str(_frontend_dist / "index.html"))
 
 

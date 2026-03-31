@@ -85,7 +85,7 @@ export default function AnalysisMasterList() {
   const contentRef = useRef(null);
 
   useEffect(() => {
-    fetch('/genomics/api/system/docs/genomics_analysis_master_list')
+    fetch('/api/system/docs/genomics_analysis_master_list')
       .then(r => { if (!r.ok) throw new Error('Failed to load'); return r.json(); })
       .then(data => { setMd(data.content); setLoading(false); })
       .catch(e => { setError(e.message); setLoading(false); });

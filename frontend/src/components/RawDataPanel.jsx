@@ -175,7 +175,7 @@ function PipelineSection({ showToast }) {
   const pollRef = useRef(null);
 
   useEffect(() => {
-    fetch('/genomics/api/system/capabilities')
+    fetch('/api/system/capabilities')
       .then(r => r.json())
       .then(data => setGpuAvailable(data.gpu_available))
       .catch(() => {});
@@ -236,7 +236,7 @@ function PipelineSection({ showToast }) {
   const handleSync = async () => {
     setSyncing(true);
     try {
-      const res = await fetch('/genomics/api/vcfs/sync-nimog', { method: 'POST' });
+      const res = await fetch('/api/vcfs/sync-nimog', { method: 'POST' });
       const data = await res.json();
       showToast(data.synced ? `Synced ${data.synced} VCF(s)` : 'No new VCFs to sync');
     } catch { showToast('Sync failed', 'error'); }
@@ -359,7 +359,7 @@ function EditableName({ name, path, onRename }) {
     const trimmed = value.trim();
     if (!trimmed || trimmed === displayName) { setEditing(false); return; }
     try {
-      await fetch('/genomics/api/files/rename', {
+      await fetch('/api/files/rename', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path, new_name: trimmed }),
@@ -836,7 +836,7 @@ function useFileActions(file, showToast, loadFiles) {
     if (!window.confirm(`Delete "${file.sample_name || file.path.split('/').pop()}"?\n\nThis will permanently remove the file from disk. This cannot be undone.`)) return;
     setDeleting(true);
     try {
-      await fetch('/genomics/api/files/delete', {
+      await fetch('/api/files/delete', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: file.path }),
       });
@@ -850,7 +850,7 @@ function useFileActions(file, showToast, loadFiles) {
     const label = target === 'persistent' ? 'persistent disk (/data)' : 'fast SSD (/scratch)';
     setDuplicating(true);
     try {
-      const res = await fetch('/genomics/api/files/duplicate', {
+      const res = await fetch('/api/files/duplicate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: file.path, target }),
       });
@@ -895,7 +895,7 @@ function BamCard({ file, showToast, loadFiles }) {
   async function handleInspect() {
     setInspecting(true);
     try {
-      const res = await fetch('/genomics/api/files/inspect', {
+      const res = await fetch('/api/files/inspect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: file.path }),
@@ -913,7 +913,7 @@ function BamCard({ file, showToast, loadFiles }) {
   async function handleValidate() {
     setValidating(true);
     try {
-      const res = await fetch('/genomics/api/files/validate', {
+      const res = await fetch('/api/files/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: file.path }),
@@ -1024,7 +1024,7 @@ function FastqCard({ file, showToast, loadFiles }) {
   async function handleAlign() {
     setAligning(true);
     try {
-      const res = await fetch('/genomics/api/files/convert/fastq-to-bam', {
+      const res = await fetch('/api/files/convert/fastq-to-bam', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1140,7 +1140,7 @@ function VcfCard({ file, color, typeLabel, showToast, loadFiles }) {
   async function handleInspect() {
     setInspecting(true);
     try {
-      const res = await fetch('/genomics/api/files/inspect', {
+      const res = await fetch('/api/files/inspect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: file.path }),
@@ -1158,7 +1158,7 @@ function VcfCard({ file, color, typeLabel, showToast, loadFiles }) {
   async function handleValidate() {
     setValidating(true);
     try {
-      const res = await fetch('/genomics/api/files/validate', {
+      const res = await fetch('/api/files/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: file.path }),
@@ -1307,7 +1307,7 @@ function UploadSection({ onUploadComplete, showToast }) {
     formData.append('file', file);
 
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/genomics/api/files/upload');
+    xhr.open('POST', '/api/files/upload');
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {
@@ -1347,7 +1347,7 @@ function UploadSection({ onUploadComplete, showToast }) {
     try {
       const formData = new FormData();
       formData.append('url', urlValue.trim());
-      const res = await fetch('/genomics/api/files/upload', {
+      const res = await fetch('/api/files/upload', {
         method: 'POST',
         body: formData,
       });
@@ -1500,7 +1500,7 @@ function ConvertFastqToBamSection({ fastqFiles, showToast }) {
 
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`/genomics/api/files/convert/status/${jid}`);
+        const res = await fetch(`/api/files/convert/status/${jid}`);
         if (!res.ok) return;
         const data = await res.json();
         setJobStatus(data);
@@ -1537,7 +1537,7 @@ function ConvertFastqToBamSection({ fastqFiles, showToast }) {
     setElapsed(0);
 
     try {
-      const res = await fetch('/genomics/api/files/convert/fastq-to-bam', {
+      const res = await fetch('/api/files/convert/fastq-to-bam', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1739,7 +1739,7 @@ export default function RawDataPanel() {
   /* ── data fetching ──────────────────────────────────── */
   const loadFiles = useCallback(async () => {
     try {
-      const res = await fetch('/genomics/api/files/scan');
+      const res = await fetch('/api/files/scan');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       setFiles(Array.isArray(data) ? data : []);
@@ -1753,7 +1753,7 @@ export default function RawDataPanel() {
 
   const loadStorage = useCallback(async () => {
     try {
-      const res = await fetch('/genomics/api/storage/status');
+      const res = await fetch('/api/storage/status');
       if (!res.ok) return;
       const data = await res.json();
       setStorage(data);

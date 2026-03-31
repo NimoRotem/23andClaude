@@ -190,7 +190,7 @@ function VariantDetailLog({ runId, pgsId, sourceType, sourcePath }) {
     if (data) { setOpen(o => !o); return; }
     setLoading(true);
     setError(null);
-    fetch(`/genomics/api/runs/${runId}/results/detail/${pgsId}`)
+    fetch(`/api/runs/${runId}/results/detail/${pgsId}`)
       .then(r => {
         if (r.status === 404) throw new Error('not_found');
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -470,7 +470,7 @@ export default function ResultsPanel() {
               onClick={async () => {
                 if (!window.confirm(`Delete run ${selectedRunId}?\n\nThis will permanently remove all results, detail files, and reports for this run.`)) return;
                 try {
-                  await fetch(`/genomics/api/runs/${selectedRunId}`, { method: 'DELETE' });
+                  await fetch(`/api/runs/${selectedRunId}`, { method: 'DELETE' });
                   setRuns(prev => prev.filter(r => r.id !== selectedRunId));
                   setSelectedRunId('');
                   setRunDetail(null);

@@ -17,7 +17,7 @@ const POP_LABELS = {
   AMR: 'Admixed American',
 };
 const POPS = ['EUR', 'EAS', 'AFR', 'SAS', 'AMR'];
-const BASE = '/genomics/api';
+const BASE = '/api';
 
 /* ── PCA Scatter Plot (SVG) ───────────────────────────────────── */
 

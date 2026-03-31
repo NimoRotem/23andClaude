@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import ConfidenceDots from './ConfidenceDots.jsx';
 
-const BASE = '/genomics/api/checklist';
+const BASE = '/api/checklist';
 
 /* ── Lightweight markdown renderer ─────────────────────────── */
 
@@ -654,7 +654,7 @@ export default function ChecklistPanel() {
 
   useEffect(() => {
     const token = localStorage.getItem('auth_token');
-    fetch('/genomics/api/ancestry/confidence-summary', {
+    fetch('/api/ancestry/confidence-summary', {
       headers: { Authorization: 'Bearer ' + token },
     })
       .then(r => r.ok ? r.json() : {})
@@ -723,7 +723,7 @@ export default function ChecklistPanel() {
 
       const poll = setInterval(async () => {
         try {
-          const statusRes = await fetch(`/genomics/api/runs/${runId}`);
+          const statusRes = await fetch(`/api/runs/${runId}`);
           if (!statusRes.ok) return;
           const run = await statusRes.json();
 
@@ -796,7 +796,7 @@ export default function ChecklistPanel() {
         if (data.report) {
           setNotesMap(prev => ({
             ...prev,
-            [itemId]: `[Report](/genomics/api/checklist/report/${data.report}) | ${sample.name}: ${(data.output || '').split('\n')[0]?.slice(0, 50)}`,
+            [itemId]: `[Report](/api/checklist/report/${data.report}) | ${sample.name}: ${(data.output || '').split('\n')[0]?.slice(0, 50)}`,
           }));
         }
       }
@@ -836,7 +836,7 @@ export default function ChecklistPanel() {
         setCmdResults(prev => ({ ...prev, ...newCmd }));
         // Store section report link using a special key so the header badge finds it
         if (data.report) {
-          newNotes[`${sectionId}:_section_report`] = `[Report](/genomics/api/checklist/report/${data.report})`;
+          newNotes[`${sectionId}:_section_report`] = `[Report](/api/checklist/report/${data.report})`;
           // Also store in state for the notes map
           setNotesMap(prev => ({ ...prev, ...newNotes }));
         }

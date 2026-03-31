@@ -21,7 +21,7 @@ export default function RunProgressStep() {
 
   const pollRunState = useCallback(async (runId) => {
     try {
-      const run = await fetch(`/genomics/api/runs/${runId}`).then(r => r.json());
+      const run = await fetch(`/api/runs/${runId}`).then(r => r.json());
       if (run.started_at && !runStartedAt) {
         dispatch({ type: 'SET_RUN_STARTED_AT', payload: new Date(run.started_at).getTime() });
       }

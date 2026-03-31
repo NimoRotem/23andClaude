@@ -1239,8 +1239,8 @@ select.input {
 .chat-panel {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 64px);
-  max-height: calc(100vh - 64px);
+  height: calc(100vh - 95px);
+  max-height: calc(100vh - 95px);
 }
 
 .chat-header {
@@ -1838,7 +1838,7 @@ select.input {
 .srv-panel {
   padding: 20px 24px;
   overflow-y: auto;
-  max-height: calc(100vh - 64px);
+  max-height: calc(100vh - 95px);
 }
 
 .srv-loading, .srv-error {
@@ -2414,3 +2414,83 @@ select.input {
 .ancestry-dot-moderate { background: #d29922; }
 .ancestry-dot-low { background: #f85149; }
 .ancestry-dot-unknown { background: #484f58; }
+
+/* === Status Bar === */
+.status-bar {
+  position: sticky;
+  top: 56px;
+  z-index: 99;
+  background: #0d1117;
+  border-bottom: 1px solid #21262d;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  font-size: 12px;
+  color: #8b949e;
+  flex-shrink: 0;
+}
+
+.status-bar-inner {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.status-bar-metrics {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.status-bar-chip {
+  white-space: nowrap;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  letter-spacing: -0.3px;
+}
+
+.status-bar-divider {
+  width: 1px;
+  height: 16px;
+  background: #30363d;
+  margin: 0 8px;
+  flex-shrink: 0;
+}
+
+.status-bar-procs {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+}
+
+.status-bar-proc {
+  white-space: nowrap;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  letter-spacing: -0.3px;
+}
+
+.status-bar-proc-count {
+  font-size: 10px;
+  opacity: 0.7;
+  margin-left: 1px;
+}
+
+@media (max-width: 768px) {
+  .status-bar {
+    position: relative;
+    top: auto;
+  }
+  .status-bar-procs {
+    display: none;
+  }
+  .status-bar-divider {
+    display: none;
+  }
+}

@@ -94,7 +94,7 @@ export default function Login({ onLogin }) {
     setLoading(true);
 
     try {
-      const base = import.meta.env.BASE_URL || '/genomics/';
+      const base = import.meta.env.BASE_URL || '/';
       const res = await fetch(`${base}api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

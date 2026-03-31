@@ -8,7 +8,7 @@ import RunPGSApp from './runpgs/RunPGSApp.jsx'
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>
-    <BrowserRouter basename="/genomics">
+    <BrowserRouter>
       <Routes>
         <Route path="/" element={<AppProvider><App /></AppProvider>} />
         <Route path="/runPGS" element={<RunPGSApp />} />

@@ -159,7 +159,7 @@
         <a onclick="filterCategory('pgs')" id="nav-pgs">PGS Reports</a>
         <a onclick="filterCategory('run')" id="nav-run">Run Reports</a>
         <a onclick="filterCategory('custom')" id="nav-custom">Custom</a>
-        <a href="/genomics/" style="margin-left:auto">Dashboard</a>
+        <a href="/" style="margin-left:auto">Dashboard</a>
         <div class="stats" id="stats"></div>
     </div>
 
@@ -187,7 +187,7 @@
     <script>
         marked.setOptions({ gfm: true, breaks: true, tables: true });
 
-        const API = '/genomics/api/reports';
+        const API = '/api/reports';
         let allReports = [];
         let currentFilter = null;
         let currentReport = null;

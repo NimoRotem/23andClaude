@@ -14,7 +14,7 @@ export default function VCFPanel() {
 
   async function loadVcfs() {
     try {
-      const res = await fetch('/genomics/api/vcfs/');
+      const res = await fetch('/api/vcfs/');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       setVcfs(Array.isArray(data) ? data : []);
@@ -32,7 +32,7 @@ export default function VCFPanel() {
     if (!registerPath.trim()) return;
     setSubmitting(true);
     try {
-      const res = await fetch('/genomics/api/vcfs/register', {
+      const res = await fetch('/api/vcfs/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -64,7 +64,7 @@ export default function VCFPanel() {
 
   async function deleteVcf(vcf) {
     if (!window.confirm('Delete ' + vcf.filename + '?')) return;
-    await fetch('/genomics/api/vcfs/' + vcf.id, { method: 'DELETE' });
+    await fetch('/api/vcfs/' + vcf.id, { method: 'DELETE' });
     loadVcfs();
   }
 

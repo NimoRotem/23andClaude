@@ -84,7 +84,7 @@ export default function RunPGSApp() {
   useEffect(() => {
     const token = localStorage.getItem('auth_token');
     if (!token) { setAuthChecked(true); return; }
-    fetch('/genomics/api/auth/me', { headers: { Authorization: 'Bearer ' + token } })
+    fetch('/api/auth/me', { headers: { Authorization: 'Bearer ' + token } })
       .then(r => { if (!r.ok) throw new Error(); return r.json(); })
       .then(data => { setUser({ token, ...data }); setAuthChecked(true); })
       .catch(() => { localStorage.removeItem('auth_token'); setUser(null); setAuthChecked(true); });

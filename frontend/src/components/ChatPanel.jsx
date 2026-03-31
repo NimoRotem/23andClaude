@@ -251,7 +251,7 @@ function SetupScreen({ onComplete }) {
   const outputRef = useRef(null);
 
   useEffect(() => {
-    fetch('/genomics/api/system/setup-status')
+    fetch('/api/system/setup-status')
       .then(r => r.json())
       .then(setSetupStatus)
       .catch(() => {});
@@ -260,7 +260,7 @@ function SetupScreen({ onComplete }) {
   const runSetup = () => {
     setRunning(true);
     setOutput('Starting setup...\n');
-    const es = new EventSource('/genomics/api/system/setup-run');
+    const es = new EventSource('/api/system/setup-run');
     es.onmessage = (e) => {
       const line = e.data;
       if (line.startsWith('[SETUP_EXIT_CODE:')) {
@@ -391,7 +391,7 @@ export default function ChatPanel() {
   const [needsSetup, setNeedsSetup] = useState(false);
 
   useEffect(() => {
-    fetch('/genomics/api/system/setup-status')
+    fetch('/api/system/setup-status')
       .then(r => r.json())
       .then(data => {
         setNeedsSetup(!data.setup_complete);
