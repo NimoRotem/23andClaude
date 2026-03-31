@@ -1,9 +1,13 @@
-import { useState } from 'react';
+import { useAppState, useAppDispatch } from '../context.jsx';
 import ScorePanel from './ScorePanel.jsx';
 import ResultsPanel from './ResultsPanel.jsx';
 
 export default function PGSRunsPanel() {
-  const [view, setView] = useState('score');
+  const { pgsSubView } = useAppState();
+  const dispatch = useAppDispatch();
+  const view = pgsSubView || 'score';
+
+  const setView = (v) => dispatch({ type: 'SET_PGS_VIEW', payload: v });
 
   return (
     <div>

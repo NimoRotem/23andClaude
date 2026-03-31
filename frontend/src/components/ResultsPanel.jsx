@@ -474,7 +474,7 @@ export default function ResultsPanel() {
                   setRuns(prev => prev.filter(r => r.id !== selectedRunId));
                   setSelectedRunId('');
                   setRunDetail(null);
-                  setAllResults([]);
+                  setResultsData(null);
                 } catch {}
               }}
             >

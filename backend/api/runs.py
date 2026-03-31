@@ -424,43 +424,86 @@ async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
         from backend.config import PGEN_CACHE_DIR, PGS_CACHE_DIR
 
         async def _run_fast(rid, sources, pgs_ids, population):
-            """Wrapper to run fast scoring and update DB."""
+            """Wrapper to run fast scoring pipeline and update DB + Redis."""
+            import time as _time
             from backend.database import SessionLocal
+            from backend.config import RUNS_DIR, SCRATCH_RUNS
+
+            redis_conn = None
+            t0 = _time.monotonic()
+            started_at = datetime.now(timezone.utc)
+
+            # ---- Helper: publish progress via single Redis connection ----
+            async def _publish(payload):
+                nonlocal redis_conn
+                try:
+                    if redis_conn is None:
+                        redis_conn = aioredis.from_url(REDIS_URL, decode_responses=True)
+                    await redis_conn.publish(f"run:{rid}:progress", json.dumps(payload))
+                except Exception:
+                    pass
+
+            # ---- Helper: update DB status ----
+            def _db_update(**kwargs):
+                sess = SessionLocal()
+                try:
+                    obj = sess.query(ScoringRun).filter(ScoringRun.id == rid).first()
+                    if obj:
+                        for k, v in kwargs.items():
+                            setattr(obj, k, v)
+                        sess.commit()
+                finally:
+                    sess.close()
+
             try:
+                # Mark run as started
+                _db_update(
+                    status="scoring", started_at=started_at,
+                    progress_pct=2.0, current_step="preparing source files",
+                    results_path_persistent=str(RUNS_DIR / rid),
+                    results_path_fast=str(SCRATCH_RUNS / rid),
+                )
+                await _publish({
+                    "type": "progress", "run_id": rid,
+                    "pct": 2, "step": "preparing source files",
+                    "status": "scoring", "pgs_progress": [],
+                })
+
                 # Prepare source files for fast pipeline
                 fast_sources = []
                 for sf in sources:
+                    samples = sf.get("samples", [])
+                    if samples:
+                        sample_name = samples[0]
+                    else:
+                        sample_name = sf.get("path", "").split("/")[-1].replace(".g.vcf.gz", "").replace(".vcf.gz", "")
                     fast_sources.append({
                         "path": sf["path"],
-                        "sample_name": sf.get("samples", [sf.get("path", "").split("/")[-1].replace(".g.vcf.gz", "")])[0] if sf.get("samples") else sf.get("path", "").split("/")[-1].replace(".g.vcf.gz", ""),
+                        "sample_name": sample_name,
                         "population": population,
                         "type": "gvcf",
                     })
 
-                async def progress_cb(step, total, msg):
-                    db2 = SessionLocal()
-                    try:
-                        run_obj = db2.query(ScoringRun).filter(ScoringRun.id == rid).first()
-                        if run_obj:
-                            run_obj.progress_pct = round(step / total * 100, 1) if total > 0 else 0
-                            run_obj.current_step = msg
-                            run_obj.status = "scoring"
-                            db2.commit()
-                    finally:
-                        db2.close()
-                    # Also publish to Redis
-                    try:
-                        r = aioredis.from_url(REDIS_URL)
-                        await r.publish(f"run:{rid}:progress", json.dumps({
-                            "type": "progress",
-                            "run_id": rid,
-                            "pct": round(step / total * 100, 1) if total > 0 else 0,
-                            "step": msg,
-                            "status": "scoring",
-                        }))
-                        await r.aclose()
-                    except Exception:
-                        pass
+                # Look up traits from PGS cache for enriching results
+                trait_map = {}
+                sess = SessionLocal()
+                try:
+                    for pid in pgs_ids:
+                        entry = sess.query(PGSCacheEntry).filter(PGSCacheEntry.pgs_id == pid).first()
+                        if entry and entry.trait_reported:
+                            trait_map[pid] = entry.trait_reported
+                finally:
+                    sess.close()
+
+                # Progress callback — called per (sample, PGS) completion
+                async def progress_cb(step, total, msg, pgs_progress_list=None):
+                    pct = round(5 + (step / max(total, 1)) * 90, 1)
+                    _db_update(progress_pct=pct, current_step=msg, status="scoring")
+                    await _publish({
+                        "type": "progress", "run_id": rid,
+                        "pct": pct, "step": msg, "status": "scoring",
+                        "pgs_progress": pgs_progress_list or [],
+                    })
 
                 results = await run_fast_scoring(
                     source_files=fast_sources,
@@ -469,129 +512,141 @@ async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
                     progress_callback=progress_cb,
                 )
 
-                # Save results to DB and disk
-                db2 = SessionLocal()
-                try:
-                    run_obj = db2.query(ScoringRun).filter(ScoringRun.id == rid).first()
-                    if run_obj:
-                        # Save results
-                        from backend.config import RUNS_DIR, SCRATCH_RUNS
-                        import os, time
+                # ---- Save results to DB and disk ----
+                await _publish({
+                    "type": "progress", "run_id": rid,
+                    "pct": 96, "step": "saving results", "status": "scoring",
+                })
+
+                for base_dir in [RUNS_DIR, SCRATCH_RUNS]:
+                    results_dir = base_dir / rid
+                    results_dir.mkdir(parents=True, exist_ok=True)
+                    (results_dir / "results.json").write_text(
+                        json.dumps(results, indent=2, default=str)
+                    )
+
+                # Save variant detail JSON files
+                for r_data in results:
+                    vd = r_data.pop("variant_detail", None)
+                    if vd and vd.get("variants"):
+                        pgs_safe = r_data.get("pgs_id", "?").replace("/", "_")
+                        sf_base = os.path.basename(r_data.get("source_path", "")).split(".")[0] or "unknown"
+                        detail_name = f"{pgs_safe}_{sf_base}_gvcf_detail.json"
                         for base_dir in [RUNS_DIR, SCRATCH_RUNS]:
-                            results_dir = os.path.join(str(base_dir), rid)
-                            os.makedirs(results_dir, exist_ok=True)
-                            with open(os.path.join(results_dir, "results.json"), "w") as rf:
-                                json.dump(results, rf, indent=2, default=str)
+                            try:
+                                (base_dir / rid / detail_name).write_text(
+                                    json.dumps(vd, default=str)
+                                )
+                            except OSError:
+                                pass
 
-                        # Save results to DB — group by (pgs_id, source_path)
-                        from collections import defaultdict
-                        grouped = defaultdict(list)
-                        for r_data in results:
-                            key = (r_data.get("pgs_id"), r_data.get("source_path"))
-                            grouped[key].append(r_data)
+                # Group results by (pgs_id, source_path) and save RunResult records
+                grouped = defaultdict(list)
+                for r_data in results:
+                    key = (r_data.get("pgs_id"), r_data.get("source_path"))
+                    grouped[key].append(r_data)
 
-                        for (pgs_id, source_path), group in grouped.items():
-                            scores = []
-                            for r_data in group:
-                                # Handle both flat (fast_pipeline) and nested (pipeline_e_plus) structures
-                                sample_name = r_data.get("sample_name")
-                                raw_score = r_data.get("raw_score")
-                                z_score = r_data.get("z_score")
-                                percentile = r_data.get("percentile")
-                                # For pipeline_e_plus, scores are nested
-                                if "scores" in r_data and isinstance(r_data["scores"], list) and r_data["scores"]:
-                                    se = r_data["scores"][0]
-                                    sample_name = sample_name or se.get("sample")
-                                    raw_score = raw_score or se.get("raw_score")
-                                    z_score = z_score or se.get("z_score") or se.get("pop_z_score")
-                                    percentile = percentile or se.get("percentile")
-                                scores.append({
-                                    "sample": sample_name,
-                                    "raw_score": raw_score,
-                                    "z_score": z_score,
-                                    "percentile": percentile,
-                                    "rank": percentile,
-                                    "ref_mean": r_data.get("ref_mean"),
-                                    "ref_std": r_data.get("ref_std"),
-                                    "ref_population": r_data.get("ref_population"),
-                                    "pipeline": r_data.get("pipeline", "plink2_native"),
-                                })
-                            result_record = RunResult(
-                                run_id=rid,
-                                pgs_id=pgs_id,
-                                source_file_path=source_path,
-                                source_file_type="gvcf",
-                                variants_matched=group[0].get("matched_variants", 0),
-                                variants_total=group[0].get("total_variants", 0),
-                                match_rate=group[0].get("match_rate", 0),
-                                scores_json=scores,
-                            )
-                            db2.add(result_record)
+                sess = SessionLocal()
+                try:
+                    for (pgs_id, source_path), group in grouped.items():
+                        scores = []
+                        for r_data in group:
+                            sample_name = r_data.get("sample_name")
+                            raw_score = r_data.get("raw_score")
+                            z_score = r_data.get("z_score")
+                            percentile = r_data.get("percentile")
+                            # Handle nested scores from pipeline_e_plus
+                            if "scores" in r_data and isinstance(r_data["scores"], list) and r_data["scores"]:
+                                se = r_data["scores"][0]
+                                sample_name = sample_name or se.get("sample")
+                                raw_score = raw_score if raw_score is not None else se.get("raw_score")
+                                z_score = z_score if z_score is not None else (se.get("z_score") or se.get("pop_z_score"))
+                                percentile = percentile if percentile is not None else se.get("percentile")
+                            scores.append({
+                                "sample": sample_name,
+                                "raw_score": raw_score,
+                                "z_score": z_score,
+                                "pop_z_score": z_score,
+                                "percentile": percentile,
+                                "rank": percentile,
+                                "ref_mean": r_data.get("ref_mean"),
+                                "ref_std": r_data.get("ref_std"),
+                                "ref_population": r_data.get("ref_population"),
+                                "ref_n_samples": r_data.get("ref_n_samples"),
+                                "pipeline": r_data.get("pipeline", "plink2_native"),
+                                "variants_used": r_data.get("matched_variants", 0),
+                            })
+                        sess.add(RunResult(
+                            run_id=rid,
+                            pgs_id=pgs_id,
+                            trait=trait_map.get(pgs_id),
+                            source_file_path=source_path,
+                            source_file_type="gvcf",
+                            variants_matched=group[0].get("matched_variants", 0),
+                            variants_total=group[0].get("total_variants", 0),
+                            match_rate=group[0].get("match_rate", 0),
+                            scores_json=scores,
+                        ))
 
+                    # Mark run as complete
+                    completed_at = datetime.now(timezone.utc)
+                    duration = round(_time.monotonic() - t0, 2)
+                    run_obj = sess.query(ScoringRun).filter(ScoringRun.id == rid).first()
+                    if run_obj:
                         run_obj.status = "complete"
                         run_obj.progress_pct = 100.0
                         run_obj.current_step = "done"
-                        run_obj.completed_at = datetime.now(timezone.utc)
-                        if run_obj.started_at:
-                            run_obj.duration_sec = (run_obj.completed_at - run_obj.started_at).total_seconds()
-                        run_obj.results_path_persistent = str(RUNS_DIR / rid)
-                        run_obj.results_path_fast = str(SCRATCH_RUNS / rid)
-                        db2.commit()
+                        run_obj.completed_at = completed_at
+                        run_obj.duration_sec = duration
+                    sess.commit()
                 finally:
-                    db2.close()
+                    sess.close()
 
                 # Publish completion
-                try:
-                    r = aioredis.from_url(REDIS_URL)
-                    await r.publish(f"run:{rid}:progress", json.dumps({
-                        "type": "complete",
-                        "run_id": rid,
-                        "pct": 100,
-                        "step": "done",
-                        "status": "complete",
-                    }))
-                    await r.aclose()
-                except Exception:
-                    pass
+                await _publish({
+                    "type": "complete", "run_id": rid,
+                    "pct": 100, "step": "done", "status": "complete",
+                })
 
-                # Sync checklist — marks scored PGS IDs as done, generates reports
+                # Generate run report
+                try:
+                    from backend.api.reports import generate_run_report
+                    report_path = generate_run_report(rid)
+                    logger.info("Generated run report: %s", report_path)
+                except Exception as e:
+                    logger.warning("Failed to generate run report for %s: %s", rid, e)
+
+                # Sync checklist
                 try:
                     from backend.api.checklist import sync_checklist_from_db
                     sync_checklist_from_db()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Failed to sync checklist for %s: %s", rid, e)
 
-                # Generate per-run report
-                try:
-                    from backend.api.reports import generate_run_report
-                    generate_run_report(rid)
-                except Exception:
-                    pass
+                logger.info(
+                    "Fast scoring run %s completed in %.1fs: %d results",
+                    rid, duration, len(results),
+                )
 
             except Exception as e:
-                logger.error(f"Fast scoring failed for run {rid}: {e}", exc_info=True)
-                db2 = SessionLocal()
-                try:
-                    run_obj = db2.query(ScoringRun).filter(ScoringRun.id == rid).first()
-                    if run_obj:
-                        run_obj.status = "failed"
-                        run_obj.error_message = str(e)[:500]
-                        run_obj.current_step = "error"
-                        db2.commit()
-                finally:
-                    db2.close()
-                # Publish failure
-                try:
-                    r = aioredis.from_url(REDIS_URL)
-                    await r.publish(f"run:{rid}:progress", json.dumps({
-                        "type": "error",
-                        "run_id": rid,
-                        "status": "failed",
-                        "error": str(e)[:500],
-                    }))
-                    await r.aclose()
-                except Exception:
-                    pass
+                duration = round(_time.monotonic() - t0, 2)
+                logger.error("Fast scoring failed for run %s: %s", rid, e, exc_info=True)
+                _db_update(
+                    status="failed", error_message=str(e)[:500],
+                    current_step="error",
+                    completed_at=datetime.now(timezone.utc),
+                    duration_sec=duration,
+                )
+                await _publish({
+                    "type": "error", "run_id": rid,
+                    "status": "failed", "error": str(e)[:500],
+                })
+            finally:
+                if redis_conn:
+                    try:
+                        await redis_conn.aclose()
+                    except Exception:
+                        pass
 
         logger.info(f"Run {run_id}: Using plink2 fast pipeline (all gVCF inputs)")
         asyncio.create_task(_run_fast(

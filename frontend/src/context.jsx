@@ -14,6 +14,7 @@ const initialState = {
   },
   activeRunId: null,
   activeTab: 0,
+  pgsSubView: 'score',
 };
 
 function appReducer(state, action) {
@@ -51,11 +52,14 @@ function appReducer(state, action) {
       };
     case 'SET_ACTIVE_RUN':
       return { ...state, activeRunId: action.payload };
+    case 'SET_PGS_VIEW':
+      return { ...state, pgsSubView: action.payload };
     case 'GO_TO_RUN': {
       return {
         ...state,
         activeTab: 3,
         activeRunId: action.payload,
+        pgsSubView: 'results',
       };
     }
     default:
