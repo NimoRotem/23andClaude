@@ -701,7 +701,7 @@ export default function ScorePanel() {
               <div style={{ marginTop: 16, textAlign: 'center' }}>
                 <button
                   className="btn btn-accent"
-                  onClick={() => dispatch({ type: 'SET_TAB', payload: 3 })}
+                  onClick={() => dispatch({ type: 'GO_TO_RUN', payload: activeRunId })}
                 >
                   View Results &rarr;
                 </button>
@@ -736,9 +736,10 @@ export default function ScorePanel() {
             {recentRuns.map((run) => (
               <div key={run.id} className="pgs-run-item" style={{ cursor: 'pointer' }}
                 onClick={() => {
-                  dispatch({ type: 'SET_ACTIVE_RUN', payload: run.id });
                   if (run.status === 'completed' || run.status === 'complete') {
-                    dispatch({ type: 'SET_TAB', payload: 3 });
+                    dispatch({ type: 'GO_TO_RUN', payload: run.id });
+                  } else {
+                    dispatch({ type: 'SET_ACTIVE_RUN', payload: run.id });
                   }
                 }}
               >
