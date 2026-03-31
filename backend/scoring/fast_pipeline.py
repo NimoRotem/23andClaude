@@ -12,7 +12,9 @@ Typical performance:
 """
 
 import asyncio
+import gzip
 import os
+import subprocess
 import time
 import logging
 from typing import Optional
@@ -25,7 +27,7 @@ from .plink2_scorer import (
     get_ref_panel_stats,
     compute_percentile,
 )
-from ..config import PGEN_CACHE_DIR, PLINK2_SCORING_DIR
+from ..config import PGEN_CACHE_DIR, PLINK2_SCORING_DIR, PLINK2
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +36,173 @@ from backend.config import CPU_COUNT
 executor = ThreadPoolExecutor(max_workers=min(CPU_COUNT, 16))
 
 
+# ---------------------------------------------------------------------------
+# Harmonized file metadata extraction
+# ---------------------------------------------------------------------------
+
+def _read_harmonized_metadata(harmonized_path: str) -> dict:
+    """Read rsIDs and other_alleles from the original harmonized PGS file.
+
+    Returns dict keyed by "chr{N}:{pos}" → {"rsid": str|None, "other_allele": str|None}
+    """
+    meta = {}
+    if not harmonized_path or not os.path.exists(harmonized_path):
+        return meta
+
+    try:
+        opener = gzip.open if harmonized_path.endswith('.gz') else open
+        with opener(harmonized_path, 'rt') as f:
+            col_names = None
+            for line in f:
+                if line.startswith('#'):
+                    continue
+                parts = line.strip().split('\t')
+                if col_names is None:
+                    col_names = parts
+                    continue
+
+                # Build lookup indices once
+                def _idx(name):
+                    return col_names.index(name) if name in col_names else -1
+
+                chr_idx = _idx('hm_chr') if 'hm_chr' in col_names else _idx('chr_name')
+                pos_idx = _idx('hm_pos') if 'hm_pos' in col_names else _idx('chr_position')
+                rsid_idx = _idx('hm_rsID') if 'hm_rsID' in col_names else _idx('rsID')
+                oa_idx = _idx('other_allele')
+                if oa_idx < 0:
+                    oa_idx = _idx('hm_inferOtherAllele')
+
+                # Now process this row and all subsequent ones
+                def _process_row(parts):
+                    chrom = parts[chr_idx] if chr_idx >= 0 and chr_idx < len(parts) else ''
+                    pos = parts[pos_idx] if pos_idx >= 0 and pos_idx < len(parts) else ''
+                    rsid = parts[rsid_idx] if rsid_idx >= 0 and rsid_idx < len(parts) else ''
+                    oa = parts[oa_idx] if oa_idx >= 0 and oa_idx < len(parts) else ''
+
+                    if not chrom or not pos or chrom == 'NA' or pos == 'NA':
+                        return
+                    if not chrom.startswith('chr'):
+                        chrom = f"chr{chrom}"
+
+                    key = f"{chrom}:{pos}"
+                    meta[key] = {
+                        'rsid': rsid if rsid and rsid != 'NA' else None,
+                        'other_allele': oa if oa and oa != 'NA' else None,
+                    }
+
+                _process_row(parts)
+
+                # Process remaining rows
+                for line in f:
+                    if line.startswith('#'):
+                        continue
+                    parts = line.strip().split('\t')
+                    _process_row(parts)
+                break  # Already consumed all rows in inner loop
+    except Exception as e:
+        logger.warning(f"Could not read harmonized metadata from {harmonized_path}: {e}")
+
+    return meta
+
+
+# ---------------------------------------------------------------------------
+# Genotype extraction from pgen files
+# ---------------------------------------------------------------------------
+
+def _extract_sample_dosages(
+    pgen_prefix: str,
+    matched_variants_file: Optional[str],
+) -> dict:
+    """Extract per-variant dosages from a sample's pgen files.
+
+    Uses plink2 --export A to produce a .raw file with allele dosages.
+    Returns dict: {"chr1:123": {"gt": "0/1", "dosage": 1.0}, ...}
+    """
+    dosages = {}
+    if not matched_variants_file or not os.path.exists(matched_variants_file):
+        return dosages
+
+    import tempfile
+    tmp_dir = os.environ.get('GENOMICS_SCRATCH_DIR', '/scratch') + '/tmp'
+    os.makedirs(tmp_dir, exist_ok=True)
+    sample_name = os.path.basename(pgen_prefix)
+    out_prefix = os.path.join(tmp_dir, f"{sample_name}_dosage_{os.getpid()}")
+    vzs_flag = "vzs" if os.path.exists(f"{pgen_prefix}.pvar.zst") else ""
+    pfile_args = [pgen_prefix]
+    if vzs_flag:
+        pfile_args.append(vzs_flag)
+
+    try:
+        cmd = [
+            PLINK2,
+            "--pfile", *pfile_args,
+            "--extract", matched_variants_file,
+            "--export", "A",
+            "--allow-extra-chr",
+            "--out", out_prefix,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            logger.warning(f"plink2 --export A failed: {result.stderr[:200]}")
+            return dosages
+
+        raw_path = f"{out_prefix}.raw"
+        if not os.path.exists(raw_path):
+            return dosages
+
+        with open(raw_path) as f:
+            header = f.readline().strip().split('\t')
+            values = f.readline().strip().split('\t')
+
+        # Header format: FID IID PAT MAT SEX PHENOTYPE chr1:123_A chr2:456_T ...
+        # Values:        sample sample 0 0 0 -9  0  2  ...
+        for col_name, val in zip(header[6:], values[6:]):
+            # col_name is like "chr1:43682946_A" — strip the allele suffix
+            var_id = col_name.rsplit('_', 1)[0] if '_' in col_name else col_name
+            try:
+                dos = float(val) if val != 'NA' else None
+            except (ValueError, TypeError):
+                dos = None
+
+            if dos is not None:
+                # Convert dosage to genotype string
+                if dos == 0.0:
+                    gt = '0/0'
+                elif dos == 1.0:
+                    gt = '0/1'
+                elif dos == 2.0:
+                    gt = '1/1'
+                else:
+                    gt = f'{dos:.1f}'
+            else:
+                gt = './.'
+
+            dosages[var_id] = {'gt': gt, 'dosage': dos}
+
+    except subprocess.TimeoutExpired:
+        logger.warning("plink2 --export A timed out")
+    except Exception as e:
+        logger.warning(f"Dosage extraction failed: {e}")
+    finally:
+        # Clean up temp files
+        for ext in ('.raw', '.log', '.nosex'):
+            p = f"{out_prefix}{ext}"
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+    return dosages
+
+
+# ---------------------------------------------------------------------------
+# Variant detail building
+# ---------------------------------------------------------------------------
+
 def _read_scoring_file_variants(scoring_file_path: str) -> list[dict]:
     """Read PGS variant IDs and weights from a plink2-format scoring file.
-    
+
     Returns list of dicts with id, allele, weight for building detail logs.
     """
     variants = []
@@ -72,14 +238,20 @@ def _build_variant_detail(
     sample_id: str,
     source_path: str,
     source_type: str,
+    harmonized_meta: Optional[dict] = None,
+    dosage_data: Optional[dict] = None,
 ) -> dict:
     """Build a variant detail dict for the detail JSON file.
-    
+
     Cross-references the scoring file with the matched variants list
     from plink2 to determine found/missing status per variant.
+    Enriches with rsIDs and other alleles from harmonized file,
+    and actual genotypes/dosages from pgen extraction.
     """
     all_variants = _read_scoring_file_variants(scoring_file_path)
-    
+    hm = harmonized_meta or {}
+    dos = dosage_data or {}
+
     # Read matched variant IDs from plink2's list-variants output
     matched_ids = set()
     if matched_variants_file and os.path.exists(matched_variants_file):
@@ -91,29 +263,45 @@ def _build_variant_detail(
                         matched_ids.add(vid)
         except Exception:
             pass
-    
+
     detail_variants = []
     for v in all_variants:
-        status = 'found' if v['id'] in matched_ids else 'missing'
+        var_id = v['id']
+        status = 'found' if var_id in matched_ids else 'missing'
+
+        # Lookup metadata from harmonized file
+        hm_entry = hm.get(var_id, {})
+        rsid = hm_entry.get('rsid')
+        other_allele = hm_entry.get('other_allele')
+
+        # Lookup actual genotype/dosage from pgen extraction
+        dos_entry = dos.get(var_id, {})
+        if status == 'found':
+            gt = dos_entry.get('gt', '0/0')
+            dosage = dos_entry.get('dosage', 0.0)
+        else:
+            gt = './.'
+            dosage = None
+
         detail_variants.append({
-            'rsid': None,  # plink2 uses chr:pos, not rsIDs
+            'rsid': rsid,
             'chr': v['chr'],
             'pos': v['pos'],
             'effect_allele': v['effect_allele'],
-            'other_allele': None,
+            'other_allele': other_allele,
             'weight': v['weight'],
             'status': status,
             'samples': {
                 sample_id: {
-                    'gt': '.' if status == 'missing' else '?',
-                    'dosage': None if status == 'missing' else None,
+                    'gt': gt,
+                    'dosage': dosage,
                 }
             },
         })
-    
+
     MAX_DETAIL = 1000
     truncated = len(detail_variants) > MAX_DETAIL
-    
+
     return {
         'pgs_id': pgs_id,
         'source_file_path': source_path,
@@ -126,6 +314,10 @@ def _build_variant_detail(
         'variants': detail_variants[:MAX_DETAIL],
     }
 
+
+# ---------------------------------------------------------------------------
+# Main scoring pipeline
+# ---------------------------------------------------------------------------
 
 async def run_fast_scoring(
     source_files: list[dict],
@@ -204,13 +396,18 @@ async def run_fast_scoring(
         sf['pgen_prefix'] = pgen_prefix
 
     # Phase 2: Prepare plink2-format scoring files for each PGS
+    # Also find and cache harmonized files for metadata extraction
     plink2_scoring_files = {}
+    harmonized_files = {}
     for pgs_id in pgs_ids:
         p2_score_path = os.path.join(scoring_dir, f"{pgs_id}.tsv")
 
+        # Always find harmonized file (needed for metadata even if plink2 file cached)
+        harmonized = find_harmonized_file(pgs_id, pgs_cache_dir)
+        if harmonized:
+            harmonized_files[pgs_id] = harmonized
+
         if not os.path.exists(p2_score_path):
-            # Find the harmonized scoring file in cache
-            harmonized = find_harmonized_file(pgs_id, pgs_cache_dir)
             if not harmonized:
                 logger.error(f"No harmonized scoring file found for {pgs_id}")
                 continue
@@ -220,6 +417,12 @@ async def run_fast_scoring(
             logger.info(f"Prepared plink2 scoring file for {pgs_id}: {meta['variant_count']} variants")
 
         plink2_scoring_files[pgs_id] = p2_score_path
+
+    # Pre-load harmonized metadata for all PGS (rsIDs + other alleles)
+    harmonized_meta_cache = {}
+    for pgs_id, hm_path in harmonized_files.items():
+        harmonized_meta_cache[pgs_id] = _read_harmonized_metadata(hm_path)
+        logger.info(f"Loaded harmonized metadata for {pgs_id}: {len(harmonized_meta_cache[pgs_id])} variants")
 
     if progress_callback:
         await progress_callback(0, total_tasks,
@@ -258,9 +461,18 @@ async def run_fast_scoring(
         )
 
         percentile_data = compute_percentile(score_result['raw_score'], ref_stats)
+
+        # Extract actual genotypes/dosages from pgen
+        dosage_data = await loop.run_in_executor(
+            executor,
+            _extract_sample_dosages,
+            sf['pgen_prefix'],
+            matched_vars_file,
+        )
+
         elapsed = time.monotonic() - t0
 
-        # Build variant detail
+        # Build variant detail with real metadata and genotypes
         variant_detail = _build_variant_detail(
             scoring_file_path=plink2_scoring_files[pgs_id],
             matched_variants_file=matched_vars_file,
@@ -268,6 +480,8 @@ async def run_fast_scoring(
             sample_id=sample,
             source_path=sf['path'],
             source_type='gvcf',
+            harmonized_meta=harmonized_meta_cache.get(pgs_id),
+            dosage_data=dosage_data,
         )
 
         # Report progress for this task
