@@ -27,7 +27,7 @@ from .plink2_scorer import (
     get_ref_panel_stats,
     compute_percentile,
 )
-from ..config import PGEN_CACHE_DIR, PLINK2_SCORING_DIR, PLINK2
+from ..config import PGEN_CACHE_DIR, PLINK2_SCORING_DIR, PLINK2, DEFAULT_REFERENCE_GRCH38
 
 logger = logging.getLogger(__name__)
 
@@ -432,6 +432,12 @@ async def run_fast_scoring(
     # Each task reports progress on completion for real-time updates
     loop = asyncio.get_event_loop()
 
+    # Resolve reference FASTA for hom-ref correction
+    ref_fasta = DEFAULT_REFERENCE_GRCH38
+    if not os.path.exists(ref_fasta + ".fai"):
+        logger.warning(f"Reference FASTA index not found ({ref_fasta}.fai) — hom-ref correction disabled")
+        ref_fasta = None
+
     async def _score_one(sf, pgs_id):
         """Score a single (sample, PGS) pair and report progress."""
         sample = sf['sample_name']
@@ -440,6 +446,7 @@ async def run_fast_scoring(
 
         t0 = time.monotonic()
 
+        # Per-chromosome parallel scoring + hom-ref correction
         score_result = await loop.run_in_executor(
             executor,
             score_sample_plink2,
@@ -447,9 +454,12 @@ async def run_fast_scoring(
             plink2_scoring_files[pgs_id],
             out_prefix,
             pgs_id,
+            ref_fasta,
         )
 
-        matched_vars_file = score_result.get('matched_variants_file')
+        # Reference panel scored on ALL PGS variants (not restricted to
+        # matched subset) — matches the corrected sample score which now
+        # accounts for hom-ref positions via the FASTA correction.
         ref_stats = await loop.run_in_executor(
             executor,
             get_ref_panel_stats,
@@ -457,10 +467,15 @@ async def run_fast_scoring(
             plink2_scoring_files[pgs_id],
             population,
             "GRCh38",
-            matched_vars_file,
+            None,  # score ref panel on ALL variants
         )
 
         percentile_data = compute_percentile(score_result['raw_score'], ref_stats)
+
+        # matched_vars_file lists variant-site matches (used for dosage
+        # extraction and variant detail — hom-ref positions are handled
+        # separately by the correction in score_sample_plink2)
+        matched_vars_file = score_result.get('matched_variants_file')
 
         # Extract actual genotypes/dosages from pgen
         dosage_data = await loop.run_in_executor(
