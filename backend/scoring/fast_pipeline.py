@@ -264,10 +264,19 @@ def _build_variant_detail(
         except Exception:
             pass
 
+    # For gVCF inputs, variants not in the pgen are hom-ref (reference
+    # blocks stripped during conversion), not truly missing.
+    is_gvcf = source_type == 'gvcf'
+
     detail_variants = []
     for v in all_variants:
         var_id = v['id']
-        status = 'found' if var_id in matched_ids else 'missing'
+        if var_id in matched_ids:
+            status = 'found'
+        elif is_gvcf:
+            status = 'homref'
+        else:
+            status = 'missing'
 
         # Lookup metadata from harmonized file
         hm_entry = hm.get(var_id, {})
@@ -279,6 +288,9 @@ def _build_variant_detail(
         if status == 'found':
             gt = dos_entry.get('gt', '0/0')
             dosage = dos_entry.get('dosage', 0.0)
+        elif status == 'homref':
+            gt = '0/0'
+            dosage = 0.0
         else:
             gt = './.'
             dosage = None
@@ -302,13 +314,16 @@ def _build_variant_detail(
     MAX_DETAIL = 1000
     truncated = len(detail_variants) > MAX_DETAIL
 
+    # For gVCF, all positions are accounted for (found in pgen + hom-ref)
+    accounted = len(matched_ids) + (len(all_variants) - len(matched_ids) if is_gvcf else 0)
+
     return {
         'pgs_id': pgs_id,
         'source_file_path': source_path,
         'source_file_type': source_type,
         'variants_total': len(all_variants),
-        'variants_matched': len(matched_ids),
-        'match_rate': len(matched_ids) / len(all_variants) if all_variants else 0,
+        'variants_matched': accounted,
+        'match_rate': accounted / len(all_variants) if all_variants else 0,
         'variants_in_log': min(len(detail_variants), MAX_DETAIL),
         'variants_truncated': truncated,
         'variants': detail_variants[:MAX_DETAIL],

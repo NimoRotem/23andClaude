@@ -122,10 +122,12 @@ def prepare_plink2_scoring_file(pgs_harmonized_path: str, output_path: str) -> d
 # Per-chromosome splitting and parallel scoring
 # ---------------------------------------------------------------------------
 
-def _split_scoring_by_chr(scoring_file_path: str, tmp_dir: str) -> dict[str, str]:
+def _split_scoring_by_chr(scoring_file_path: str, tmp_dir: str) -> tuple[dict[str, str], int]:
     """Split a plink2 scoring file into per-chromosome files.
 
-    Returns dict mapping chromosome number (str) → temp scoring file path.
+    Returns (chr_files, total_variants) where chr_files maps chromosome
+    number (str) → temp scoring file path, and total_variants is the
+    total number of variants across all chromosomes in the scoring file.
     """
     chr_lines: dict[str, list[str]] = defaultdict(list)
 
@@ -137,6 +139,7 @@ def _split_scoring_by_chr(scoring_file_path: str, tmp_dir: str) -> dict[str, str
             chr_lines[chrom].append(line)
 
     chr_files = {}
+    total_variants = 0
     for chrom, lines in chr_lines.items():
         if chrom not in AUTOSOMES or not lines:
             continue
@@ -145,8 +148,9 @@ def _split_scoring_by_chr(scoring_file_path: str, tmp_dir: str) -> dict[str, str
             f.write(header)
             f.writelines(lines)
         chr_files[chrom] = chr_path
+        total_variants += len(lines)
 
-    return chr_files
+    return chr_files, total_variants
 
 
 def _score_one_chromosome(
@@ -271,6 +275,14 @@ def _compute_homref_correction(
         logger.warning(f"Cannot open reference FASTA {ref_fasta_path}: {exc}")
         return {'correction': 0.0, 'homref_matches': 0, 'homref_corrected': 0}
 
+    # Detect chromosome naming convention in the FASTA (chr1 vs 1)
+    fasta_chroms = set(ref_fasta.references)
+    fasta_uses_chr = any(c.startswith('chr') for c in fasta_chroms if c[0].isdigit() is False)
+    logger.info(
+        f"Reference FASTA chroms: {list(fasta_chroms)[:3]}... "
+        f"(uses 'chr' prefix: {fasta_uses_chr})"
+    )
+
     try:
         with open(scoring_file_path) as f:
             f.readline()  # skip header
@@ -293,14 +305,21 @@ def _compute_homref_correction(
                 chr_pos = var_id.split(':')
                 if len(chr_pos) != 2:
                     continue
-                chrom = chr_pos[0]
+                chrom = chr_pos[0]  # e.g. "chr10"
                 try:
                     pos = int(chr_pos[1])
                 except ValueError:
                     continue
 
+                # Normalise chromosome name to match FASTA convention
+                fasta_chrom = chrom
+                if fasta_uses_chr and not chrom.startswith('chr'):
+                    fasta_chrom = f"chr{chrom}"
+                elif not fasta_uses_chr and chrom.startswith('chr'):
+                    fasta_chrom = chrom[3:]
+
                 try:
-                    ref_base = ref_fasta.fetch(chrom, pos - 1, pos).upper()
+                    ref_base = ref_fasta.fetch(fasta_chrom, pos - 1, pos).upper()
                 except Exception:
                     continue
 
@@ -370,7 +389,7 @@ def score_sample_plink2(
 
     try:
         # 1. Split scoring file by chromosome
-        chr_files = _split_scoring_by_chr(scoring_file_path, tmp_dir)
+        chr_files, scoring_total_variants = _split_scoring_by_chr(scoring_file_path, tmp_dir)
         n_chr = len(chr_files)
 
         if n_chr == 0:
@@ -430,7 +449,9 @@ def score_sample_plink2(
             for vid in combined_vars:
                 f.write(vid + '\n')
 
-        total_variants = total_matched + total_skipped
+        # Use scoring file variant count as ground truth (plink2 logs
+        # don't reliably report "skipped" counts in per-chromosome mode)
+        total_variants = scoring_total_variants
         plink2_match_rate = total_matched / total_variants if total_variants > 0 else 0
 
         logger.info(
@@ -445,17 +466,23 @@ def score_sample_plink2(
                 scoring_file_path, combined_vars_file, ref_fasta_path,
             )
             total_score += homref_info['correction']
-            # Hom-ref positions are now accounted for — update match counts
-            total_matched += homref_info['homref_matches']
-            total_skipped = max(0, total_skipped - homref_info['homref_matches'])
+
+        # Match rate: plink2-matched + hom-ref positions (correctly scored
+        # as dosage 0) together account for almost all scoring file variants.
+        # Only truly missing positions (not in pgen AND not hom-ref) reduce
+        # the match rate.
+        accounted_variants = total_matched
+        if homref_info:
+            accounted_variants += homref_info['homref_matches']
 
         elapsed = _time.monotonic() - t0
-        final_match_rate = total_matched / total_variants if total_variants > 0 else 0
+        final_match_rate = accounted_variants / total_variants if total_variants > 0 else 0
 
         logger.info(
             f"Scored {pgs_id} in {elapsed:.1f}s: corrected_score={total_score:.6f}, "
             f"match_rate={final_match_rate:.1%} "
-            f"({n_chr} chr parallel)"
+            f"(plink2={total_matched}, homref={homref_info['homref_matches'] if homref_info else 0}, "
+            f"total={total_variants}, {n_chr} chr parallel)"
         )
 
         result = {
@@ -464,7 +491,7 @@ def score_sample_plink2(
             'allele_count': total_allele_ct,
             'missing_count': total_missing_ct,
             'pgs_id': pgs_id,
-            'matched_variants': total_matched,
+            'matched_variants': accounted_variants,
             'total_variants': total_variants,
             'match_rate': final_match_rate,
             'matched_variants_file': combined_vars_file,
@@ -473,6 +500,8 @@ def score_sample_plink2(
         if homref_info:
             result['homref_correction'] = homref_info['correction']
             result['homref_corrected_count'] = homref_info['homref_corrected']
+            result['homref_matches'] = homref_info['homref_matches']
+            result['plink2_matched'] = total_matched
             result['plink2_match_rate'] = plink2_match_rate
 
         return result
