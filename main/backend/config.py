@@ -184,6 +184,58 @@ REF_PANEL_1KG_GRCH37 = str(DATA_DIR / "pgs2" / "ref_panel" / "GRCh37_1000G_ALL")
 APP_HOST = "0.0.0.0"
 APP_PORT = int(os.getenv("GENOMICS_PORT", "8600"))
 
+
+# ── Per-User Data Directories ──────────────────────────────────────
+# Each registered user gets an isolated subtree under DATA_DIR/users/{user_id}/
+# and SCRATCH_DIR/users/{user_id}/ for their raw data, runs, reports, etc.
+
+USERS_ROOT = DATA_DIR / "users"
+SCRATCH_USERS_ROOT = SCRATCH_DIR / "users"
+
+
+def user_data_dir(user_id: str) -> Path:
+    """Return the per-user persistent data root, creating it if missing."""
+    p = USERS_ROOT / user_id
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def user_scratch_dir(user_id: str) -> Path:
+    """Return the per-user scratch root, creating it if missing."""
+    p = SCRATCH_USERS_ROOT / user_id
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def user_runs_dir(user_id: str) -> Path:
+    p = user_data_dir(user_id) / "runs"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def user_scratch_runs_dir(user_id: str) -> Path:
+    p = user_scratch_dir(user_id) / "runs"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def user_uploads_dir(user_id: str) -> Path:
+    p = user_data_dir(user_id) / "uploads"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def user_vcfs_dir(user_id: str) -> Path:
+    p = user_data_dir(user_id) / "vcfs"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def user_reports_dir(user_id: str) -> Path:
+    p = user_data_dir(user_id) / "reports"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
 # --- plink2 Fast Pipeline ---
 PGEN_CACHE_DIR = DATA_DIR / "pgen_cache"
 PLINK2_SCORING_DIR = DATA_DIR / "pgs2" / "plink2_scoring_files"

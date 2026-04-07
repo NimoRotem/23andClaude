@@ -133,6 +133,7 @@ class GenomicFile(Base):
     file_size_bytes = Column(Integer, default=0)
     format_details = Column(JSON, default=dict)  # paired_path for FASTQ, index_path for BAM, etc.
     vcf_id = Column(String, ForeignKey("vcfs.id"), nullable=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     registered_at = Column(DateTime, default=func.now())
 
 
@@ -140,6 +141,7 @@ class SampleAncestry(Base):
     __tablename__ = "sample_ancestry"
 
     sample_id = Column(String, primary_key=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     eur_proportion = Column(Float, default=0.0)
     eas_proportion = Column(Float, default=0.0)
     afr_proportion = Column(Float, default=0.0)
@@ -167,6 +169,7 @@ class AncestryPGSResult(Base):
 
     id = Column(String, primary_key=True, default=gen_uuid)
     sample_id = Column(String, ForeignKey("sample_ancestry.sample_id"), nullable=False)
+    user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
     trait = Column(String, nullable=False)
     pgs_id = Column(String, nullable=False)
     scoring_method = Column(String, nullable=False)

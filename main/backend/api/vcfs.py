@@ -25,14 +25,20 @@ from backend.config import (
     SCRATCH_TMP,
     DEFAULT_REFERENCE_GRCH37,
     DEFAULT_REFERENCE_GRCH38,
+    user_vcfs_dir,
 )
 from backend.database import get_db
-from backend.models.schemas import VCF, gen_uuid
-
-# Auth placeholder — will be wired by another agent
-# from backend.utils.auth import get_current_user
+from backend.models.schemas import User, VCF, gen_uuid
+from backend.utils.auth import get_current_user, require_admin
 
 logger = logging.getLogger(__name__)
+
+
+def _scope_vcfs(query, current_user: User):
+    """Restrict a VCF query to the current user's VCFs (admins see all)."""
+    if current_user.role == "admin":
+        return query
+    return query.filter(VCF.created_by_user_id == current_user.id)
 
 router = APIRouter()
 
@@ -542,30 +548,48 @@ async def _run_bam_to_vcf_pipeline(
 
 
 @router.get("/", response_model=list[VCFDetail])
-def list_vcfs(db: Session = Depends(get_db)):
-    """List all registered VCFs with full details and storage locations."""
-    vcfs = db.query(VCF).order_by(VCF.created_at.desc()).all()
+def list_vcfs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List registered VCFs the current user owns (admins see all)."""
+    vcfs = (
+        _scope_vcfs(db.query(VCF), current_user)
+        .order_by(VCF.created_at.desc())
+        .all()
+    )
     return vcfs
 
 
 @router.get("/{vcf_id}", response_model=VCFDetail)
-def get_vcf(vcf_id: str, db: Session = Depends(get_db)):
-    """Get full details of a registered VCF."""
-    vcf = db.query(VCF).filter(VCF.id == vcf_id).first()
+def get_vcf(
+    vcf_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get full details of a registered VCF (must be owner or admin)."""
+    vcf = _scope_vcfs(
+        db.query(VCF).filter(VCF.id == vcf_id),
+        current_user,
+    ).first()
     if not vcf:
         raise HTTPException(status_code=404, detail=f"VCF {vcf_id} not found")
     return vcf
 
 
 @router.post("/register", response_model=VCFDetail, status_code=status.HTTP_201_CREATED)
-async def register_vcf(req: VCFRegisterRequest, db: Session = Depends(get_db)):
+async def register_vcf(
+    req: VCFRegisterRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Register an existing VCF file on disk.
 
     Steps:
       1. Validate the file exists and is a valid VCF (bcftools view -h)
       2. Extract: samples, variant count, genome build (auto-detect from header)
       3. Run QC: bcftools stats -> parse Ti/Tv, SNP count, indel count
-      4. Store in DB with qc_status
+      4. Store in DB with qc_status, owned by the calling user
     """
     vcf_path = req.path
 
@@ -581,7 +605,13 @@ async def register_vcf(req: VCFRegisterRequest, db: Session = Depends(get_db)):
         (VCF.path_persistent == vcf_path) | (VCF.path_fast == vcf_path)
     ).first()
     if existing:
-        return existing  # Return existing record instead of duplicating
+        # Only the owner (or admin) may "rediscover" an existing record
+        if current_user.role != "admin" and existing.created_by_user_id != current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A VCF with this path is already registered to another user",
+            )
+        return existing
 
     # --- 1. Validate VCF ---
     header = await _validate_vcf(vcf_path)
@@ -641,6 +671,7 @@ async def register_vcf(req: VCFRegisterRequest, db: Session = Depends(get_db)):
         qc_status=qc_status,
         qc_checks=stats["qc_checks"],
         file_size_bytes=file_size,
+        created_by_user_id=current_user.id,
     )
 
     db.add(vcf_row)
@@ -651,7 +682,11 @@ async def register_vcf(req: VCFRegisterRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/create-from-bam", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
-async def create_from_bam(req: VCFCreateFromBAMRequest, db: Session = Depends(get_db)):
+async def create_from_bam(
+    req: VCFCreateFromBAMRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Start a BAM-to-VCF variant-calling pipeline (runs asynchronously).
 
     Returns a job_id that can be polled. The resulting VCF will be registered
@@ -680,8 +715,8 @@ async def create_from_bam(req: VCFCreateFromBAMRequest, db: Session = Depends(ge
             detail="genome_build must be 'GRCh37' or 'GRCh38'",
         )
 
-    # Output directory
-    output_dir = req.output_dir or str(SCRATCH_PIPELINE)
+    # Output directory — default to per-user vcfs dir
+    output_dir = req.output_dir or str(user_vcfs_dir(current_user.id))
     os.makedirs(output_dir, exist_ok=True)
 
     # Create a placeholder VCF record in the DB
@@ -694,6 +729,7 @@ async def create_from_bam(req: VCFCreateFromBAMRequest, db: Session = Depends(ge
         qc_status="pending",
         caller=req.caller,
         qc_checks={"pipeline": "bam_to_vcf", "bam_path": req.bam_path},
+        created_by_user_id=current_user.id,
     )
     db.add(vcf_row)
     db.commit()
@@ -731,7 +767,10 @@ async def create_from_bam(req: VCFCreateFromBAMRequest, db: Session = Depends(ge
 
 
 @router.get("/jobs/{job_id}")
-def get_job_status(job_id: str):
+def get_job_status(
+    job_id: str,
+    _current_user: User = Depends(get_current_user),
+):
     """Check the status of a BAM-to-VCF pipeline job."""
     job = _pipeline_jobs.get(job_id)
     if not job:
@@ -740,7 +779,12 @@ def get_job_status(job_id: str):
 
 
 @router.post("/{vcf_id}/duplicate", response_model=VCFDetail)
-async def duplicate_vcf(vcf_id: str, req: VCFDuplicateRequest, db: Session = Depends(get_db)):
+async def duplicate_vcf(
+    vcf_id: str,
+    req: VCFDuplicateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Copy a VCF between storage tiers (fast <-> persistent).
 
     Body: {"target": "fast"} or {"target": "persistent"}
@@ -752,7 +796,10 @@ async def duplicate_vcf(vcf_id: str, req: VCFDuplicateRequest, db: Session = Dep
             detail="target must be 'fast' or 'persistent'",
         )
 
-    vcf = db.query(VCF).filter(VCF.id == vcf_id).first()
+    vcf = _scope_vcfs(
+        db.query(VCF).filter(VCF.id == vcf_id),
+        current_user,
+    ).first()
     if not vcf:
         raise HTTPException(status_code=404, detail=f"VCF {vcf_id} not found")
 
@@ -821,12 +868,16 @@ async def delete_vcf(
     vcf_id: str,
     delete_file: bool = Query(False, description="Also delete the VCF file(s) from disk"),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Unregister a VCF from the database.
 
     With ?delete_file=true, also removes the file(s) from disk.
     """
-    vcf = db.query(VCF).filter(VCF.id == vcf_id).first()
+    vcf = _scope_vcfs(
+        db.query(VCF).filter(VCF.id == vcf_id),
+        current_user,
+    ).first()
     if not vcf:
         raise HTTPException(status_code=404, detail=f"VCF {vcf_id} not found")
 
@@ -901,10 +952,14 @@ def _save_deleted_paths(paths: set):
 
 
 @router.post("/sync-nimog")
-async def sync_nimog_vcfs(db: Session = Depends(get_db)):
+async def sync_nimog_vcfs(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
     """Scan nimog job directory for completed VCFs and register any that are new.
 
-    Skips VCFs that were previously deleted by the user.
+    Admin-only because it scans a system-wide directory. Newly registered
+    VCFs are owned by the calling admin.
     """
     import json as _json
 
@@ -982,6 +1037,7 @@ async def sync_nimog_vcfs(db: Session = Depends(get_db)):
                     **stats,
                 },
                 file_size_bytes=file_size,
+                created_by_user_id=current_user.id,
             )
             db.add(vcf_record)
             db.commit()

@@ -1,8 +1,11 @@
 """Reports API — list, serve, create, and manage markdown reports.
 
-Reports are stored in /data/app/reports/ as .md files.
-They are auto-generated on every scoring run completion
-and can also be created/managed manually via Claude or the UI.
+Reports are stored per-user in /data/users/{user_id}/reports/ as .md files.
+They are auto-generated on every scoring run completion (written to the run
+owner's directory) and can also be created/managed manually via Claude or the UI.
+
+Legacy reports created before multi-user mode live at /data/app/reports/ and
+are visible to admins as a read-only fallback.
 """
 
 import json
@@ -10,19 +13,24 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable, Optional
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import PlainTextResponse, JSONResponse, HTMLResponse
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-from backend.config import APP_DIR, DATA_DIR
-from backend.database import SessionLocal
-from backend.models.schemas import ScoringRun, RunResult, PGSCacheEntry
+from backend.config import APP_DIR, user_reports_dir, USERS_ROOT
+from backend.database import SessionLocal, get_db
+from backend.models.schemas import PGSCacheEntry, RunResult, ScoringRun, User
+from backend.utils.auth import get_current_user
+from sqlalchemy.orm import Session
 
 router = APIRouter()
 
-_REPORTS_DIR = APP_DIR / "reports"
-_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+# Legacy global reports directory (pre-multi-user mode). Kept around so admins
+# can still read historical reports. New writes always go to a per-user dir.
+_LEGACY_REPORTS_DIR = APP_DIR / "reports"
+_LEGACY_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ── Pydantic models ──────────────────────────────────────────
@@ -35,6 +43,7 @@ class ReportMeta(BaseModel):
     category: str  # pgs | run | custom | summary
     pgs_id: str | None = None
     run_id: str | None = None
+    owner_id: str | None = None  # which user owns this report (None == legacy)
 
 
 class CreateReportRequest(BaseModel):
@@ -48,6 +57,14 @@ class UpdateReportRequest(BaseModel):
 
 
 # ── Helpers ──────────────────────────────────────────────────
+
+def _safe_filename(filename: str) -> str:
+    """Sanitize a report filename, ensuring `.md` extension and no path traversal."""
+    safe = filename.replace("..", "").replace("/", "").replace("\\", "")
+    if not safe.endswith(".md"):
+        safe += ".md"
+    return safe
+
 
 def _extract_title(content: str, filename: str) -> str:
     """Extract title from first H1 or use filename."""
@@ -76,7 +93,7 @@ def _categorize(filename: str) -> tuple[str, str | None, str | None]:
     return "custom", None, None
 
 
-def _report_meta(filepath: Path) -> ReportMeta:
+def _report_meta(filepath: Path, owner_id: Optional[str]) -> ReportMeta:
     """Build metadata for a report file."""
     stat = filepath.stat()
     content = filepath.read_text(encoding="utf-8", errors="replace")
@@ -91,7 +108,43 @@ def _report_meta(filepath: Path) -> ReportMeta:
         category=cat,
         pgs_id=pgs_id,
         run_id=run_id,
+        owner_id=owner_id,
     )
+
+
+def _iter_visible_dirs(current_user: User) -> Iterable[tuple[Path, Optional[str]]]:
+    """Yield (directory, owner_id) tuples that the current user is allowed to read.
+
+    Regular users see only their own per-user dir.
+    Admins additionally see every other user's dir plus the legacy global dir.
+    """
+    own_dir = user_reports_dir(current_user.id)
+    yield own_dir, current_user.id
+
+    if current_user.role == "admin":
+        if USERS_ROOT.exists():
+            for sub in USERS_ROOT.iterdir():
+                if not sub.is_dir() or sub.name == current_user.id:
+                    continue
+                rdir = sub / "reports"
+                if rdir.exists() and rdir.is_dir():
+                    yield rdir, sub.name
+        if _LEGACY_REPORTS_DIR.exists():
+            yield _LEGACY_REPORTS_DIR, None
+
+
+def _resolve_report_path(filename: str, current_user: User) -> tuple[Path, Optional[str]]:
+    """Find a report file for read access. Returns (path, owner_id).
+
+    Searches the current user's dir first, then (for admins) every other user's
+    dir and the legacy global dir. Raises 404 if not found.
+    """
+    safe = _safe_filename(filename)
+    for dir_path, owner_id in _iter_visible_dirs(current_user):
+        candidate = dir_path / safe
+        if candidate.exists() and candidate.is_file():
+            return candidate, owner_id
+    raise HTTPException(404, f"Report not found: {safe}")
 
 
 # ── Report generation ────────────────────────────────────────
@@ -99,8 +152,9 @@ def _report_meta(filepath: Path) -> ReportMeta:
 def generate_run_report(run_id: str) -> str:
     """Generate a comprehensive report for a completed scoring run.
 
-    Called automatically on run completion. Creates both a per-run report
-    and updates per-PGS reports.
+    Called automatically on run completion. The report is written to the run
+    owner's per-user reports directory (or the legacy global dir if the run
+    has no owner).
     """
     db = SessionLocal()
     try:
@@ -205,9 +259,13 @@ def generate_run_report(run_id: str) -> str:
 
         content = "\n".join(line for line in lines if line is not None) + "\n"
 
-        # Save run report
-        _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        report_path = _REPORTS_DIR / f"run_{run_id[:12]}.md"
+        # Write to the run owner's per-user reports dir, or legacy if unowned.
+        if run.user_id:
+            target_dir = user_reports_dir(run.user_id)
+        else:
+            target_dir = _LEGACY_REPORTS_DIR
+            target_dir.mkdir(parents=True, exist_ok=True)
+        report_path = target_dir / f"run_{run_id[:12]}.md"
         report_path.write_text(content, encoding="utf-8")
 
         return str(report_path)
@@ -222,67 +280,76 @@ def generate_run_report(run_id: str) -> str:
 # ── API Endpoints ────────────────────────────────────────────
 
 @router.get("/list")
-async def list_reports(category: str | None = None) -> list[ReportMeta]:
-    """List all available reports with metadata."""
-    reports = []
-    if _REPORTS_DIR.exists():
-        for f in sorted(_REPORTS_DIR.iterdir()):
+async def list_reports(
+    category: str | None = None,
+    current_user: User = Depends(get_current_user),
+) -> list[ReportMeta]:
+    """List all reports visible to the current user."""
+    seen: dict[str, ReportMeta] = {}
+    for dir_path, owner_id in _iter_visible_dirs(current_user):
+        if not dir_path.exists():
+            continue
+        for f in sorted(dir_path.iterdir()):
             if f.suffix == ".md" and f.is_file():
-                meta = _report_meta(f)
+                meta = _report_meta(f, owner_id)
                 if category and meta.category != category:
                     continue
-                reports.append(meta)
+                # Prefer the user's own copy if a name collision happens
+                if f.name not in seen:
+                    seen[f.name] = meta
 
-    # Sort: most recent first
+    reports = list(seen.values())
     reports.sort(key=lambda r: r.modified, reverse=True)
     return reports
 
 
 @router.get("/categories")
-async def list_categories():
-    """List report categories with counts."""
-    cats = {"pgs": 0, "run": 0, "custom": 0, "summary": 0}
-    if _REPORTS_DIR.exists():
-        for f in _REPORTS_DIR.iterdir():
-            if f.suffix == ".md" and f.is_file():
+async def list_categories(current_user: User = Depends(get_current_user)):
+    """List report categories with counts (scoped to current user)."""
+    cats: dict[str, int] = {"pgs": 0, "run": 0, "custom": 0, "summary": 0}
+    seen: set[str] = set()
+    for dir_path, _ in _iter_visible_dirs(current_user):
+        if not dir_path.exists():
+            continue
+        for f in dir_path.iterdir():
+            if f.suffix == ".md" and f.is_file() and f.name not in seen:
+                seen.add(f.name)
                 cat, _, _ = _categorize(f.name)
                 cats[cat] = cats.get(cat, 0) + 1
     return cats
 
 
 @router.get("/content/{filename}")
-async def get_report_content(filename: str):
+async def get_report_content(
+    filename: str,
+    current_user: User = Depends(get_current_user),
+):
     """Get a report's raw markdown content."""
-    safe = filename.replace("..", "").replace("/", "")
-    if not safe.endswith(".md"):
-        safe += ".md"
-    path = _REPORTS_DIR / safe
-    if not path.exists():
-        raise HTTPException(404, f"Report not found: {safe}")
+    path, owner_id = _resolve_report_path(filename, current_user)
     content = path.read_text(encoding="utf-8")
-    title = _extract_title(content, safe)
-    return {"filename": safe, "title": title, "content": content}
+    title = _extract_title(content, path.name)
+    return {"filename": path.name, "title": title, "content": content, "owner_id": owner_id}
 
 
 @router.get("/raw/{filename}")
-async def get_report_raw(filename: str):
+async def get_report_raw(
+    filename: str,
+    current_user: User = Depends(get_current_user),
+):
     """Get raw markdown (plain text) for external viewers."""
-    safe = filename.replace("..", "").replace("/", "")
-    if not safe.endswith(".md"):
-        safe += ".md"
-    path = _REPORTS_DIR / safe
-    if not path.exists():
-        raise HTTPException(404, f"Report not found: {safe}")
+    path, _ = _resolve_report_path(filename, current_user)
     return PlainTextResponse(path.read_text(encoding="utf-8"), media_type="text/markdown")
 
 
 @router.post("/create")
-async def create_report(req: CreateReportRequest):
-    """Create a new report."""
-    safe = req.filename.replace("..", "").replace("/", "")
-    if not safe.endswith(".md"):
-        safe += ".md"
-    path = _REPORTS_DIR / safe
+async def create_report(
+    req: CreateReportRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Create a new report in the current user's reports directory."""
+    safe = _safe_filename(req.filename)
+    target_dir = user_reports_dir(current_user.id)
+    path = target_dir / safe
     if path.exists():
         raise HTTPException(409, f"Report already exists: {safe}")
     path.write_text(req.content, encoding="utf-8")
@@ -290,53 +357,93 @@ async def create_report(req: CreateReportRequest):
 
 
 @router.put("/content/{filename}")
-async def update_report(filename: str, req: UpdateReportRequest):
-    """Update an existing report's content."""
-    safe = filename.replace("..", "").replace("/", "")
-    if not safe.endswith(".md"):
-        safe += ".md"
-    path = _REPORTS_DIR / safe
-    if not path.exists():
-        raise HTTPException(404, f"Report not found: {safe}")
-    path.write_text(req.content, encoding="utf-8")
-    return {"ok": True, "filename": safe}
+async def update_report(
+    filename: str,
+    req: UpdateReportRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Update an existing report's content.
+
+    Users can only update reports in their own directory. Admins can update
+    reports anywhere they can see them.
+    """
+    safe = _safe_filename(filename)
+    own_path = user_reports_dir(current_user.id) / safe
+    if own_path.exists():
+        own_path.write_text(req.content, encoding="utf-8")
+        return {"ok": True, "filename": safe}
+
+    if current_user.role == "admin":
+        path, _ = _resolve_report_path(filename, current_user)
+        path.write_text(req.content, encoding="utf-8")
+        return {"ok": True, "filename": safe}
+
+    raise HTTPException(404, f"Report not found: {safe}")
 
 
 @router.delete("/content/{filename}")
-async def delete_report(filename: str):
-    """Delete a report."""
-    safe = filename.replace("..", "").replace("/", "")
-    if not safe.endswith(".md"):
-        safe += ".md"
-    path = _REPORTS_DIR / safe
-    if not path.exists():
-        raise HTTPException(404, f"Report not found: {safe}")
-    path.unlink()
-    return {"ok": True, "deleted": safe}
+async def delete_report(
+    filename: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a report.
+
+    Users can only delete reports in their own directory. Admins can delete
+    reports anywhere they can see them.
+    """
+    safe = _safe_filename(filename)
+    own_path = user_reports_dir(current_user.id) / safe
+    if own_path.exists():
+        own_path.unlink()
+        return {"ok": True, "deleted": safe}
+
+    if current_user.role == "admin":
+        path, _ = _resolve_report_path(filename, current_user)
+        path.unlink()
+        return {"ok": True, "deleted": safe}
+
+    raise HTTPException(404, f"Report not found: {safe}")
 
 
 @router.post("/generate/{run_id}")
-async def generate_report_for_run(run_id: str):
-    """Manually trigger report generation for a specific run."""
+async def generate_report_for_run(
+    run_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Manually trigger report generation for a specific run.
+
+    Users can only regenerate reports for runs they own. Admins can do it for
+    any run.
+    """
+    run = db.query(ScoringRun).filter(ScoringRun.id == run_id).first()
+    if not run:
+        raise HTTPException(404, "Run not found")
+    if current_user.role != "admin" and run.user_id != current_user.id:
+        raise HTTPException(403, "You can only regenerate your own runs")
+
     path = generate_run_report(run_id)
     if path:
         return {"ok": True, "path": path}
-    raise HTTPException(404, "Run not found or no results")
+    raise HTTPException(404, "Run has no results")
 
 
 @router.post("/regenerate-all")
-async def regenerate_all_reports():
-    """Regenerate reports for ALL completed runs."""
-    db = SessionLocal()
-    try:
-        runs = db.query(ScoringRun).filter(
-            ScoringRun.status.in_(["complete", "completed"])
-        ).all()
-        generated = 0
-        for run in runs:
-            path = generate_run_report(run.id)
-            if path:
-                generated += 1
-        return {"ok": True, "generated": generated, "total_runs": len(runs)}
-    finally:
-        db.close()
+async def regenerate_all_reports(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Regenerate reports for completed runs.
+
+    Users only regenerate their own runs. Admins regenerate everyone's.
+    """
+    q = db.query(ScoringRun).filter(ScoringRun.status.in_(["complete", "completed"]))
+    if current_user.role != "admin":
+        q = q.filter(ScoringRun.user_id == current_user.id)
+    runs = q.all()
+    generated = 0
+    for run in runs:
+        path = generate_run_report(run.id)
+        if path:
+            generated += 1
+    return {"ok": True, "generated": generated, "total_runs": len(runs)}
