@@ -61,7 +61,7 @@ function PercentilePills({ scores }) {
   );
 }
 
-function TraitCard({ title, description, table, sectionId, checkedMap, notesMap, scoresMap, cmdResults, samples, globalSample, onViewReport, onRun, onRunCommand, onRunSection, runningPgs, runningCmds }) {
+function TraitCard({ title, description, table, sectionId, checkedMap, notesMap, scoresMap, cmdResults, estimatesMap = {}, samples, globalSample, onViewReport, onRun, onRunCommand, onRunSection, runningPgs, runningCmds }) {
   const [open, setOpen] = useState(!title);
   const selectedSample = globalSample || '';
 
@@ -347,7 +347,13 @@ function TraitCard({ title, description, table, sectionId, checkedMap, notesMap,
                           </span>
                         </td>
                         {/* Run button — every row is runnable */}
-                        <td style={{ padding: '4px 6px', textAlign: 'center' }}>
+                        <td style={{ padding: '4px 6px', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                          {(rowPgsId || rowCheckName) && itemId && estimatesMap[itemId] && (
+                            <span style={{ fontSize: 10, color: '#6e7681', marginRight: 6 }}
+                              title={`Estimated runtime (${estimatesMap[itemId].seconds}s) — based on server resources and PGS variant counts`}>
+                              {estimatesMap[itemId].label}
+                            </span>
+                          )}
                           {selectedSample && (rowPgsId || rowCheckName) && !(runningPgs[rowPgsId] || (runningCmds && runningCmds[itemId])) && (
                             <span onClick={() => {
                               if (rowPgsId) { handleRunOne(rowPgsId, rd.pop); }
@@ -403,7 +409,7 @@ function SectionRunBar({ pgsIds, samples, onRun, runningPgs }) {
   );
 }
 
-function RenderedMarkdown({ markdown, checkedMap = {}, notesMap = {}, scoresMap = {}, cmdResults = {}, samples = [], globalSample = '', onViewReport, onRun, onRunCommand, onRunSection, runningPgs = {}, runningCmds = {} }) {
+function RenderedMarkdown({ markdown, checkedMap = {}, notesMap = {}, scoresMap = {}, cmdResults = {}, estimatesMap = {}, samples = [], globalSample = '', onViewReport, onRun, onRunCommand, onRunSection, runningPgs = {}, runningCmds = {} }) {
   const lines = markdown.split('\n');
   const elements = [];
   let currentSectionId = null;
@@ -491,6 +497,7 @@ function RenderedMarkdown({ markdown, checkedMap = {}, notesMap = {}, scoresMap 
           <TraitCard key={h3Idx} title={title} description={description}
             table={tableLines} sectionId={currentSectionId}
             checkedMap={checkedMap} notesMap={notesMap} scoresMap={scoresMap} cmdResults={cmdResults}
+            estimatesMap={estimatesMap}
             samples={samples} globalSample={globalSample} onViewReport={onViewReport} onRun={onRun} onRunCommand={onRunCommand} onRunSection={onRunSection}
             runningPgs={runningPgs} runningCmds={runningCmds} />
         );
@@ -547,6 +554,7 @@ function RenderedMarkdown({ markdown, checkedMap = {}, notesMap = {}, scoresMap 
             <TraitCard key={`tbl-${tableStartIdx}`} title="" description={lastDesc}
               table={tableLines} sectionId={currentSectionId}
               checkedMap={checkedMap} notesMap={notesMap} scoresMap={scoresMap} cmdResults={cmdResults}
+              estimatesMap={estimatesMap}
               samples={samples} globalSample={globalSample} onViewReport={onViewReport} onRun={onRun} onRunCommand={onRunCommand} onRunSection={onRunSection}
               runningPgs={runningPgs} runningCmds={runningCmds} />
           );
@@ -699,6 +707,8 @@ export default function ChecklistPanel() {
   const [runningPgs, setRunningPgs] = useState({});
   const [runningCmds, setRunningCmds] = useState({});
   const [cmdResults, setCmdResults] = useState({});
+  const [estimatesMap, setEstimatesMap] = useState({});
+  const [refreshingEstimates, setRefreshingEstimates] = useState(false);
   const [skillTask, setSkillTask] = useState(null); // {taskId, checkName, log, status}
 
   const [ancestrySummary, setAncestrySummary] = useState({});
@@ -726,6 +736,7 @@ export default function ChecklistPanel() {
       setNotesMap(data.notes || {});
       setScoresMap(data.scores || {});
       setCmdResults(data.command_results || {});
+      if (data.estimates) setEstimatesMap(data.estimates);
       if (data.available_samples) setSamplesWithData(data.available_samples);
     } catch {}
     setLoading(false);
@@ -736,6 +747,16 @@ export default function ChecklistPanel() {
     // Load available samples
     fetch(`${BASE}/samples`).then(r => r.json()).then(setSamples).catch(() => {});
   }, [load]);
+
+  const refreshEstimates = useCallback(async () => {
+    setRefreshingEstimates(true);
+    try {
+      const res = await fetch(`${BASE}/estimates/refresh`, { method: 'POST' });
+      const data = await res.json();
+      if (data && data.estimates) setEstimatesMap(data.estimates);
+    } catch {}
+    setRefreshingEstimates(false);
+  }, []);
 
   // Poll skill task log when active
   const skillTaskId = skillTask ? skillTask.taskId : null;
@@ -1010,6 +1031,11 @@ export default function ChecklistPanel() {
             style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid #30363d', background: '#21262d', color: '#c9d1d9', cursor: 'pointer', fontSize: 11 }}>
             Refresh
           </button>
+          <button onClick={refreshEstimates} disabled={refreshingEstimates}
+            title="Recompute estimated run times based on current server resources and PGS variant counts"
+            style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid #30363d', background: '#21262d', color: refreshingEstimates ? '#6e7681' : '#c9d1d9', cursor: refreshingEstimates ? 'default' : 'pointer', fontSize: 11 }}>
+            {refreshingEstimates ? 'Estimating...' : 'Refresh estimates'}
+          </button>
           <button onClick={() => setEditing(true)}
             style={{ padding: '5px 10px', borderRadius: 6, border: '1px solid #30363d', background: '#21262d', color: '#c9d1d9', cursor: 'pointer', fontSize: 11 }}>
             Edit
@@ -1020,7 +1046,8 @@ export default function ChecklistPanel() {
       <div style={{ display: 'none' /* old header removed */ }}>
       </div>
       <RenderedMarkdown markdown={markdown} checkedMap={checkedMap} notesMap={notesMap}
-        scoresMap={scoresMap} cmdResults={cmdResults} samples={samples} globalSample={selectedSample}
+        scoresMap={scoresMap} cmdResults={cmdResults} estimatesMap={estimatesMap}
+        samples={samples} globalSample={selectedSample}
         onViewReport={(filename) => setViewingReport(filename)}
         onRun={handleRun} onRunCommand={handleRunCommand} onRunSection={handleRunSection}
         runningPgs={runningPgs} runningCmds={runningCmds} />

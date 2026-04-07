@@ -9,9 +9,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from backend.config import APP_DIR
-from backend.database import init_db
+from backend.database import init_db, migrate_user_columns_and_default_user
 
 from backend.api.auth import router as auth_router, ensure_default_admin
+from backend.api.admin import router as admin_router
 from backend.api.vcfs import router as vcfs_router
 from backend.api.pgs import router as pgs_router
 from backend.api.runs import router as runs_router
@@ -51,6 +52,7 @@ async def lifespan(app: FastAPI):
     APP_DIR.mkdir(parents=True, exist_ok=True)
     init_db()
     ensure_default_admin()
+    migrate_user_columns_and_default_user()
     _cleanup_orphaned_runs()
     yield
 
@@ -74,6 +76,7 @@ app.add_middleware(
 # API routes at /api (primary)
 _api_routers = [
     (auth_router, "/auth", ["auth"]),
+    (admin_router, "/admin", ["admin"]),
     (vcfs_router, "/vcfs", ["vcfs"]),
     (pgs_router, "/pgs", ["pgs"]),
     (runs_router, "/runs", ["runs"]),

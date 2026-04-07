@@ -80,11 +80,30 @@ const S = {
     marginTop: 12,
     textAlign: 'center',
   },
+  toggleRow: {
+    marginTop: 18,
+    textAlign: 'center',
+    color: '#8b949e',
+    fontSize: 13,
+  },
+  toggleLink: {
+    background: 'none',
+    border: 'none',
+    color: '#58a6ff',
+    cursor: 'pointer',
+    fontSize: 13,
+    fontWeight: 500,
+    padding: 0,
+    marginLeft: 4,
+    textDecoration: 'underline',
+  },
 };
 
 export default function Login({ onLogin }) {
+  const [mode, setMode] = useState('login'); // 'login' | 'signup'
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -95,16 +114,22 @@ export default function Login({ onLogin }) {
 
     try {
       const base = import.meta.env.BASE_URL || '/genomics/';
-      const res = await fetch(`${base}api/auth/login`, {
+      const endpoint = mode === 'signup' ? 'register' : 'login';
+      const body =
+        mode === 'signup'
+          ? { email, password, display_name: displayName }
+          : { email, password };
+
+      const res = await fetch(`${base}api/auth/${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(body),
       });
 
       const data = await res.json();
 
       if (!res.ok) {
-        setError(data.detail || 'Login failed');
+        setError(data.detail || (mode === 'signup' ? 'Sign up failed' : 'Login failed'));
         setLoading(false);
         return;
       }
@@ -118,14 +143,40 @@ export default function Login({ onLogin }) {
     setLoading(false);
   };
 
+  const toggleMode = () => {
+    setError('');
+    setMode(mode === 'login' ? 'signup' : 'login');
+  };
+
+  const isSignup = mode === 'signup';
+
   return (
     <div style={S.wrapper}>
       <form style={S.card} onSubmit={handleSubmit}>
         <div style={S.logo}>
           <div style={S.logoIcon}>&#x1F9EC;</div>
           <h1 style={S.title}>Genomics Dashboard</h1>
-          <div style={S.subtitle}>Sign in to continue</div>
+          <div style={S.subtitle}>
+            {isSignup ? 'Create your account' : 'Sign in to continue'}
+          </div>
         </div>
+
+        {isSignup && (
+          <div style={S.field}>
+            <label style={S.label}>Display name</label>
+            <input
+              style={S.input}
+              type="text"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Your name"
+              autoFocus
+              required
+              minLength={1}
+              maxLength={120}
+            />
+          </div>
+        )}
 
         <div style={S.field}>
           <label style={S.label}>Email</label>
@@ -134,8 +185,8 @@ export default function Login({ onLogin }) {
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder="admin@genomics.local"
-            autoFocus
+            placeholder={isSignup ? 'you@example.com' : 'admin@genomics.local'}
+            autoFocus={!isSignup}
             required
           />
         </div>
@@ -147,8 +198,9 @@ export default function Login({ onLogin }) {
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="Enter password"
+            placeholder={isSignup ? 'At least 6 characters' : 'Enter password'}
             required
+            minLength={isSignup ? 6 : undefined}
           />
         </div>
 
@@ -157,10 +209,23 @@ export default function Login({ onLogin }) {
           style={{ ...S.btn, ...(loading ? S.btnDisabled : {}) }}
           disabled={loading}
         >
-          {loading ? 'Signing in...' : 'Sign in'}
+          {loading
+            ? isSignup
+              ? 'Creating account...'
+              : 'Signing in...'
+            : isSignup
+              ? 'Create account'
+              : 'Sign in'}
         </button>
 
         {error && <div style={S.error}>{error}</div>}
+
+        <div style={S.toggleRow}>
+          {isSignup ? 'Already have an account?' : "Don't have an account?"}
+          <button type="button" style={S.toggleLink} onClick={toggleMode}>
+            {isSignup ? 'Sign in' : 'Sign up'}
+          </button>
+        </div>
       </form>
     </div>
   );
