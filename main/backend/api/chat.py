@@ -1,37 +1,106 @@
-"""Chat API — bridges a web chat interface to a Claude Code tmux session."""
+"""Chat API — bridges a web chat interface to per-user Claude Code tmux sessions.
+
+Each authenticated user gets their own tmux session, message history file, send-state,
+and skills directory so that no data or context leaks between accounts.
+"""
 
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+from backend.config import user_data_dir
+from backend.models.schemas import User
+from backend.utils.auth import get_current_user
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-SESSION_NAME = os.environ.get("CHAT_TMUX_SESSION", "genomics-claude")
+SESSION_PREFIX = os.environ.get("CHAT_TMUX_SESSION_PREFIX", "genomics-claude")
 CLAUDE_CMD = os.environ.get("CLAUDE_CMD", "claude")
-WORK_DIR = os.environ.get("CHAT_WORK_DIR", str(Path(__file__).resolve().parents[2]))
-MESSAGES_FILE = Path(os.environ.get("CHAT_MESSAGES_FILE", "/data/app/chat_messages.json"))
+WORK_DIR_DEFAULT = os.environ.get("CHAT_WORK_DIR", str(Path(__file__).resolve().parents[2]))
+
+# Legacy single-tenant defaults — used only as a one-shot migration source for
+# the first admin who connects after the upgrade.
+_LEGACY_SESSION_NAME = os.environ.get("CHAT_TMUX_SESSION", "genomics-claude")
+_LEGACY_MESSAGES_FILE = Path(os.environ.get("CHAT_MESSAGES_FILE", "/data/app/chat_messages.json"))
 
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
-# Module-level state
+# Module-level state — keyed per user so requests never collide
 # ---------------------------------------------------------------------------
-_auto_approve_sent: float = 0.0
+# user_id -> last auto-approve timestamp
+_auto_approve_sent: dict[str, float] = {}
 
-# Track pane state at the moment we send a user message so we can later
-# diff and extract Claude's response.
-_last_send_state: dict = {"hash": "", "ts": 0, "lines": 0, "user_msg": ""}
+# user_id -> last send-state ({"hash", "ts", "lines", "user_msg"})
+_last_send_states: dict[str, dict] = {}
+
+
+def _send_state(user_id: str) -> dict:
+    state = _last_send_states.get(user_id)
+    if state is None:
+        state = {"hash": "", "ts": 0, "lines": 0, "user_msg": ""}
+        _last_send_states[user_id] = state
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Per-user paths / identifiers
+# ---------------------------------------------------------------------------
+
+def _user_session_name(user: User) -> str:
+    """Tmux session name unique to a user (max 12 chars of ID)."""
+    return f"{SESSION_PREFIX}-{user.id[:12]}"
+
+
+def _user_work_dir(user: User) -> str:
+    """Working directory for the user's Claude Code tmux session."""
+    base = user_data_dir(user.id) / "claude-workspace"
+    base.mkdir(parents=True, exist_ok=True)
+    return str(base)
+
+
+def _user_messages_file(user: User) -> Path:
+    return user_data_dir(user.id) / "chat_messages.json"
+
+
+def _user_skills_dirs(user: User) -> list[Path]:
+    """Allowed skill .md directories for this user."""
+    workspace = Path(_user_work_dir(user))
+    claude_skills = workspace / ".claude" / "skills"
+    return [workspace, claude_skills]
+
+
+def _maybe_migrate_legacy_admin(user: User):
+    """One-shot migration: copy legacy global chat_messages.json into the
+    admin user's per-user file the first time they connect after upgrade.
+
+    Non-admins never inherit legacy data.
+    """
+    if user.role != "admin":
+        return
+    target = _user_messages_file(user)
+    if target.exists():
+        return
+    if not _LEGACY_MESSAGES_FILE.exists():
+        return
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_LEGACY_MESSAGES_FILE, target)
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # ANSI helpers
@@ -44,7 +113,7 @@ def _strip_ansi(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tmux helpers (adapted from tmux-dashboard)
+# Tmux helpers
 # ---------------------------------------------------------------------------
 
 def capture_pane_full(session_name: str) -> str:
@@ -71,10 +140,10 @@ def capture_pane_recent(session_name: str, lines: int = 80) -> str:
         return ""
 
 
-def _check_auto_approve(session_name: str, visible: str):
+def _check_auto_approve(user_id: str, session_name: str, visible: str):
     """Detect Claude Code permission prompts and auto-select option 2 (bypass)."""
-    global _auto_approve_sent
-    if time.time() - _auto_approve_sent < 10:
+    last = _auto_approve_sent.get(user_id, 0.0)
+    if time.time() - last < 10:
         return
 
     lines = visible.split("\n")
@@ -104,16 +173,28 @@ def _check_auto_approve(session_name: str, visible: str):
             ["tmux", "send-keys", "-t", session_name, "Enter"],
             capture_output=True, text=True, timeout=3,
         )
-        _auto_approve_sent = time.time()
+        _auto_approve_sent[user_id] = time.time()
     except Exception:
         pass
 
 
-def detect_activity(session_name: str) -> dict:
+def _session_exists(session_name: str) -> bool:
+    """Check if a named tmux session exists."""
+    try:
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", session_name],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def detect_activity(user_id: str, session_name: str) -> dict:
     """Detect whether the tmux session is busy, idle, or stopped."""
     info = {"status": "unknown", "command": "", "detail": ""}
 
-    if not _session_exists():
+    if not _session_exists(session_name):
         info["status"] = "stopped"
         info["detail"] = "Session not running"
         return info
@@ -133,7 +214,6 @@ def detect_activity(session_name: str) -> dict:
         cmd = parts[0] if parts else ""
         info["command"] = cmd
 
-        # Capture visible pane
         try:
             vis = subprocess.run(
                 ["tmux", "capture-pane", "-t", session_name, "-p"],
@@ -143,8 +223,7 @@ def detect_activity(session_name: str) -> dict:
         except Exception:
             visible = ""
 
-        # Auto-approve permission prompts
-        _check_auto_approve(session_name, visible)
+        _check_auto_approve(user_id, session_name, visible)
 
         all_lines = visible.split("\n")
         while all_lines and not all_lines[-1].strip():
@@ -153,10 +232,8 @@ def detect_activity(session_name: str) -> dict:
         bottom = all_lines[-6:] if len(all_lines) >= 6 else all_lines
         bottom_text = "\n".join(bottom)
 
-        # --- "esc to interrupt" = strong busy signal ---
         has_esc_to_interrupt = "esc to interrupt" in bottom_text
 
-        # --- Idle prompt indicators ---
         idle_prompt_patterns = [
             r'^[❯➜]\s*$',
             r'Tip:.*claude',
@@ -171,7 +248,6 @@ def detect_activity(session_name: str) -> dict:
             if has_idle_prompt:
                 break
 
-        # --- Active spinners / progress (wider window) ---
         window = all_lines[-25:] if len(all_lines) >= 25 else all_lines
         SPINNER_ICONS = r'[✶✽✻·\*☆◆●⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏✢✦✧✹✵✴✸❋❊❉✺◇◈⟡⊛⊕⊗▸▹►▻◉◎★♦♢⬡⬢]'
         COMPLETION_RE = re.compile(r'^●\s+(Done|Completed)\b')
@@ -202,7 +278,6 @@ def detect_activity(session_name: str) -> dict:
                 info["detail"] = "Thinking"
                 return info
 
-        # Idle prompt + no busy signals → truly idle
         if has_idle_prompt and not has_esc_to_interrupt:
             info["status"] = "idle"
             info["detail"] = "Waiting for input"
@@ -213,7 +288,6 @@ def detect_activity(session_name: str) -> dict:
             info["detail"] = "Background tasks"
             return info
 
-        # Shell prompt check
         last_line = bottom[-1].strip() if bottom else ""
         shell_cmds = {"bash", "zsh", "sh", "fish", "tmux"}
         if cmd.lower() in shell_cmds:
@@ -238,68 +312,50 @@ def detect_activity(session_name: str) -> dict:
 # Session management
 # ---------------------------------------------------------------------------
 
-def _session_exists() -> bool:
-    """Check if the genomics-claude tmux session exists."""
-    try:
-        result = subprocess.run(
-            ["tmux", "has-session", "-t", SESSION_NAME],
-            capture_output=True, text=True, timeout=5,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+def _ensure_session(user: User):
+    """Create the user's Claude Code tmux session if it doesn't exist."""
+    session_name = _user_session_name(user)
+    work_dir = _user_work_dir(user)
 
-
-def _ensure_session():
-    """Create the genomics-claude tmux session if it doesn't exist.
-
-    Waits for Claude Code to fully initialize (detects the idle prompt)
-    before returning, so subsequent send_message calls go to Claude, not
-    the shell.
-    """
-    if _session_exists():
-        # Check if Claude is actually running (not just a bare shell)
-        activity = detect_activity(SESSION_NAME)
+    if _session_exists(session_name):
+        activity = detect_activity(user.id, session_name)
         if activity["command"] in ("claude", "node"):
             return
         # Session exists but Claude isn't running — launch it
         subprocess.run(
-            ["tmux", "send-keys", "-t", SESSION_NAME, "-l",
-             f"{CLAUDE_CMD} --dangerously-skip-permissions --name genomics-ai"],
+            ["tmux", "send-keys", "-t", session_name, "-l",
+             f"{CLAUDE_CMD} --dangerously-skip-permissions --name genomics-ai-{user.id[:8]}"],
             capture_output=True, text=True, timeout=5,
         )
         subprocess.run(
-            ["tmux", "send-keys", "-t", SESSION_NAME, "Enter"],
+            ["tmux", "send-keys", "-t", session_name, "Enter"],
             capture_output=True, text=True, timeout=5,
         )
     else:
         try:
-            # Create session with proper PATH for node/claude
-            # Allow operators to inject extra PATH entries (for claude, node, etc.)
             extra_path = os.environ.get("CHAT_TMUX_EXTRA_PATH", "")
             env_setup = f"export PATH={extra_path}:$PATH" if extra_path else "export PATH=$PATH"
             subprocess.run(
-                ["tmux", "new-session", "-d", "-s", SESSION_NAME, "-c", WORK_DIR],
+                ["tmux", "new-session", "-d", "-s", session_name, "-c", work_dir],
                 capture_output=True, text=True, timeout=10,
             )
             time.sleep(0.5)
-            # Set up PATH first
             subprocess.run(
-                ["tmux", "send-keys", "-t", SESSION_NAME, "-l", env_setup],
+                ["tmux", "send-keys", "-t", session_name, "-l", env_setup],
                 capture_output=True, text=True, timeout=5,
             )
             subprocess.run(
-                ["tmux", "send-keys", "-t", SESSION_NAME, "Enter"],
+                ["tmux", "send-keys", "-t", session_name, "Enter"],
                 capture_output=True, text=True, timeout=5,
             )
             time.sleep(0.5)
             subprocess.run(
-                ["tmux", "send-keys", "-t", SESSION_NAME, "-l",
-                 f"{CLAUDE_CMD} --dangerously-skip-permissions --name genomics-ai"],
+                ["tmux", "send-keys", "-t", session_name, "-l",
+                 f"{CLAUDE_CMD} --dangerously-skip-permissions --name genomics-ai-{user.id[:8]}"],
                 capture_output=True, text=True, timeout=5,
             )
             subprocess.run(
-                ["tmux", "send-keys", "-t", SESSION_NAME, "Enter"],
+                ["tmux", "send-keys", "-t", session_name, "Enter"],
                 capture_output=True, text=True, timeout=5,
             )
         except Exception:
@@ -308,24 +364,25 @@ def _ensure_session():
     # Wait for Claude Code to be ready (up to 30 seconds)
     for _ in range(30):
         time.sleep(1)
-        activity = detect_activity(SESSION_NAME)
+        activity = detect_activity(user.id, session_name)
         if activity["status"] == "idle" and activity["command"] in ("claude", "node"):
             return
-        # Also check for the bypass permissions banner
-        visible = capture_pane_recent(SESSION_NAME, 10)
+        visible = capture_pane_recent(session_name, 10)
         if "bypass permissions" in visible.lower():
             return
 
 
 # ---------------------------------------------------------------------------
-# Message persistence
+# Message persistence (per user)
 # ---------------------------------------------------------------------------
 
-def _load_messages() -> list:
-    """Load chat messages from disk."""
+def _load_messages(user: User) -> list:
+    """Load chat messages from the user's history file."""
+    _maybe_migrate_legacy_admin(user)
+    path = _user_messages_file(user)
     try:
-        if MESSAGES_FILE.exists():
-            data = json.loads(MESSAGES_FILE.read_text())
+        if path.exists():
+            data = json.loads(path.read_text())
             if isinstance(data, list):
                 return data
     except Exception:
@@ -333,11 +390,12 @@ def _load_messages() -> list:
     return []
 
 
-def _save_messages(messages: list):
-    """Persist chat messages to disk."""
+def _save_messages(user: User, messages: list):
+    """Persist chat messages to the user's history file."""
+    path = _user_messages_file(user)
     try:
-        MESSAGES_FILE.parent.mkdir(parents=True, exist_ok=True)
-        MESSAGES_FILE.write_text(json.dumps(messages, indent=2))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(messages, indent=2))
     except Exception:
         pass
 
@@ -347,7 +405,6 @@ def _save_messages(messages: list):
 # ---------------------------------------------------------------------------
 
 def _msg_similarity(a: str, b: str) -> float:
-    """Quick word-overlap similarity between two strings."""
     wa = set(a.lower().split())
     wb = set(b.lower().split())
     if not wa or not wb:
@@ -355,7 +412,7 @@ def _msg_similarity(a: str, b: str) -> float:
     return len(wa & wb) / max(len(wa), len(wb))
 
 
-def _append_assistant_msg(messages: list, text: str, ts: float):
+def _append_assistant_msg(user: User, messages: list, text: str, ts: float):
     """Append an assistant message, skipping if too similar to the last one."""
     for m in reversed(messages):
         if m["role"] == "assistant":
@@ -363,7 +420,7 @@ def _append_assistant_msg(messages: list, text: str, ts: float):
                 return
             break
     messages.append({"role": "assistant", "text": text, "ts": ts})
-    _save_messages(messages)
+    _save_messages(user, messages)
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +449,6 @@ def _send_to_tmux(session_name: str, text: str):
             ["tmux", "send-keys", "-t", session_name, "-l", text],
             capture_output=True, text=True, timeout=5,
         )
-    # Press Enter
     subprocess.run(
         ["tmux", "send-keys", "-t", session_name, "Enter"],
         capture_output=True, text=True, timeout=5,
@@ -407,43 +463,39 @@ def _pane_hash(content: str) -> str:
     return hashlib.md5(content.encode()).hexdigest()
 
 
-def _extract_response(old_lines: int) -> Optional[str]:
+def _extract_response(user: User, session_name: str, old_lines: int) -> Optional[str]:
     """Extract Claude's response from new pane content since the user message."""
-    full = capture_pane_full(SESSION_NAME)
+    full = capture_pane_full(session_name)
     if not full:
         return None
 
     clean = _strip_ansi(full)
     all_lines = clean.split("\n")
 
-    # Get lines that appeared after the user message
     if old_lines > 0 and old_lines < len(all_lines):
         new_lines = all_lines[old_lines:]
     else:
-        # Fallback: try to find the response in the last portion
         new_lines = all_lines
 
-    # Filter out Claude Code UI chrome and empty lines
     ui_patterns = [
-        r'^[❯➜>]\s*$',                        # prompt characters
-        r'^─+$',                                # horizontal rules
-        r'^\s*$',                                # blank lines
-        r'^Tip:',                                # tip lines
-        r'esc to interrupt',                    # status bar
-        r'bypass permissions',                  # permissions banner
-        r'^[A-Z][a-zé]+ for \d+[ms]',          # completion time
-        r'^\s*╭',                               # box drawing top
-        r'^\s*╰',                               # box drawing bottom
-        r'^\s*│\s*$',                           # empty box sides
-        r'^⏵⏵\s',                               # bypass mode indicator
-        r'^\$ .*$',                              # shell prompt echo
+        r'^[❯➜>]\s*$',
+        r'^─+$',
+        r'^\s*$',
+        r'^Tip:',
+        r'esc to interrupt',
+        r'bypass permissions',
+        r'^[A-Z][a-zé]+ for \d+[ms]',
+        r'^\s*╭',
+        r'^\s*╰',
+        r'^\s*│\s*$',
+        r'^⏵⏵\s',
+        r'^\$ .*$',
     ]
 
     filtered = []
     for line in new_lines:
         stripped = line.strip()
         if not stripped:
-            # Keep blank lines within content, but skip leading/trailing
             if filtered:
                 filtered.append("")
             continue
@@ -455,11 +507,8 @@ def _extract_response(old_lines: int) -> Optional[str]:
         if not skip:
             filtered.append(stripped)
 
-    # Trim trailing empty lines
     while filtered and not filtered[-1]:
         filtered.pop()
-
-    # Trim leading empty lines
     while filtered and not filtered[0]:
         filtered.pop(0)
 
@@ -468,12 +517,10 @@ def _extract_response(old_lines: int) -> Optional[str]:
 
     response = "\n".join(filtered)
 
-    # Skip if the response is just the user's own message echoed back
-    user_msg = _last_send_state.get("user_msg", "")
+    user_msg = _send_state(user.id).get("user_msg", "")
     if user_msg and response.strip() == user_msg.strip():
         return None
 
-    # Skip very short responses that are likely just UI artifacts
     if len(response.strip()) < 3:
         return None
 
@@ -488,56 +535,59 @@ class SendRequest(BaseModel):
     message: str
 
 
+class SkillSaveRequest(BaseModel):
+    content: str
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
 @router.post("/send")
-async def send_message(body: SendRequest):
-    """Send a user message to the Claude Code tmux session."""
-    global _last_send_state
+async def send_message(
+    body: SendRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Send a user message to the user's Claude Code tmux session."""
     try:
-        _ensure_session()
+        _ensure_session(current_user)
+        session_name = _user_session_name(current_user)
 
-        # Capture current pane state for later response extraction
-        full = capture_pane_full(SESSION_NAME)
+        full = capture_pane_full(session_name)
         clean = _strip_ansi(full)
         line_count = len(clean.split("\n"))
         h = _pane_hash(clean)
 
-        _last_send_state = {
+        _last_send_states[current_user.id] = {
             "hash": h,
             "ts": time.time(),
             "lines": line_count,
             "user_msg": body.message,
         }
 
-        # Send message to tmux
-        _send_to_tmux(SESSION_NAME, body.message)
+        _send_to_tmux(session_name, body.message)
 
-        # Save user message to history
-        messages = _load_messages()
+        messages = _load_messages(current_user)
         messages.append({
             "role": "user",
             "text": body.message,
             "ts": time.time(),
         })
-        _save_messages(messages)
+        _save_messages(current_user, messages)
 
         return {"ok": True, "session_status": "busy"}
 
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception:
+        return JSONResponse({"error": "Failed to send message"}, status_code=500)
 
 
 @router.get("/status")
-async def get_status():
-    """Poll the session status. Extracts assistant responses when idle."""
-    global _last_send_state
+async def get_status(current_user: User = Depends(get_current_user)):
+    """Poll the user's session status. Extracts assistant responses when idle."""
     try:
-        session_exists = _session_exists()
-        if not session_exists:
-            messages = _load_messages()
+        session_name = _user_session_name(current_user)
+        if not _session_exists(session_name):
+            messages = _load_messages(current_user)
             return {
                 "status": "stopped",
                 "detail": "Session not running",
@@ -545,27 +595,25 @@ async def get_status():
                 "session_exists": False,
             }
 
-        activity = detect_activity(SESSION_NAME)
+        activity = detect_activity(current_user.id, session_name)
+        state = _send_state(current_user.id)
 
-        # If idle and enough time has passed since last send, try to
-        # extract Claude's response from the pane output.
         if (activity["status"] == "idle"
-                and _last_send_state["ts"] > 0
-                and time.time() - _last_send_state["ts"] > 3):
-            full = capture_pane_full(SESSION_NAME)
+                and state["ts"] > 0
+                and time.time() - state["ts"] > 3):
+            full = capture_pane_full(session_name)
             clean = _strip_ansi(full)
             current_hash = _pane_hash(clean)
 
-            if current_hash != _last_send_state["hash"]:
-                response = _extract_response(_last_send_state["lines"])
+            if current_hash != state["hash"]:
+                response = _extract_response(current_user, session_name, state["lines"])
                 if response:
-                    messages = _load_messages()
-                    _append_assistant_msg(messages, response, time.time())
-                # Mark as processed so we don't re-extract
-                _last_send_state["hash"] = current_hash
-                _last_send_state["ts"] = 0
+                    messages = _load_messages(current_user)
+                    _append_assistant_msg(current_user, messages, response, time.time())
+                state["hash"] = current_hash
+                state["ts"] = 0
 
-        messages = _load_messages()
+        messages = _load_messages(current_user)
         return {
             "status": activity["status"],
             "detail": activity["detail"],
@@ -573,82 +621,87 @@ async def get_status():
             "session_exists": True,
         }
 
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception:
+        return JSONResponse({"error": "Failed to get status"}, status_code=500)
 
 
 @router.post("/interrupt")
-async def interrupt_session():
+async def interrupt_session(current_user: User = Depends(get_current_user)):
     """Send Escape key to interrupt a running Claude Code session."""
-    if not _session_exists():
+    session_name = _user_session_name(current_user)
+    if not _session_exists(session_name):
         return JSONResponse({"error": "Session not found"}, status_code=404)
     try:
         subprocess.run(
-            ["tmux", "send-keys", "-t", SESSION_NAME, "Escape"],
+            ["tmux", "send-keys", "-t", session_name, "Escape"],
             capture_output=True, text=True, timeout=5,
         )
         return {"ok": True, "action": "interrupt"}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception:
+        return JSONResponse({"error": "Interrupt failed"}, status_code=500)
 
 
 @router.post("/restart")
-async def restart_session(clear_history: bool = Query(default=False)):
-    """Kill and recreate the Claude Code tmux session."""
+async def restart_session(
+    clear_history: bool = Query(default=False),
+    current_user: User = Depends(get_current_user),
+):
+    """Kill and recreate the user's Claude Code tmux session."""
     try:
-        # Kill existing session
-        if _session_exists():
+        session_name = _user_session_name(current_user)
+        if _session_exists(session_name):
             subprocess.run(
-                ["tmux", "kill-session", "-t", SESSION_NAME],
+                ["tmux", "kill-session", "-t", session_name],
                 capture_output=True, text=True, timeout=10,
             )
             time.sleep(0.5)
 
         if clear_history:
-            _save_messages([])
+            _save_messages(current_user, [])
 
-        # Recreate
-        _ensure_session()
+        _ensure_session(current_user)
         return {"ok": True, "action": "restart", "history_cleared": clear_history}
 
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception:
+        return JSONResponse({"error": "Restart failed"}, status_code=500)
 
 
 @router.get("/history")
-async def get_history():
-    """Return all chat messages from the history file."""
-    messages = _load_messages()
+async def get_history(current_user: User = Depends(get_current_user)):
+    """Return all chat messages from the user's history file."""
+    messages = _load_messages(current_user)
     return {"messages": messages}
 
 
 @router.post("/clear")
-async def clear_history(kill_session: bool = Query(default=False)):
-    """Clear all chat messages. Optionally kill the tmux session too."""
+async def clear_history(
+    kill_session: bool = Query(default=False),
+    current_user: User = Depends(get_current_user),
+):
+    """Clear the user's chat messages. Optionally kill their tmux session too."""
     try:
-        _save_messages([])
-
-        if kill_session and _session_exists():
+        _save_messages(current_user, [])
+        session_name = _user_session_name(current_user)
+        if kill_session and _session_exists(session_name):
             subprocess.run(
-                ["tmux", "kill-session", "-t", SESSION_NAME],
+                ["tmux", "kill-session", "-t", session_name],
                 capture_output=True, text=True, timeout=10,
             )
-
         return {"ok": True, "action": "clear", "session_killed": kill_session}
 
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception:
+        return JSONResponse({"error": "Clear failed"}, status_code=500)
 
 
 # ---------------------------------------------------------------------------
 # Raw terminal output endpoints
 # ---------------------------------------------------------------------------
 
-def _get_pane_position() -> int:
+def _get_pane_position(session_name: str) -> int:
     """Get current total line count in the pane (cheap, no content capture)."""
     try:
         result = subprocess.run(
-            ["tmux", "display-message", "-t", SESSION_NAME, "-p",
+            ["tmux", "display-message", "-t", session_name, "-p",
              "#{history_size}:#{cursor_y}"],
             capture_output=True, text=True, timeout=3,
         )
@@ -661,12 +714,13 @@ def _get_pane_position() -> int:
 
 
 @router.get("/raw")
-async def get_raw_output():
-    """Return the full raw terminal scrollback for the session."""
-    if not _session_exists():
+async def get_raw_output(current_user: User = Depends(get_current_user)):
+    """Return the full raw terminal scrollback for the user's session."""
+    session_name = _user_session_name(current_user)
+    if not _session_exists(session_name):
         return JSONResponse({"error": "Session not running"}, status_code=404)
-    raw = capture_pane_full(SESSION_NAME)
-    activity = detect_activity(SESSION_NAME)
+    raw = capture_pane_full(session_name)
+    activity = detect_activity(current_user.id, session_name)
     return {
         "raw": raw,
         "lines": len(raw.split("\n")),
@@ -676,16 +730,19 @@ async def get_raw_output():
 
 
 @router.get("/raw-tail")
-async def get_raw_tail(known_lines: int = 0):
+async def get_raw_tail(
+    known_lines: int = 0,
+    current_user: User = Depends(get_current_user),
+):
     """Return delta output since the client's last known line count."""
-    if not _session_exists():
+    session_name = _user_session_name(current_user)
+    if not _session_exists(session_name):
         return JSONResponse({"error": "Session not running"}, status_code=404)
 
-    current_total = _get_pane_position()
+    current_total = _get_pane_position(session_name)
 
-    # First load or reset → full capture
     if known_lines <= 0 or known_lines > current_total:
-        raw = capture_pane_full(SESSION_NAME)
+        raw = capture_pane_full(session_name)
         return {
             "mode": "full",
             "raw": raw,
@@ -693,9 +750,8 @@ async def get_raw_tail(known_lines: int = 0):
             "pane_total": current_total,
         }
 
-    # No new content
     if current_total <= known_lines:
-        activity = detect_activity(SESSION_NAME)
+        activity = detect_activity(current_user.id, session_name)
         return {
             "mode": "none",
             "raw": "",
@@ -704,9 +760,8 @@ async def get_raw_tail(known_lines: int = 0):
             "activity_status": activity.get("status", "unknown"),
         }
 
-    # Delta — capture recent lines
-    delta_count = current_total - known_lines + 5  # small overlap for safety
-    recent = capture_pane_recent(SESSION_NAME, delta_count)
+    delta_count = current_total - known_lines + 5
+    recent = capture_pane_recent(session_name, delta_count)
     return {
         "mode": "delta",
         "raw": recent,
@@ -716,22 +771,14 @@ async def get_raw_tail(known_lines: int = 0):
 
 
 # ---------------------------------------------------------------------------
-# Skills / .md file management
+# Skills / .md file management (per user)
 # ---------------------------------------------------------------------------
 
-SKILLS_DIR = Path(WORK_DIR)
-CLAUDE_SKILLS_DIR = SKILLS_DIR / ".claude" / "skills"
-# Expose root .md files + .claude/skills/ directory
-SKILLS_ALLOWED_DIRS = [
-    SKILLS_DIR,                      # ~/genomics-app/*.md (root CLAUDE.md etc.)
-    CLAUDE_SKILLS_DIR,               # ~/genomics-app/.claude/skills/*.md
-]
-
-
-def _list_skill_files() -> list[dict]:
-    """List all .md skill files the Claude Code session can see."""
+def _list_skill_files(user: User) -> list[dict]:
+    """List all .md skill files in the user's workspace."""
     files = []
-    for d in SKILLS_ALLOWED_DIRS:
+    workspace = Path(_user_work_dir(user))
+    for d in _user_skills_dirs(user):
         if not d.exists():
             continue
         for p in sorted(d.glob("*.md")):
@@ -739,53 +786,69 @@ def _list_skill_files() -> list[dict]:
                 continue
             try:
                 stat = p.stat()
+                rel_dir = ""
+                try:
+                    if d != workspace:
+                        rel_dir = str(d.relative_to(workspace))
+                except ValueError:
+                    rel_dir = ""
                 files.append({
                     "name": p.name,
                     "path": str(p),
                     "size": stat.st_size,
                     "modified": stat.st_mtime,
-                    "dir": str(d.relative_to(SKILLS_DIR)) if d != SKILLS_DIR else "",
+                    "dir": rel_dir,
                 })
             except Exception:
                 pass
     return files
 
 
-class SkillSaveRequest(BaseModel):
-    content: str
+def _resolve_skill_for_user(user: User, filename: str) -> Optional[Path]:
+    """Resolve a skill filename to a path inside the user's workspace, or None."""
+    for d in _user_skills_dirs(user):
+        try:
+            d_resolved = d.resolve()
+        except Exception:
+            continue
+        candidate = (d / filename).resolve()
+        try:
+            candidate.relative_to(d_resolved)
+        except ValueError:
+            continue
+        if candidate.is_file() and candidate.suffix == ".md":
+            return candidate
+    return None
 
 
 @router.get("/skills")
-async def list_skills():
-    """List all .md skill/instruction files."""
-    return {"files": _list_skill_files()}
+async def list_skills(current_user: User = Depends(get_current_user)):
+    """List all .md skill/instruction files in the user's workspace."""
+    return {"files": _list_skill_files(current_user)}
 
 
 @router.get("/skills/{filename:path}")
-async def read_skill(filename: str):
-    """Read a skill .md file by name."""
-    # Security: only allow files in the allowed directories
-    for d in SKILLS_ALLOWED_DIRS:
-        candidate = d / filename
-        try:
-            candidate = candidate.resolve()
-            if candidate.is_file() and candidate.suffix == ".md" and str(candidate).startswith(str(d.resolve())):
-                return {
-                    "name": candidate.name,
-                    "path": str(candidate),
-                    "content": candidate.read_text(encoding="utf-8"),
-                    "size": candidate.stat().st_size,
-                    "modified": candidate.stat().st_mtime,
-                }
-        except Exception:
-            continue
-    return JSONResponse({"error": "File not found"}, status_code=404)
+async def read_skill(filename: str, current_user: User = Depends(get_current_user)):
+    """Read a skill .md file by name from the user's workspace."""
+    candidate = _resolve_skill_for_user(current_user, filename)
+    if candidate is None:
+        return JSONResponse({"error": "File not found"}, status_code=404)
+    return {
+        "name": candidate.name,
+        "path": str(candidate),
+        "content": candidate.read_text(encoding="utf-8"),
+        "size": candidate.stat().st_size,
+        "modified": candidate.stat().st_mtime,
+    }
 
 
 @router.put("/skills/{filename:path}")
-async def save_skill(filename: str, body: SkillSaveRequest):
-    """Save/update a skill .md file."""
-    # Determine target directory
+async def save_skill(
+    filename: str,
+    body: SkillSaveRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Save/update a skill .md file in the user's workspace."""
     if "/" in filename:
         parts = filename.rsplit("/", 1)
         subdir = parts[0]
@@ -797,14 +860,21 @@ async def save_skill(filename: str, body: SkillSaveRequest):
     if not fname.endswith(".md"):
         fname += ".md"
 
-    target_dir = SKILLS_DIR / subdir if subdir else SKILLS_DIR
-    # Validate target_dir is in allowed dirs
-    target_dir_resolved = target_dir.resolve()
+    workspace = Path(_user_work_dir(current_user))
+    target_dir = workspace / subdir if subdir else workspace
+    try:
+        target_dir_resolved = target_dir.resolve()
+    except Exception:
+        return JSONResponse({"error": "Invalid path"}, status_code=400)
+
     allowed = False
-    for d in SKILLS_ALLOWED_DIRS:
-        if str(target_dir_resolved) == str(d.resolve()):
-            allowed = True
-            break
+    for d in _user_skills_dirs(current_user):
+        try:
+            if str(target_dir_resolved) == str(d.resolve()):
+                allowed = True
+                break
+        except Exception:
+            continue
     if not allowed:
         return JSONResponse({"error": "Directory not allowed"}, status_code=403)
 
@@ -818,17 +888,20 @@ async def save_skill(filename: str, body: SkillSaveRequest):
             "path": str(filepath),
             "size": filepath.stat().st_size,
         }
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception:
+        return JSONResponse({"error": "Save failed"}, status_code=500)
 
 
 @router.post("/skills/new")
-async def create_skill(body: SkillSaveRequest):
-    """Create a new skill .md file in the skills/ subdirectory."""
-    skills_sub = CLAUDE_SKILLS_DIR
+async def create_skill(
+    body: SkillSaveRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Create a new skill .md file in the user's .claude/skills/ subdirectory."""
+    workspace = Path(_user_work_dir(current_user))
+    skills_sub = workspace / ".claude" / "skills"
     skills_sub.mkdir(parents=True, exist_ok=True)
 
-    # Generate a filename from first line or default
     first_line = body.content.strip().split("\n")[0].strip("# ").strip()
     if first_line:
         safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', first_line)[:50].strip('_') + ".md"
@@ -836,7 +909,6 @@ async def create_skill(body: SkillSaveRequest):
         safe_name = f"skill_{int(time.time())}.md"
 
     filepath = skills_sub / safe_name
-    # Avoid overwriting
     counter = 1
     while filepath.exists():
         stem = safe_name.rsplit('.', 1)[0]
@@ -853,17 +925,25 @@ async def create_skill(body: SkillSaveRequest):
 
 
 @router.delete("/skills/{filename:path}")
-async def delete_skill(filename: str):
-    """Delete a skill .md file (only from .claude/skills/ subdirectory, not root)."""
-    # Only allow deleting from .claude/skills/, not root CLAUDE.md files
-    candidate = (CLAUDE_SKILLS_DIR / filename).resolve()
-    skills_resolved = CLAUDE_SKILLS_DIR.resolve()
-    if not str(candidate).startswith(str(skills_resolved)):
-        return JSONResponse({"error": "Can only delete files from skills/ directory"}, status_code=403)
+async def delete_skill(
+    filename: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a skill .md file (only from the user's .claude/skills/ subdir)."""
+    workspace = Path(_user_work_dir(current_user))
+    skills_sub = (workspace / ".claude" / "skills").resolve()
+    candidate = (workspace / ".claude" / "skills" / filename).resolve()
+    try:
+        candidate.relative_to(skills_sub)
+    except ValueError:
+        return JSONResponse(
+            {"error": "Can only delete files from skills/ directory"},
+            status_code=403,
+        )
     if not candidate.exists():
         return JSONResponse({"error": "File not found"}, status_code=404)
     try:
         candidate.unlink()
         return {"ok": True, "deleted": filename}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception:
+        return JSONResponse({"error": "Delete failed"}, status_code=500)

@@ -27,9 +27,13 @@ from backend.config import (
     NIMOG_OUTPUT_DIR,
     SAMTOOLS,
     UPLOADS_DIR,
+    user_uploads_dir,
+    user_vcfs_dir,
+    USERS_ROOT,
 )
 from backend.database import get_db
-from backend.models.schemas import GenomicFile, VCF, gen_uuid
+from backend.models.schemas import GenomicFile, User, VCF, gen_uuid
+from backend.utils.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +47,51 @@ router = APIRouter()
 # Cache BAM idxstats results: path -> {total_reads, mapped_reads, mapped_pct, cached_at}
 _bam_stats_cache: dict[str, dict[str, Any]] = {}
 
-# Alignment conversion jobs: job_id -> {status, started_at, ...}
+# Alignment conversion jobs: job_id -> {status, started_at, ..., user_id}
 _conversion_jobs: dict[str, dict[str, Any]] = {}
+
+
+# ---------------------------------------------------------------------------
+# Multi-user ownership helpers
+# ---------------------------------------------------------------------------
+
+
+def _user_owns_path(filepath: str, user: User) -> bool:
+    """Return True if `filepath` lives inside the user's per-user data dir."""
+    try:
+        resolved = Path(filepath).resolve()
+    except (OSError, RuntimeError):
+        return False
+    user_root = (USERS_ROOT / user.id).resolve()
+    try:
+        resolved.relative_to(user_root)
+        return True
+    except ValueError:
+        return False
+
+
+def _user_can_access_path(filepath: str, user: User, db: Session) -> bool:
+    """Check whether `user` may read/modify the genomic file at `filepath`.
+
+    Admins can access anything. Regular users can access:
+      * files inside their own per-user data dir, OR
+      * files that have a GenomicFile DB row they own.
+    """
+    if user.role == "admin":
+        return True
+    if _user_owns_path(filepath, user):
+        return True
+    gf = db.query(GenomicFile).filter(GenomicFile.path == filepath).first()
+    if gf and gf.user_id == user.id:
+        return True
+    return False
+
+
+def _scope_genomic_files(query, user: User):
+    """Restrict a GenomicFile query to rows visible to the current user."""
+    if user.role == "admin":
+        return query
+    return query.filter(GenomicFile.user_id == user.id)
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +555,70 @@ def _scan_vcf_files(db: Session) -> list[dict]:
     return results
 
 
+def _scan_user_dir(user_id: str, db: Session) -> list[dict]:
+    """Scan a single user's per-user data directory for genomic files.
+
+    Walks user_uploads_dir and user_vcfs_dir for BAM/FASTQ/VCF/gVCF files.
+    """
+    results: list[dict] = []
+    seen: set[str] = set()
+    try:
+        roots = [user_uploads_dir(user_id), user_vcfs_dir(user_id)]
+    except Exception:
+        return results
+
+    for root in roots:
+        if not root.exists():
+            continue
+        for filepath in sorted(map(str, root.rglob("*"))):
+            if filepath in seen or not os.path.isfile(filepath):
+                continue
+            seen.add(filepath)
+            ftype = _detect_file_type(filepath)
+            if ftype is None:
+                continue
+            try:
+                size = os.path.getsize(filepath)
+            except OSError:
+                size = 0
+            sample = _extract_sample_name(filepath, ftype)
+            format_details: dict = {}
+
+            # Index detection
+            if ftype == "bam":
+                for cand in (filepath + ".bai", re.sub(r"\.bam$", ".bai", filepath)):
+                    if os.path.isfile(cand):
+                        format_details["index_path"] = cand
+                        break
+            elif ftype == "cram":
+                for cand in (filepath + ".crai", re.sub(r"\.cram$", ".crai", filepath)):
+                    if os.path.isfile(cand):
+                        format_details["index_path"] = cand
+                        break
+            elif ftype in ("vcf", "gvcf"):
+                tbi = filepath + ".tbi"
+                if os.path.isfile(tbi):
+                    format_details["index_path"] = tbi
+
+            entry: dict = {
+                "file_type": ftype,
+                "path": filepath,
+                "sample_name": sample,
+                "file_size_bytes": size,
+                "has_index": "index_path" in format_details,
+                "format_details": format_details,
+            }
+
+            if ftype in ("vcf", "gvcf"):
+                vcf_id, gb, qc = _cross_reference_vcf(filepath, db)
+                entry["vcf_id"] = vcf_id
+                entry["genome_build"] = gb
+                entry["qc_status"] = qc
+
+            results.append(entry)
+    return results
+
+
 def _scan_gvcf_files(db: Session) -> list[dict]:
     """Scan for gVCF files from DeepVariant output."""
     results = []
@@ -677,29 +788,54 @@ def _detect_quality_encoding(quality_line: str) -> str:
 
 
 @router.get("/scan", response_model=list[ScannedFile])
-async def scan_files(db: Session = Depends(get_db)):
+async def scan_files(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Scan known directories for genomic files (BAM, FASTQ, VCF, gVCF).
 
     Returns enriched metadata including modification times, BAM read counts,
     VCF variant statistics, and FASTQ read count estimates.
 
-    Directories scanned:
-      - /data/aligned_bams/*.bam
-      - /data/organized/raw_data/fastq/**/*.fastq.gz and *.fq.gz
-      - /scratch/nimog_output/*/final.vcf.gz
-      - /scratch/nimog_output/*/dv/*.g.vcf.gz
+    Admins see all global directories plus every user's per-user data dir.
+    Regular users see only their own per-user data dir plus any GenomicFile
+    rows they own.
     """
     all_files: list[dict] = []
 
-    all_files.extend(_scan_bam_files())
-    all_files.extend(_scan_fastq_files())
-    all_files.extend(_scan_vcf_files(db))
-    all_files.extend(_scan_gvcf_files(db))
+    if current_user.role == "admin":
+        all_files.extend(_scan_bam_files())
+        all_files.extend(_scan_fastq_files())
+        all_files.extend(_scan_vcf_files(db))
+        all_files.extend(_scan_gvcf_files(db))
+
+    # Always scan the current user's per-user dir (and, for admins, every user's dir).
+    user_ids_to_scan = []
+    if current_user.role == "admin" and USERS_ROOT.exists():
+        user_ids_to_scan = [p.name for p in USERS_ROOT.iterdir() if p.is_dir()]
+    else:
+        user_ids_to_scan = [current_user.id]
+    for uid in user_ids_to_scan:
+        all_files.extend(_scan_user_dir(uid, db))
+
+    # Filter to only files the user can see (admins see everything, users see
+    # only files in their own dir or with a GenomicFile row they own).
+    if current_user.role != "admin":
+        owned_paths = {
+            gf.path
+            for gf in db.query(GenomicFile)
+            .filter(GenomicFile.user_id == current_user.id)
+            .all()
+        }
+        all_files = [
+            f for f in all_files
+            if _user_owns_path(f["path"], current_user) or f["path"] in owned_paths
+        ]
 
     # Cross-reference with GenomicFile table for already-registered files
     registered = {
         gf.path: gf
-        for gf in db.query(GenomicFile).all()
+        for gf in _scope_genomic_files(db.query(GenomicFile), current_user).all()
     }
 
     # Gather idxstats concurrently for all BAM/CRAM files with indices
@@ -768,7 +904,11 @@ async def scan_files(db: Session = Depends(get_db)):
 
 
 @router.post("/register", response_model=RegisterResponse, status_code=status.HTTP_201_CREATED)
-async def register_file(req: RegisterRequest, db: Session = Depends(get_db)):
+async def register_file(
+    req: RegisterRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Register a genomic file in the GenomicFile table.
 
     If the file is a VCF or gVCF, also triggers VCF registration via the
@@ -789,8 +929,29 @@ async def register_file(req: RegisterRequest, db: Session = Depends(get_db)):
             detail=f"Invalid file_type '{req.file_type}'. Must be one of: {', '.join(valid_types)}",
         )
 
+    # Regular users may only register files inside their own data dir.
+    if current_user.role != "admin" and not _user_owns_path(filepath, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only register files within your own user directory",
+        )
+
     existing = db.query(GenomicFile).filter(GenomicFile.path == filepath).first()
     if existing:
+        # Block hijacking another user's already-registered file.
+        if (
+            current_user.role != "admin"
+            and existing.user_id is not None
+            and existing.user_id != current_user.id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This file is registered to another user",
+            )
+        if existing.user_id is None:
+            existing.user_id = current_user.id
+            db.commit()
+            db.refresh(existing)
         return existing
 
     try:
@@ -828,7 +989,7 @@ async def register_file(req: RegisterRequest, db: Session = Depends(get_db)):
             from backend.api.vcfs import register_vcf, VCFRegisterRequest
             try:
                 vcf_req = VCFRegisterRequest(path=filepath)
-                vcf_row = await register_vcf(vcf_req, db)
+                vcf_row = await register_vcf(vcf_req, db, current_user)
                 vcf_id = vcf_row.id
                 genome_build = vcf_row.genome_build
             except HTTPException:
@@ -847,6 +1008,7 @@ async def register_file(req: RegisterRequest, db: Session = Depends(get_db)):
         file_size_bytes=file_size,
         format_details=format_details,
         vcf_id=vcf_id,
+        user_id=current_user.id,
     )
 
     db.add(gf)
@@ -862,7 +1024,11 @@ async def register_file(req: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/inspect", response_model=InspectResponse)
-async def inspect_file(req: InspectRequest):
+async def inspect_file(
+    req: InspectRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Deep inspection of a genomic file.
 
     Returns detailed metadata depending on file type:
@@ -875,6 +1041,12 @@ async def inspect_file(req: InspectRequest):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"File not found: {filepath}",
+        )
+
+    if not _user_can_access_path(filepath, current_user, db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this file",
         )
 
     file_type = _detect_file_type(filepath)
@@ -1030,7 +1202,11 @@ async def inspect_file(req: InspectRequest):
 
 
 @router.post("/validate", response_model=ValidateResponse)
-async def validate_file(req: ValidateRequest):
+async def validate_file(
+    req: ValidateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Validate integrity of a genomic file.
 
     - BAM: samtools quickcheck (returns 0 if OK)
@@ -1042,6 +1218,12 @@ async def validate_file(req: ValidateRequest):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"File not found: {filepath}",
+        )
+
+    if not _user_can_access_path(filepath, current_user, db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this file",
         )
 
     file_type = _detect_file_type(filepath)
@@ -1132,14 +1314,18 @@ async def upload_file(
     file: Optional[UploadFile] = File(None),
     url: Optional[str] = Form(None),
     filename: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
 ):
     """Upload a genomic file via multipart upload or download from a URL.
 
     - If `file` is provided: standard multipart upload
     - If `url` is provided: download via curl -L
     - `filename` form field can override the saved filename (for URL downloads)
+
+    Files are saved into the current user's per-user uploads dir.
     """
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    target_dir = user_uploads_dir(current_user.id)
+    target_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- URL download path ----
     if url:
@@ -1152,8 +1338,8 @@ async def upload_file(
                 url_basename = f"download_{uuid.uuid4().hex[:8]}"
             safe_name = re.sub(r"[^\w.\-]", "_", url_basename)
 
-        dest_path = UPLOADS_DIR / safe_name
-        dest_path = _unique_path(dest_path, safe_name)
+        dest_path = target_dir / safe_name
+        dest_path = _unique_path(dest_path, safe_name, target_dir)
 
         # Download via curl
         rc, stdout, stderr = await _run_cmd(
@@ -1186,8 +1372,8 @@ async def upload_file(
         )
 
     safe_name = re.sub(r"[^\w.\-]", "_", file.filename)
-    dest_path = UPLOADS_DIR / safe_name
-    dest_path = _unique_path(dest_path, safe_name)
+    dest_path = target_dir / safe_name
+    dest_path = _unique_path(dest_path, safe_name, target_dir)
 
     try:
         with open(dest_path, "wb") as out_file:
@@ -1212,10 +1398,13 @@ async def upload_file(
     )
 
 
-def _unique_path(dest_path: Path, safe_name: str) -> Path:
+def _unique_path(dest_path: Path, safe_name: str, target_dir: Optional[Path] = None) -> Path:
     """If dest_path exists, add a numeric suffix to make it unique."""
     if not dest_path.exists():
         return dest_path
+
+    if target_dir is None:
+        target_dir = dest_path.parent
 
     stem = dest_path.stem
     suffix = dest_path.suffix
@@ -1229,7 +1418,7 @@ def _unique_path(dest_path: Path, safe_name: str) -> Path:
 
     counter = 1
     while dest_path.exists():
-        dest_path = UPLOADS_DIR / f"{stem}_{counter}{suffix}"
+        dest_path = target_dir / f"{stem}_{counter}{suffix}"
         counter += 1
 
     return dest_path
@@ -1241,7 +1430,11 @@ def _unique_path(dest_path: Path, safe_name: str) -> Path:
 
 
 @router.post("/convert/fastq-to-bam", response_model=ConvertResponse)
-async def convert_fastq_to_bam(req: ConvertRequest):
+async def convert_fastq_to_bam(
+    req: ConvertRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Run FASTQ-to-BAM alignment pipeline (bwa mem or minimap2).
 
     Creates a background alignment job and returns a job_id immediately.
@@ -1264,6 +1457,11 @@ async def convert_fastq_to_bam(req: ConvertRequest):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"R2 FASTQ not found: {req.fastq_r2}",
+        )
+    if not _user_can_access_path(req.fastq_r1, current_user, db) or not _user_can_access_path(req.fastq_r2, current_user, db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to one or both FASTQ files",
         )
     if not os.path.isfile(req.reference):
         raise HTTPException(
@@ -1304,6 +1502,7 @@ async def convert_fastq_to_bam(req: ConvertRequest):
         "fastq_r2": req.fastq_r2,
         "reference": req.reference,
         "threads": req.threads,
+        "user_id": current_user.id,
     }
 
     # Launch background task
@@ -1391,13 +1590,22 @@ async def _run_alignment(job_id: str) -> None:
 
 
 @router.get("/convert/status/{job_id}", response_model=ConvertStatusResponse)
-async def convert_status(job_id: str):
+async def convert_status(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+):
     """Check the status of a FASTQ-to-BAM conversion job."""
     job = _conversion_jobs.get(job_id)
     if job is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job not found: {job_id}",
+        )
+
+    if current_user.role != "admin" and job.get("user_id") != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this conversion job",
         )
 
     return ConvertStatusResponse(
@@ -1422,7 +1630,11 @@ class RenameRequest(BaseModel):
     new_name: str
 
 @router.post("/rename")
-async def rename_file(req: RenameRequest, db: Session = Depends(get_db)):
+async def rename_file(
+    req: RenameRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Update the display name for a file (stored in GenomicFile table)."""
     from backend.models.schemas import GenomicFile, VCF
 
@@ -1430,10 +1642,15 @@ async def rename_file(req: RenameRequest, db: Session = Depends(get_db)):
     if not new_name:
         raise HTTPException(status_code=400, detail="Name cannot be empty")
 
+    if not _user_can_access_path(req.path, current_user, db):
+        raise HTTPException(status_code=403, detail="You do not have access to this file")
+
     # Update or create GenomicFile record
     gf = db.query(GenomicFile).filter(GenomicFile.path == req.path).first()
     if gf:
         gf.sample_name = new_name
+        if gf.user_id is None:
+            gf.user_id = current_user.id
     else:
         # Create a new record for this file
         file_type = "bam"
@@ -1445,6 +1662,7 @@ async def rename_file(req: RenameRequest, db: Session = Depends(get_db)):
             path=req.path,
             sample_name=new_name,
             file_size_bytes=os.path.getsize(req.path) if os.path.exists(req.path) else 0,
+            user_id=current_user.id,
         )
         db.add(gf)
     db.commit()
@@ -1468,11 +1686,17 @@ class DeleteFileRequest(BaseModel):
     path: str
 
 @router.post("/delete")
-async def delete_file(req: DeleteFileRequest, db: Session = Depends(get_db)):
+async def delete_file(
+    req: DeleteFileRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Delete a genomic file from disk and remove DB records."""
     from backend.models.schemas import GenomicFile, VCF
 
     filepath = req.path
+    if not _user_can_access_path(filepath, current_user, db):
+        raise HTTPException(status_code=403, detail="You do not have access to this file")
     deleted_files = []
     errors = []
 
@@ -1526,24 +1750,38 @@ class DuplicateFileRequest(BaseModel):
     target: str  # "persistent" (/data) or "fast" (/scratch)
 
 @router.post("/duplicate")
-async def duplicate_file(req: DuplicateFileRequest, db: Session = Depends(get_db)):
+async def duplicate_file(
+    req: DuplicateFileRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Copy a file between storage tiers (persistent ↔ fast SSD). Never moves — always copies."""
     import shutil
-    from backend.config import DATA_DIR, SCRATCH_DIR
+    from backend.config import DATA_DIR, SCRATCH_DIR, user_vcfs_dir
     from backend.models.schemas import GenomicFile, VCF
 
     src = req.path
     if not os.path.exists(src):
         raise HTTPException(status_code=400, detail=f"Source file not found: {src}")
 
+    if not _user_can_access_path(src, current_user, db):
+        raise HTTPException(status_code=403, detail="You do not have access to this file")
+
     filename = os.path.basename(src)
 
-    if req.target == "persistent":
-        dest_dir = DATA_DIR / "vcfs"
-    elif req.target == "fast":
-        dest_dir = SCRATCH_DIR / "vcfs"
+    # Per-user VCF dirs for regular users; admins keep using global dirs.
+    if current_user.role == "admin":
+        if req.target == "persistent":
+            dest_dir = DATA_DIR / "vcfs"
+        elif req.target == "fast":
+            dest_dir = SCRATCH_DIR / "vcfs"
+        else:
+            raise HTTPException(status_code=400, detail="Target must be 'persistent' or 'fast'")
     else:
-        raise HTTPException(status_code=400, detail="Target must be 'persistent' or 'fast'")
+        # For regular users, both targets land inside their user dir
+        if req.target not in ("persistent", "fast"):
+            raise HTTPException(status_code=400, detail="Target must be 'persistent' or 'fast'")
+        dest_dir = user_vcfs_dir(current_user.id)
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = str(dest_dir / filename)

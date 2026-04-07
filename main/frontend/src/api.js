@@ -63,7 +63,9 @@ export const runApi = {
 export function connectRunProgress(runId, onMessage, onClose) {
   const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const wsHost = window.location.host;
-  const ws = new WebSocket(`${wsProto}//${wsHost}/genomics/api/runs/${runId}/progress`);
+  const token = localStorage.getItem('auth_token') || '';
+  const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+  const ws = new WebSocket(`${wsProto}//${wsHost}/genomics/api/runs/${runId}/progress${tokenParam}`);
   ws.onmessage = (e) => { try { onMessage(JSON.parse(e.data)); } catch { onMessage({ raw: e.data }); } };
   ws.onclose = () => { if (onClose) onClose(); };
   ws.onerror = (err) => console.error('WS error:', err);
@@ -111,6 +113,16 @@ export const ancestryApi = {
   gwasAvailability: () => request('/ancestry/gwas-availability'),
   runInference: () => request('/ancestry/run-inference', { method: 'POST' }),
   importResults: (results) => request('/ancestry/import-results', { method: 'POST', body: JSON.stringify(results) }),
+};
+
+// Admin / user management endpoints (admin only)
+export const adminApi = {
+  listUsers: () => request('/admin/users'),
+  getUser: (id) => request(`/admin/users/${id}`),
+  createUser: (data) => request('/admin/users', { method: 'POST', body: JSON.stringify(data) }),
+  updateUser: (id, data) => request(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteUser: (id, purgeFiles = false) => request(`/admin/users/${id}${purgeFiles ? '?purge_files=true' : ''}`, { method: 'DELETE' }),
+  ensureWorkspace: (id) => request(`/admin/users/${id}/workspace`, { method: 'POST' }),
 };
 
 // Reports endpoints
