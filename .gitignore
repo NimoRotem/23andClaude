@@ -1,66 +1,130 @@
+# =============================================================================
+# Secrets — never commit
+# =============================================================================
+.env
+.env.*
+*.pem
+*.key
+*.crt
+secrets/
+credentials*.json
+
+# =============================================================================
 # Python
+# =============================================================================
 __pycache__/
 *.py[cod]
-*.egg-info/
+*.so
 *.egg
-dist/
-build/
+*.egg-info/
 .eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+build/
+dist/
+*.spec
+.python-version
+venv/
+.venv/
+env/
 
-# Environment
-.env
+# =============================================================================
+# Node / Vite
+# =============================================================================
+node_modules/
+**/dist/
+**/build/
+.vite/
+.cache/
 *.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# =============================================================================
+# Editors / OS
+# =============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# Genomics — large reference data, intermediates, results
+# =============================================================================
+# Reference panels and FASTA (re-download via setup scripts)
+**/reference/*.bed
+**/reference/*.bim
+**/reference/*.fam
+**/reference/*.pgen
+**/reference/*.pvar*
+**/reference/*.psam
+**/reference/*.fa
+**/reference/*.fa.gz
+**/reference/*.fasta
+**/reference/*.fasta.gz
+**/reference/*.fai
+**/reference/hgdp1kgp_chr*
+**/reference/per_chr/
+**/reference/hgdp_1kg_all.vcf.gz
+**/reference/*.bak
+**/reference/*.log
+**/reference/*.prune.*
+**/reference/*.tsv
+**/reference/high_ld_regions_hg38.txt
+**/reference/ref_pruned*
+
+# Sample / pipeline outputs
+**/uploads/
+**/results/
+**/scratch/
+**/run_nimo_work/
+**/run_*_work/
+**/output/
+
+# Model weights, containers
+*.sif
+*.weights
 
 # Database
 *.sqlite
+*.sqlite3
 *.db
 
-# Node.js
-node_modules/
-frontend/dist/
-frontend/dist-ssr/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Logs
-*.log
-
-# Nimog job state (regenerated at runtime)
-nimog/jobs/*.json
-
-# Data directories (too large for git — see README for setup)
-/data/
-/scratch/
-
-# Container images (multi-GB, download separately)
-*.sif
-
-# Genomic data files
+# Large genomic file types — never check these in
 *.bam
-*.bam.bai
 *.bai
 *.cram
 *.crai
 *.vcf
 *.vcf.gz
-*.vcf.gz.tbi
+*.tbi
+*.gvcf
+*.gvcf.gz
+*.g.vcf
 *.g.vcf.gz
-*.g.vcf.gz.tbi
-*.pgen
-*.psam
-*.pvar
-*.pvar.zst
+*.fastq
 *.fastq.gz
+*.fq
 *.fq.gz
-*.fasta
-*.fa
-*.fai
 
-# Sex check temp files
-sex_check*
+# =============================================================================
+# App-specific runtime state (regenerated)
+# =============================================================================
+main/nimog/jobs/*.json
+main/data/
+main/sex_check*
+main/plink2.log
+
+# =============================================================================
+# Local / personal Claude Code state
+# =============================================================================
+.claude/local/
+.claude/cache/

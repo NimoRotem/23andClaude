@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2025 Nimrod Rotem
+Copyright (c) 2026 The 23andClaude contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,22 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+-----------------------------------------------------------------------------
+Third-party components
+-----------------------------------------------------------------------------
+
+This project bundles or interoperates with several third-party tools and
+datasets, each with their own licenses and terms of use. Notable ones:
+
+- DeepVariant — BSD-3-Clause (Google)
+- bcftools, samtools, htslib — MIT / dual MIT-Expat
+- plink2 — GPL-3.0
+- Rye — MIT
+- bwa, minimap2 — MIT / BSD
+- PGS Catalog scoring files — CC-BY-4.0
+- gnomAD HGDP + 1000 Genomes reference panel — research use only
+
+If you publish results derived from these tools or datasets, please cite them
+appropriately. The MIT license above applies only to the code in this
+repository, not to the third-party components it depends on.
