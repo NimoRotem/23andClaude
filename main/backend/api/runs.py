@@ -25,23 +25,37 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from backend.config import PGS_CACHE_DIR, REDIS_URL, RUNS_DIR, SCRATCH_RUNS
+from backend.config import (
+    PGS_CACHE_DIR,
+    REDIS_URL,
+    RUNS_DIR,
+    SCRATCH_RUNS,
+    user_runs_dir,
+    user_scratch_runs_dir,
+)
 from backend.database import get_db
 from backend.models.schemas import (
     PGSCacheEntry,
     RunResult,
     ScoringRun,
+    User,
     VCF,
 )
+from backend.utils.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# ---------------------------------------------------------------------------
-# Placeholder auth — will be replaced by another agent
-# ---------------------------------------------------------------------------
-USER_ID = "default"
+
+def _scope_runs(query, current_user: User):
+    """Restrict a ScoringRun query to the current user's runs.
+
+    Admins see everything; everyone else only sees rows they own.
+    """
+    if current_user.role == "admin":
+        return query
+    return query.filter(ScoringRun.user_id == current_user.id)
 
 # ---------------------------------------------------------------------------
 # Constants for time estimation (recalibrated Mar 2026)
@@ -346,7 +360,11 @@ def _validate_source_files(
 # ---------------------------------------------------------------------------
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
-async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
+async def create_run(
+    body: CreateRunRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """
     Create a scoring run.
     Validates source files, checks build compatibility, creates ScoringRun,
@@ -394,7 +412,7 @@ async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
             config_snapshot["samples"] = vcf.samples or []
 
     run = ScoringRun(
-        user_id=USER_ID,
+        user_id=current_user.id,
         vcf_id=primary_vcf_id,
         pgs_ids=body.pgs_ids,
         engine=body.engine,
@@ -410,6 +428,7 @@ async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
     db.refresh(run)
 
     run_id = run.id
+    owner_id = current_user.id
 
     # Launch background scoring task
     # Route to fast plink2-native pipeline when all inputs are gVCFs
@@ -423,11 +442,15 @@ async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
         from backend.scoring.plink2_convert import check_pgen_exists
         from backend.config import PGEN_CACHE_DIR, PGS_CACHE_DIR
 
-        async def _run_fast(rid, sources, pgs_ids, population):
+        async def _run_fast(rid, sources, pgs_ids, population, owner):
             """Wrapper to run fast scoring pipeline and update DB + Redis."""
             import time as _time
             from backend.database import SessionLocal
-            from backend.config import RUNS_DIR, SCRATCH_RUNS
+            from backend.config import user_runs_dir, user_scratch_runs_dir
+
+            # Per-user output directories
+            persist_root = user_runs_dir(owner)
+            scratch_root = user_scratch_runs_dir(owner)
 
             redis_conn = None
             t0 = _time.monotonic()
@@ -460,8 +483,8 @@ async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
                 _db_update(
                     status="scoring", started_at=started_at,
                     progress_pct=2.0, current_step="preparing source files",
-                    results_path_persistent=str(RUNS_DIR / rid),
-                    results_path_fast=str(SCRATCH_RUNS / rid),
+                    results_path_persistent=str(persist_root / rid),
+                    results_path_fast=str(scratch_root / rid),
                 )
                 await _publish({
                     "type": "progress", "run_id": rid,
@@ -518,7 +541,7 @@ async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
                     "pct": 96, "step": "saving results", "status": "scoring",
                 })
 
-                for base_dir in [RUNS_DIR, SCRATCH_RUNS]:
+                for base_dir in [persist_root, scratch_root]:
                     results_dir = base_dir / rid
                     results_dir.mkdir(parents=True, exist_ok=True)
                     (results_dir / "results.json").write_text(
@@ -532,7 +555,7 @@ async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
                         pgs_safe = r_data.get("pgs_id", "?").replace("/", "_")
                         sf_base = os.path.basename(r_data.get("source_path", "")).split(".")[0] or "unknown"
                         detail_name = f"{pgs_safe}_{sf_base}_gvcf_detail.json"
-                        for base_dir in [RUNS_DIR, SCRATCH_RUNS]:
+                        for base_dir in [persist_root, scratch_root]:
                             try:
                                 (base_dir / rid / detail_name).write_text(
                                     json.dumps(vd, default=str)
@@ -650,7 +673,7 @@ async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
 
         logger.info(f"Run {run_id}: Using plink2 fast pipeline (all gVCF inputs)")
         asyncio.create_task(_run_fast(
-            run_id, enriched_source_files, body.pgs_ids, body.ref_population
+            run_id, enriched_source_files, body.pgs_ids, body.ref_population, owner_id
         ))
     else:
         from backend.scoring.engine import run_scoring_job
@@ -664,7 +687,11 @@ async def create_run(body: CreateRunRequest, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @router.post("/estimate", response_model=EstimateResponse)
-async def estimate_run(body: EstimateRequest, db: Session = Depends(get_db)):
+async def estimate_run(
+    body: EstimateRequest,
+    db: Session = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+):
     """
     Estimate the wall-clock time for a scoring run without actually creating one.
 
@@ -783,9 +810,10 @@ async def list_runs(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """List scoring runs for the current user, ordered by most recent first."""
-    query = db.query(ScoringRun).filter(ScoringRun.user_id == USER_ID)
+    query = _scope_runs(db.query(ScoringRun), current_user)
 
     if status_filter:
         query = query.filter(ScoringRun.status == status_filter)
@@ -798,8 +826,8 @@ async def list_runs(
         .all()
     )
 
-    # Fallback: if DB is empty, discover runs from disk
-    if not runs:
+    # Fallback (admin only): if DB is empty, discover runs from disk
+    if not runs and current_user.role == "admin":
         disk_runs = []
         for base_dir in [RUNS_DIR, SCRATCH_RUNS]:
             if not base_dir.exists():
@@ -845,15 +873,19 @@ async def list_runs(
 # ---------------------------------------------------------------------------
 
 @router.get("/{run_id}", response_model=RunDetail)
-async def get_run(run_id: str, db: Session = Depends(get_db)):
+async def get_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Return full details for a scoring run."""
-    run = db.query(ScoringRun).filter(
-        ScoringRun.id == run_id,
-        ScoringRun.user_id == USER_ID,
+    run = _scope_runs(
+        db.query(ScoringRun).filter(ScoringRun.id == run_id),
+        current_user,
     ).first()
 
-    if not run:
-        # Fallback: check disk for results.json
+    if not run and current_user.role == "admin":
+        # Fallback (admin only): check disk for results.json
         for base_dir in [RUNS_DIR, SCRATCH_RUNS]:
             rj = base_dir / run_id / "results.json"
             if rj.exists():
@@ -880,6 +912,8 @@ async def get_run(run_id: str, db: Session = Depends(get_db)):
                 except Exception as e:
                     logger.error("Failed to load run %s from disk: %s", run_id, e)
                 break
+
+    if not run:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Run not found: {run_id}",
@@ -893,23 +927,27 @@ async def get_run(run_id: str, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @router.get("/{run_id}/results", response_model=RunResultsResponse)
-async def get_run_results(run_id: str, db: Session = Depends(get_db)):
+async def get_run_results(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Return structured scoring results for a run, grouped by source file."""
-    run = db.query(ScoringRun).filter(
-        ScoringRun.id == run_id,
-        ScoringRun.user_id == USER_ID,
+    run = _scope_runs(
+        db.query(ScoringRun).filter(ScoringRun.id == run_id),
+        current_user,
     ).first()
 
-    if not run:
-        # Fallback: check if results exist on disk even without DB record
+    if not run and current_user.role == "admin":
+        # Fallback (admin only): check if results exist on disk even without DB record
         for base_dir in [RUNS_DIR, SCRATCH_RUNS]:
             if (base_dir / run_id / "results.json").exists():
                 run = type('FakeRun', (), {
-                    'id': run_id, 'status': 'complete', 'user_id': USER_ID,
+                    'id': run_id, 'status': 'complete', 'user_id': current_user.id,
                     'source_files': [], 'config_snapshot': {},
                 })()
                 break
-        if not run:
+    if not run:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Run not found: {run_id}",
@@ -1006,15 +1044,16 @@ async def get_run_result_detail(
     run_id: str,
     pgs_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Return the detailed per-variant JSON for a specific PGS score in a run.
 
-    Looks for the file at /data/runs/{run_id}/{pgs_id}_detail.json.
+    Looks for the file in the run's results_path_persistent directory.
     """
-    run = db.query(ScoringRun).filter(
-        ScoringRun.id == run_id,
-        ScoringRun.user_id == USER_ID,
+    run = _scope_runs(
+        db.query(ScoringRun).filter(ScoringRun.id == run_id),
+        current_user,
     ).first()
 
     if not run:
@@ -1031,10 +1070,18 @@ async def get_run_result_detail(
             detail="Invalid PGS ID",
         )
 
-    # Search for detail files matching this PGS ID (may have source type suffix)
-    run_dir = RUNS_DIR / run_id
-    if not run_dir.is_dir():
-        raise HTTPException(status_code=404, detail=f"Run directory not found")
+    # Locate the run directory: prefer the path stored on the run row, fall
+    # back to the legacy global RUNS_DIR/{run_id} layout for old runs.
+    candidate_dirs: list[Path] = []
+    if run.results_path_persistent:
+        candidate_dirs.append(Path(run.results_path_persistent))
+    if run.results_path_fast:
+        candidate_dirs.append(Path(run.results_path_fast))
+    candidate_dirs.append(RUNS_DIR / run_id)
+
+    run_dir: Optional[Path] = next((d for d in candidate_dirs if d.is_dir()), None)
+    if run_dir is None:
+        raise HTTPException(status_code=404, detail="Run directory not found")
 
     # Try patterns: {pgs_id}_detail.json, {pgs_id}_{type}_detail.json
     detail_files = list(run_dir.glob(f"{safe_pgs_id}*_detail.json"))
@@ -1048,7 +1095,7 @@ async def get_run_result_detail(
     all_details = []
     for detail_path in detail_files:
         try:
-            detail_path.resolve().relative_to(RUNS_DIR.resolve())
+            detail_path.resolve().relative_to(run_dir.resolve())
         except ValueError:
             continue
         try:
@@ -1073,11 +1120,15 @@ async def get_run_result_detail(
 # ---------------------------------------------------------------------------
 
 @router.get("/{run_id}/results/raw", response_model=list[RawFileEntry])
-async def list_raw_files(run_id: str, db: Session = Depends(get_db)):
+async def list_raw_files(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """List raw output files in the run directory."""
-    run = db.query(ScoringRun).filter(
-        ScoringRun.id == run_id,
-        ScoringRun.user_id == USER_ID,
+    run = _scope_runs(
+        db.query(ScoringRun).filter(ScoringRun.id == run_id),
+        current_user,
     ).first()
 
     if not run:
@@ -1127,11 +1178,12 @@ async def download_raw_file(
     run_id: str,
     filename: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Download / serve a specific raw output file."""
-    run = db.query(ScoringRun).filter(
-        ScoringRun.id == run_id,
-        ScoringRun.user_id == USER_ID,
+    run = _scope_runs(
+        db.query(ScoringRun).filter(ScoringRun.id == run_id),
+        current_user,
     ).first()
 
     if not run:
@@ -1178,11 +1230,15 @@ async def download_raw_file(
 # ---------------------------------------------------------------------------
 
 @router.post("/{run_id}/rerun", response_model=RerunResponse)
-async def rerun(run_id: str, db: Session = Depends(get_db)):
+async def rerun(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Clone the configuration of an existing run and launch a new one."""
-    original = db.query(ScoringRun).filter(
-        ScoringRun.id == run_id,
-        ScoringRun.user_id == USER_ID,
+    original = _scope_runs(
+        db.query(ScoringRun).filter(ScoringRun.id == run_id),
+        current_user,
     ).first()
 
     if not original:
@@ -1191,9 +1247,10 @@ async def rerun(run_id: str, db: Session = Depends(get_db)):
             detail=f"Run not found: {run_id}",
         )
 
-    # Clone configuration
+    # Clone configuration — re-run is owned by the user issuing the request,
+    # not by the original creator (lets admins re-run other users' configs).
     new_run = ScoringRun(
-        user_id=USER_ID,
+        user_id=current_user.id,
         vcf_id=original.vcf_id,
         pgs_ids=original.pgs_ids,
         engine=original.engine,
@@ -1230,11 +1287,12 @@ async def delete_run(
     run_id: str,
     delete_files: bool = Query(True, description="Also delete output files from disk"),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Delete a scoring run and its results from the database, and optionally from disk."""
-    run = db.query(ScoringRun).filter(
-        ScoringRun.id == run_id,
-        ScoringRun.user_id == USER_ID,
+    run = _scope_runs(
+        db.query(ScoringRun).filter(ScoringRun.id == run_id),
+        current_user,
     ).first()
 
     if not run:
@@ -1279,10 +1337,32 @@ async def ws_run_progress(websocket: WebSocket, run_id: str):
     """
     WebSocket endpoint that streams progress events for a scoring run.
 
+    Authentication: pass the JWT access token as a query parameter
+    `?token=<jwt>` since browsers can't set the Authorization header on
+    a WebSocket handshake.
+
     Subscribes to Redis pub/sub channel `run:{run_id}:progress` and
     forwards JSON events to the client approximately every second.
     Also sends an initial status snapshot from the database.
     """
+    # ----- Authenticate the WebSocket -----
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=4401)
+        return
+
+    from backend.utils.auth import decode_token
+    try:
+        payload = decode_token(token)
+        if payload.get("type") != "access":
+            raise ValueError("wrong token type")
+        user_id = payload.get("sub")
+        if not user_id:
+            raise ValueError("missing sub")
+    except Exception:
+        await websocket.close(code=4401)
+        return
+
     await websocket.accept()
 
     redis_conn = None
@@ -1293,6 +1373,12 @@ async def ws_run_progress(websocket: WebSocket, run_id: str):
         from backend.database import SessionLocal
         db = SessionLocal()
         try:
+            current = db.query(User).filter(User.id == user_id).first()
+            if current is None:
+                await websocket.send_json({"type": "error", "error": "User not found"})
+                await websocket.close(code=4401)
+                return
+
             run = db.query(ScoringRun).filter(ScoringRun.id == run_id).first()
             if not run:
                 await websocket.send_json({
@@ -1300,6 +1386,15 @@ async def ws_run_progress(websocket: WebSocket, run_id: str):
                     "error": f"Run not found: {run_id}",
                 })
                 await websocket.close(code=4004)
+                return
+
+            # Authorization: only the run's owner or an admin can subscribe
+            if current.role != "admin" and run.user_id != current.id:
+                await websocket.send_json({
+                    "type": "error",
+                    "error": "Forbidden",
+                })
+                await websocket.close(code=4403)
                 return
 
             await websocket.send_json({

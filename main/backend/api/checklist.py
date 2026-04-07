@@ -1,6 +1,7 @@
 """Checklist API — serves checklist markdown, persists check state,
 and auto-syncs with completed PGS scoring runs."""
 
+import hashlib
 import json
 import os
 import re
@@ -20,6 +21,7 @@ router = APIRouter()
 _CHECKLIST_MD = Path(__file__).parent.parent / "data" / "checklist.md"
 _STATE_FILE = APP_DIR / "checklist_state.json"
 _REPORTS_DIR = APP_DIR / "reports"
+_ESTIMATES_FILE = APP_DIR / "checklist_estimates.json"
 
 
 def _load_state() -> dict:
@@ -127,6 +129,285 @@ def _extract_pgs_map(markdown: str) -> dict:
                     pgs_map[pgs_id] = item_id
 
     return pgs_map
+
+
+# ── Runtime estimation ─────────────────────────────────────────────
+#
+# Estimates are intentionally rough — they're meant to give the user a
+# sense of "is this 30 seconds or 30 minutes" before kicking off a check.
+# Computed once per (checklist.md, server capabilities) pair and cached
+# in APP_DIR/checklist_estimates.json. Recomputed automatically when
+# either input changes, or manually via POST /api/checklist/estimates/refresh.
+
+def _estimate_seconds_for_check(check_name: str, pgs_id: str | None,
+                                variant_count: int | None,
+                                capabilities: dict) -> int:
+    """Rough runtime estimate (seconds) for a checklist row.
+
+    Inputs:
+        check_name      — the human-readable name of the check
+        pgs_id          — set if the row is a PGS scoring entry
+        variant_count   — variant count for PGS rows (parsed from the table)
+        capabilities    — server capabilities dict from /api/system/capabilities
+    """
+    cpu_count = int(capabilities.get("cpu_count") or 8)
+    # Baseline hardware: ~24 usable cores. Faster boxes get a discount,
+    # slower boxes get penalized, clamped to a sane range.
+    cpu_factor = max(0.4, min(1.6, 24 / max(cpu_count, 4)))
+
+    name_lower = (check_name or "").lower()
+
+    # ── PGS scoring: dominated by variant count ───────────────────
+    if pgs_id:
+        v = variant_count or 0
+        if v <= 200:
+            base = 25
+        elif v <= 10_000:
+            base = 40
+        elif v <= 200_000:
+            base = 60
+        elif v <= 1_000_000:
+            base = 100
+        elif v <= 3_000_000:
+            base = 150
+        elif v <= 6_000_000:
+            base = 200
+        else:
+            base = 260
+        return max(10, int(base * cpu_factor))
+
+    # ── Sex verification (5-check pipeline on BAM/CRAM) ───────────
+    if any(t in name_lower for t in (
+            "sex verification", "sex / gender", "sry gene", "msy reads",
+            "x:y read", "x:y ratio", "het rate on chrx",
+            "variant count on chry", "y chromosome read")):
+        return max(20, int(90 * cpu_factor))
+
+    # ── Ancestry pipeline (variant calling + plink2 + Rye) ────────
+    if any(t in name_lower for t in (
+            "ancestry pipeline", "admixture", "ancestry pca",
+            "pca projection", "global ancestry", "deep ancestry",
+            "fraposa", "rfmix")):
+        return max(120, int(600 * cpu_factor))
+
+    # ── Flagstat-derived (already-indexed BAM, very fast) ─────────
+    if any(t in name_lower for t in (
+            "flagstat", "duplicate read", "mapped read",
+            "alignment qc", "mapping rate")):
+        return max(5, int(15 * cpu_factor))
+
+    # ── bcftools stats / view full-genome scans ───────────────────
+    if any(t in name_lower for t in (
+            "ti/tv", "het/hom", "snp count", "indel count",
+            "het ratio", "hom ratio", "transition", "transversion")):
+        return max(60, int(180 * cpu_factor))
+
+    # ── Single-variant lookups (random-access bcftools query) ─────
+    if any(t in name_lower for t in (
+            "apoe", "factor v leiden", "mthfr", "prothrombin",
+            "tcf7l2", "fto", "pcsk9", "hfe ", " hfe", "ldlr",
+            " sry ", "sry presence")) or re.search(r"\brs\d+\b", name_lower):
+        return max(3, int(5 * cpu_factor))
+
+    # ── Monogenic disease region scans (region-restricted bcftools) ─
+    if any(t in name_lower for t in (
+            "cancer predisposition", "cardiovascular", "metabolism",
+            "miscellaneous", "neuromuscular", "skeletal dysplasia",
+            "deafness", "blood disorders", "vision")):
+        return max(8, int(20 * cpu_factor))
+
+    # ── Skill-based screens (carrier-status, monogenic disease, …) ─
+    if any(t in name_lower for t in (
+            "carrier status", "carrier-status", "carrier screen",
+            "carrier screening", "monogenic disease screen",
+            "monogenic-disease", "pharmacogenom", "pharma cogenom",
+            "single-variant health", "single variant health")):
+        return max(60, int(180 * cpu_factor))
+
+    # ── Other "screening" rows (catch-all skill tasks) ────────────
+    if "screening" in name_lower or "screen" in name_lower:
+        return max(45, int(120 * cpu_factor))
+
+    # ── ROH / runs of homozygosity ────────────────────────────────
+    if "roh" in name_lower or "homozygos" in name_lower:
+        return max(30, int(60 * cpu_factor))
+
+    # ── Mitochondrial haplogroup ──────────────────────────────────
+    if "mitochond" in name_lower or "haplogroup" in name_lower or "mtdna" in name_lower:
+        return max(10, int(30 * cpu_factor))
+
+    # Default: assume a moderate bcftools-style check
+    return max(20, int(60 * cpu_factor))
+
+
+def _format_seconds(s: int) -> str:
+    """Format an estimate as a short human-readable label."""
+    if s < 60:
+        return f"~{s}s"
+    if s < 120:
+        return f"~{round(s/60, 1):g}m"
+    if s < 3600:
+        return f"~{int(round(s/60))}m"
+    return f"~{round(s/3600, 1):g}h"
+
+
+def _compute_estimates(markdown: str, capabilities: dict) -> dict:
+    """Walk the checklist markdown and produce {item_id: {seconds, label}} for every row.
+
+    Mirrors the row-walking logic of _extract_pgs_map so item_id values stay
+    consistent with the rest of the checklist state.
+    """
+    estimates: dict = {}
+    current_section_id = None
+    base_section_id = None
+    row_idx = -1
+    in_table = False
+    var_col_idx = -1
+    name_col_idx = -1
+    done_col_idx = -1
+
+    for line in markdown.split("\n"):
+        h2 = re.match(r"^## (\d+)\.", line)
+        h3 = re.match(r"^### (.+)", line)
+        if h2:
+            base_section_id = f"s{h2.group(1)}"
+            current_section_id = base_section_id
+            row_idx = -1
+            in_table = False
+            continue
+        if h3 and base_section_id:
+            sub = h3.group(1).strip().lower()
+            sub = re.sub(r"[^a-z0-9]+", "-", sub).strip("-")
+            current_section_id = f"{base_section_id}-{sub}"
+            row_idx = -1
+            in_table = False
+            continue
+
+        if not line.startswith("|") or not current_section_id:
+            if in_table:
+                in_table = False
+                row_idx = -1
+            continue
+
+        cells = [c.strip() for c in line.split("|")[1:-1]]
+        # Separator row
+        if all(re.match(r"^[-:]+$", c) for c in cells if c):
+            continue
+        # Header row — same heuristic the rest of this file uses
+        if any(c.lower() in ("done", "condition", "trait", "marker", "gene",
+                              "disease", "analysis", "database", "tool",
+                              "pathway", "category") for c in cells):
+            in_table = True
+            row_idx = -1
+            lower = [c.lower() for c in cells]
+            done_col_idx = next((i for i, h in enumerate(lower) if "done" in h), -1)
+            var_col_idx = next((i for i, h in enumerate(lower) if "variant" in h), -1)
+            name_col_idx = (done_col_idx + 1) if done_col_idx >= 0 else 0
+            continue
+
+        if not in_table:
+            continue
+
+        row_idx += 1
+        item_id = f"{current_section_id}:{row_idx}"
+
+        # PGS ID anywhere in the row
+        pgs_id = None
+        for cell in cells:
+            m = re.search(r"PGS\d{6,}", cell)
+            if m:
+                pgs_id = m.group(0)
+                break
+
+        # Variant count from the "Variants" column, if present
+        variant_count = None
+        if 0 <= var_col_idx < len(cells):
+            num_str = re.sub(r"[^\d]", "", cells[var_col_idx])
+            if num_str:
+                try:
+                    variant_count = int(num_str)
+                except ValueError:
+                    variant_count = None
+
+        # Check name from the column right after Done (or "Condition", etc.)
+        check_name = ""
+        if 0 <= name_col_idx < len(cells):
+            raw = cells[name_col_idx]
+            # Strip markdown link/bold/parenthetical noise
+            raw = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", raw)
+            raw = re.sub(r"\*+", "", raw)
+            raw = re.sub(r"\(.*?\)", "", raw)
+            check_name = raw.strip()
+
+        # If a row had a PGS ID but no extractable check name, fall back to
+        # the next non-empty cell so single-variant tables still get a name.
+        if pgs_id and not check_name:
+            for c in cells:
+                clean = re.sub(r"\*+", "", c).strip()
+                if clean and not re.match(r"^PGS\d{6,}$", clean):
+                    check_name = clean
+                    break
+
+        seconds = _estimate_seconds_for_check(check_name, pgs_id, variant_count, capabilities)
+        estimates[item_id] = {
+            "seconds": seconds,
+            "label": _format_seconds(seconds),
+        }
+
+    return estimates
+
+
+def _current_capabilities() -> dict:
+    """Snapshot of the server capabilities the estimates depend on."""
+    try:
+        from backend.config import CPU_COUNT, RAM_GB, GPU_AVAILABLE, ALIGN_THREADS
+        return {
+            "cpu_count": int(CPU_COUNT),
+            "ram_gb": int(RAM_GB) if RAM_GB else 0,
+            "gpu_available": bool(GPU_AVAILABLE),
+            "align_threads": int(ALIGN_THREADS) if ALIGN_THREADS else int(CPU_COUNT),
+        }
+    except Exception:
+        return {"cpu_count": 8, "ram_gb": 0, "gpu_available": False, "align_threads": 8}
+
+
+def _get_estimates(force: bool = False) -> dict:
+    """Return cached checklist estimates, recomputing only when checklist.md
+    or server capabilities change (or when force=True).
+    """
+    if not _CHECKLIST_MD.exists():
+        return {}
+
+    md = _CHECKLIST_MD.read_text(encoding="utf-8")
+    md_hash = hashlib.md5(md.encode("utf-8")).hexdigest()
+    capabilities = _current_capabilities()
+    cap_hash = hashlib.md5(
+        json.dumps(capabilities, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    if not force and _ESTIMATES_FILE.exists():
+        try:
+            cached = json.loads(_ESTIMATES_FILE.read_text())
+            if (cached.get("md_hash") == md_hash
+                    and cached.get("cap_hash") == cap_hash
+                    and isinstance(cached.get("estimates"), dict)):
+                return cached["estimates"]
+        except Exception:
+            pass
+
+    estimates = _compute_estimates(md, capabilities)
+    try:
+        _ESTIMATES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _ESTIMATES_FILE.write_text(json.dumps({
+            "md_hash": md_hash,
+            "cap_hash": cap_hash,
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "capabilities": capabilities,
+            "estimates": estimates,
+        }, indent=2))
+    except Exception:
+        pass
+    return estimates
 
 
 # ── Report generation ──────────────────────────────────────────────
@@ -439,6 +720,12 @@ async def get_checklist(sample: str = ""):
     for v in state.get("scores", {}).values():
         all_samples.update(v.keys())
 
+    estimates = {}
+    try:
+        estimates = _get_estimates()
+    except Exception:
+        pass
+
     return {
         "markdown": content,
         "scores": filtered.get("scores", {}),
@@ -448,6 +735,7 @@ async def get_checklist(sample: str = ""):
         "reports": filtered.get("reports", {}),
         "current_sample": sample,
         "available_samples": sorted(all_samples),
+        "estimates": estimates,
     }
 
 
@@ -521,6 +809,16 @@ async def force_sync():
         }
     except Exception as e:
         return JSONResponse({"error": str(e)}, 500)
+
+
+@router.post("/estimates/refresh")
+async def refresh_estimates():
+    """Force recomputation of checklist runtime estimates."""
+    try:
+        estimates = _get_estimates(force=True)
+        return {"ok": True, "count": len(estimates), "estimates": estimates}
+    except Exception:
+        return JSONResponse({"error": "Failed to refresh estimates"}, 500)
 
 
 @router.get("/samples")

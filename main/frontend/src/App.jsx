@@ -6,12 +6,20 @@ import ChatPanel from './components/ChatPanel.jsx';
 import ServerPanel from './components/ServerPanel.jsx';
 import ChecklistPanel from './components/ChecklistPanel.jsx';
 import ReportsPanel from './components/ReportsPanel.jsx';
+import UserManagementPanel from './components/UserManagementPanel.jsx';
 import StatusBar from './components/StatusBar.jsx';
 import useSystemStats from './hooks/useSystemStats.js';
 import './App.css';
 
 import Login from './components/Login';
-const TABS = [
+
+const ADMIN_TAB = {
+  label: 'Users',
+  icon: 'M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75',
+  adminOnly: true,
+};
+
+const BASE_TABS = [
   { label: 'AI Assistant', icon: 'M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z' },
   { label: 'Data & Pipeline', icon: 'M4 7v10c0 2 1 3 3 3h10c2 0 3-1 3-3V7c0-2-1-3-3-3H7c-2 0-3 1-3 3zm5 2h6m-6 3h6m-6 3h4' },
   { label: 'Checklist', icon: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h.01M9 16h.01M9 12h.01M13 16h.01M13 12h.01' },
@@ -84,6 +92,10 @@ function App() {
   if (!authChecked) return null;
   if (!user) return <Login onLogin={(data) => setUser({ token: data.access_token, ...data.user })} />;
 
+  // Tabs available to all users; the Users tab is appended only for admins.
+  const isAdmin = user && user.role === 'admin';
+  const TABS = isAdmin ? [...BASE_TABS, ADMIN_TAB] : BASE_TABS;
+
   // Build panel index map: skip route-based tabs (they navigate away)
   const panelComponents = [
     <ChatPanel key="chat" />,
@@ -92,6 +104,9 @@ function App() {
     <ReportsPanel key="reports" />,
     <ServerPanel key="server" stats={sysStats} loading={sysLoading} error={sysError} />,
   ];
+  if (isAdmin) {
+    panelComponents.push(<UserManagementPanel key="users" currentUserId={user.id} />);
+  }
 
   // Map tab index to panel index (route tabs don't have panels)
   const tabToPanelIndex = [];
