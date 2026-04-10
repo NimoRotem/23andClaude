@@ -27,14 +27,20 @@ SIGNATURES_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "reference", "signatures.yaml"
 )
 RYE_SCRIPT = os.path.join(APP_ROOT, "tools", "rye", "rye.R")
+RYE_PY_SCRIPT = os.path.join(APP_ROOT, "tools", "rye", "rye.py")
+# Toggle: prefer the Python port (much faster) over the R script.
+RYE_USE_PYTHON = os.environ.get("RYE_USE_PYTHON", "1") not in ("0", "", "false", "False")
 
 THREADS = max(1, os.cpu_count() or 2)
 MIN_OVERLAP = 50000
 
-# Ensure bioinformatics tools are on PATH. Set GENOMICS_BIN env var to point at
-# the bin directory of your bcftools/plink2/samtools install (e.g. a conda env).
-_GENOMICS_BIN = os.environ.get('GENOMICS_BIN', '')
-if _GENOMICS_BIN and _GENOMICS_BIN not in os.environ.get('PATH', ''):
+# Optional chr-prefixed GRCh38 reference for decoding chr1..chr22-style BAM/CRAM files
+# (e.g. CRAMs from DRAGEN). Sequence bytes match the standard hs38DH GRCh38 build.
+CHR_PREFIXED_FASTA = "/data/refs/hs38DH.fa"
+
+# Ensure bioinformatics tools are on PATH (conda env may not be inherited)
+_GENOMICS_BIN = '/home/nimo/miniconda3/envs/genomics/bin'
+if _GENOMICS_BIN not in os.environ.get('PATH', ''):
     os.environ['PATH'] = _GENOMICS_BIN + ':' + os.environ.get('PATH', '')
 
 
@@ -328,6 +334,33 @@ def _check_sample_chr_format(bim_path: str) -> str:
     raise PipelineError("Sample BIM file is empty")
 
 
+def _detect_bam_chr_format(input_path: str, fasta_path: Optional[str]) -> str:
+    """Detect BAM/CRAM chromosome naming convention from header. Returns 'chr' or 'num'.
+
+    Reads @SQ lines via `samtools view -H` and inspects the first SN: field.
+    """
+    cmd = ["samtools", "view", "-H"]
+    if fasta_path:
+        cmd.extend(["--reference", fasta_path])
+    cmd.append(input_path)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except (subprocess.SubprocessError, FileNotFoundError) as e:
+        raise PipelineError(f"Failed to read BAM/CRAM header: {e}")
+    if result.returncode != 0:
+        raise PipelineError(
+            f"samtools view -H failed for {input_path}: {result.stderr.strip()}"
+        )
+    for line in result.stdout.split("\n"):
+        if not line.startswith("@SQ"):
+            continue
+        for field in line.split("\t"):
+            if field.startswith("SN:"):
+                sn = field[3:]
+                return "chr" if sn.startswith("chr") else "num"
+    raise PipelineError(f"No @SQ records found in BAM/CRAM header: {input_path}")
+
+
 def _get_ref_id_format() -> str:
     """Check whether reference panel variant IDs use 'chr' prefix. Returns 'chr' or 'num'."""
     bim_path = f"{REF_BED}.bim"
@@ -439,16 +472,23 @@ def step_extract_variants_vcf(input_path: str, tmpdir: str, on_progress: Callabl
 
 def _call_variants_for_chr(args: tuple) -> str:
     """Call variants for a single chromosome. Returns path to per-chr VCF or empty string on failure."""
-    chrom, input_path, fasta_path, targets_tsv, tmpdir, tracker = args
+    chrom, input_path, fasta_path, targets_tsv, tmpdir, tracker, chr_prefix, rename_chrs_file = args
     chr_vcf = os.path.join(tmpdir, f"chr{chrom}.vcf.gz")
+    region = f"{chr_prefix}{chrom}"
     if tracker:
         tracker.set_sub_task(f"chr{chrom}", f"chr{chrom}", "running", "bcftools mpileup")
     try:
+        rename_step = (
+            f'| bcftools annotate --rename-chrs "{rename_chrs_file}" '
+            if rename_chrs_file
+            else ""
+        )
         _run(
             f'bcftools mpileup -f "{fasta_path}" -T "{targets_tsv}" '
-            f'-r {chrom} --min-MQ 20 --min-BQ 20 --max-depth 500 "{input_path}" '
+            f'-r {region} --min-MQ 20 --min-BQ 20 --max-depth 500 "{input_path}" '
             f'| bcftools call -m --ploidy GRCh38 '
             f'| bcftools view --types snps -m2 -M2 '
+            f'{rename_step}'
             f"| bcftools annotate --set-id '%CHROM:%POS:%REF:%ALT' "
             f'-Oz -o "{chr_vcf}"',
             cwd=tmpdir,
@@ -480,13 +520,45 @@ def step_extract_variants_bam(input_path: str, tmpdir: str, fasta_path: str, on_
     if not os.path.exists(fasta_path):
         raise PipelineError(f"Reference FASTA not found: {fasta_path}")
 
-    on_progress(5, "Extracting target positions from reference panel")
+    # Detect BAM/CRAM chromosome naming so we can match targets and region args.
+    # Some files (e.g. CRAMs from DRAGEN) use 'chr1'..'chr22'; others use '1'..'22'.
+    bam_chr_format = _detect_bam_chr_format(input_path, fasta_path)
+    ref_bim_chr_format = _check_ref_chr_format()
+    chr_prefix = "chr" if bam_chr_format == "chr" else ""
+
+    # If the BAM/CRAM is chr-prefixed, the supplied fasta_path may not match
+    # (it may have numeric sequence names). Switch to the chr-prefixed
+    # reference if it exists. This is critical for CRAMs because CRAM decoding
+    # looks up sequences by name.
+    if bam_chr_format == "chr" and os.path.exists(CHR_PREFIXED_FASTA):
+        fasta_path = CHR_PREFIXED_FASTA
+
+    on_progress(5, f"Extracting target positions from reference panel ({bam_chr_format}-style)")
     targets_tsv = os.path.join(tmpdir, "targets.tsv")
+    # Build targets file with chromosome names that match the BAM/CRAM
+    if bam_chr_format == "chr" and ref_bim_chr_format == "num":
+        awk_expr = '{print "chr"$1, $4}'
+    elif bam_chr_format == "num" and ref_bim_chr_format == "chr":
+        awk_expr = '{print substr($1,4), $4}'
+    else:
+        awk_expr = '{print $1, $4}'
     _run(
-        f"awk -v OFS='\\t' '{{print $1, $4}}' \"{REF_BED}.bim\" > \"{targets_tsv}\"",
+        f"awk -v OFS='\\t' '{awk_expr}' \"{REF_BED}.bim\" > \"{targets_tsv}\"",
         cwd=tmpdir,
         tracker=tracker,
     )
+
+    # If the BAM/CRAM is chr-prefixed, build a rename file so the per-chr VCFs
+    # are normalized to numeric chromosomes (matching the rest of the pipeline).
+    rename_chrs_file = ""
+    if bam_chr_format == "chr":
+        rename_chrs_file = os.path.join(tmpdir, "chr_rename.txt")
+        with open(rename_chrs_file, "w") as f:
+            for c in range(1, 23):
+                f.write(f"chr{c}\t{c}\n")
+            f.write("chrX\tX\n")
+            f.write("chrY\tY\n")
+            f.write("chrM\tMT\n")
 
     # Run per-chromosome variant calling in parallel (22 chromosomes across available cores)
     n_workers = min(22, THREADS)
@@ -498,7 +570,7 @@ def step_extract_variants_bam(input_path: str, tmpdir: str, fasta_path: str, on_
             tracker.set_sub_task(f"chr{c}", f"chr{c}", "queued", "waiting")
 
     chr_args = [
-        (str(c), input_path, fasta_path, targets_tsv, tmpdir, tracker)
+        (str(c), input_path, fasta_path, targets_tsv, tmpdir, tracker, chr_prefix, rename_chrs_file)
         for c in range(1, 23)
     ]
 
@@ -775,18 +847,35 @@ def _rye_pass(
     if not os.path.exists(pop2group_path):
         raise PipelineError(f"pop2group file not found: {pop2group_path}")
 
-    rye_cmd = RYE_SCRIPT if os.path.exists(RYE_SCRIPT) else "rye.R"
-
-    _run(
-        f'Rscript "{rye_cmd}" '
-        f'--eigenvec="{eigenvec}" '
-        f'--eigenval="{eigenval}" '
-        f'--pop2group="{pop2group_path}" '
-        f'--rounds=50 --iter=50 --threads={THREADS} --attempts={THREADS} --pcs={pcs} '
-        f'--out="{rye_out}"',
-        cwd=tmpdir,
-        tracker=tracker,
-    )
+    if RYE_USE_PYTHON and os.path.exists(RYE_PY_SCRIPT):
+        # Python port: ~25-30x faster than the R version, single attempt is
+        # sufficient (the R per-attempt parallelism existed only to amortize
+        # R's per-iteration loop overhead, which Python doesn't have).
+        py = os.path.join(_GENOMICS_BIN, 'python')
+        if not os.path.exists(py):
+            py = 'python'
+        _run(
+            f'{py} "{RYE_PY_SCRIPT}" '
+            f'--eigenvec="{eigenvec}" '
+            f'--eigenval="{eigenval}" '
+            f'--pop2group="{pop2group_path}" '
+            f'--rounds=50 --iter=50 --threads={THREADS} --attempts=1 --pcs={pcs} '
+            f'--output="{rye_out}"',
+            cwd=tmpdir,
+            tracker=tracker,
+        )
+    else:
+        rye_cmd = RYE_SCRIPT if os.path.exists(RYE_SCRIPT) else "rye.R"
+        _run(
+            f'Rscript "{rye_cmd}" '
+            f'--eigenvec="{eigenvec}" '
+            f'--eigenval="{eigenval}" '
+            f'--pop2group="{pop2group_path}" '
+            f'--rounds=50 --iter=50 --threads={THREADS} --attempts={THREADS} --pcs={pcs} '
+            f'--out="{rye_out}"',
+            cwd=tmpdir,
+            tracker=tracker,
+        )
 
     return rye_out
 
@@ -895,6 +984,21 @@ def step_rye(pca_prefix: str, tmpdir: str, on_progress: Callable,
     return rye_out
 
 
+# GRCh38 autosomal total length (chromosomes 1-22) in megabases.
+# Used as the denominator for the inbreeding coefficient F_ROH:
+#     F_ROH = sum of ROH segment lengths / total autosomal length
+# 2881 Mb is the commonly-cited GRCh38 autosomal total used in the ROH
+# literature (e.g., gnomAD, 1000 Genomes FROH calculations).
+AUTOSOMAL_MB_GRCH38 = 2881.0
+
+
+def _compute_froh(total_mb: float) -> float:
+    """Return F_ROH = total_mb / AUTOSOMAL_MB_GRCH38, rounded to 4 decimals."""
+    if not total_mb or total_mb <= 0:
+        return 0.0
+    return round(total_mb / AUTOSOMAL_MB_GRCH38, 4)
+
+
 def step_roh(sample_prefix: str, tmpdir: str, on_progress: Callable,
               tracker: "JobTracker" = None) -> Optional[dict]:
     """Run ROH analysis. Returns ROH summary dict or None."""
@@ -916,31 +1020,36 @@ def step_roh(sample_prefix: str, tmpdir: str, on_progress: Callable,
         tracker=tracker,
     )
 
-    summary_file = f"{roh_prefix}.hom.summary"
-    if not os.path.exists(summary_file):
+    indiv_file = f"{roh_prefix}.hom.indiv"
+    if not os.path.exists(indiv_file):
         return None
 
-    return _parse_roh_summary(summary_file)
+    return _parse_roh_indiv(indiv_file)
 
 
-def _parse_roh_summary(summary_file: str) -> Optional[dict]:
-    """Parse plink .hom.summary file and return ROH stats."""
-    with open(summary_file, "r") as f:
+def _parse_roh_indiv(indiv_file: str) -> Optional[dict]:
+    """Parse plink .hom.indiv (per-sample ROH summary) and return ROH stats.
+
+    Format (whitespace-delimited, one row per sample):
+        FID  IID  PHE  NSEG  KB  KBAVG
+
+    Note: PLINK .hom.summary is per-SNP population data (CHR SNP BP AFF
+    UNAFF) and is NOT what we want. The per-sample summary lives in
+    .hom.indiv. NSEG=0 is a legitimate result (no ROH detected).
+    """
+    with open(indiv_file, "r") as f:
         lines = f.readlines()
 
     if len(lines) < 2:
         return None
 
-    # Header: FID IID PHE NSEG KB KBAVG
-    # Find the data line (should be line 1, the query sample)
     header = lines[0].strip().split()
     data_line = lines[-1].strip().split()
 
-    if len(data_line) < 6:
+    if len(data_line) < len(header):
         return None
 
     try:
-        # Map header to values
         header_map = {h: data_line[i] for i, h in enumerate(header)}
 
         n_segments = int(header_map.get("NSEG", 0))
@@ -948,7 +1057,6 @@ def _parse_roh_summary(summary_file: str) -> Optional[dict]:
         avg_kb = float(header_map.get("KBAVG", 0))
         total_mb = total_kb / 1000.0
 
-        # Bottleneck heuristic: >50 Mb total ROH or >10 segments >1 Mb
         bottleneck = total_mb > 50 or (n_segments > 10 and avg_kb > 1000)
 
         return {
@@ -956,8 +1064,10 @@ def _parse_roh_summary(summary_file: str) -> Optional[dict]:
             "n_segments": n_segments,
             "avg_kb": round(avg_kb, 2),
             "bottleneck": bottleneck,
+            "froh": _compute_froh(total_mb),
+            "autosomal_mb": AUTOSOMAL_MB_GRCH38,
         }
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, IndexError):
         return None
 
 
@@ -991,6 +1101,8 @@ def _parse_roh_hom_file(hom_file: str) -> Optional[dict]:
         "n_segments": len(segments),
         "avg_kb": round(avg_kb, 2),
         "bottleneck": bottleneck,
+        "froh": _compute_froh(total_mb),
+        "autosomal_mb": AUTOSOMAL_MB_GRCH38,
     }
 
 

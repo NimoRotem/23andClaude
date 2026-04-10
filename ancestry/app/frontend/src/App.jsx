@@ -204,142 +204,74 @@ function PCAPlot({ pca, sampleName, extraQueries }) {
     ctx.textAlign = "center";
     ctx.fillText(pcLabels[axX], W / 2, H - 8);
     ctx.save();
-    ctx.translate(14, H / 2);
+    ctx.translate(12, H / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.fillText(pcLabels[axY], 0, 0);
     ctx.restore();
     ctx.textAlign = "start";
 
     // Legend
-    const legendX = W - 130, legendY = 16;
-    const groups = Object.keys(GROUP_COLORS);
+    const groups = [...new Set(pca.ref_samples.map((s) => s.group))];
+    const legX = W - 140, legY = 20;
+    ctx.font = "11px -apple-system, sans-serif";
     groups.forEach((g, i) => {
       ctx.fillStyle = groupColor(g);
-      ctx.beginPath();
-      ctx.arc(legendX, legendY + i * 18, 4, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.beginPath(); ctx.arc(legX, legY + i * 16, 4, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = "#8b949e";
-      ctx.font = "10px -apple-system, sans-serif";
-      ctx.fillText(g, legendX + 10, legendY + i * 18 + 3);
+      ctx.fillText(g, legX + 10, legY + i * 16 + 4);
     });
-  }, [pca, axes, sampleName, extraQueries]);
 
-  if (!pca?.query) return null;
+  }, [pca, axes, extraQueries]);
+
+  if (!pca?.query || !pca?.ref_samples) return null;
 
   return (
-    <div>
-      <div style={{ ...s.sectionTitle, fontSize: 16, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span>PCA Plot</span>
+    <div style={s.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div style={s.sectionTitle}>PCA — Principal Component Analysis</div>
         <div style={{ display: "flex", gap: 6 }}>
-          <button
-            style={{ ...s.btn, ...s.btnSecondary, padding: "4px 10px", fontSize: 11, ...(axes[0] === 0 ? { background: "#30363d" } : {}) }}
-            onClick={() => setAxes([0, 1])}
-          >
-            PC1 vs PC2
-          </button>
-          <button
-            style={{ ...s.btn, ...s.btnSecondary, padding: "4px 10px", fontSize: 11, ...(axes[0] === 2 ? { background: "#30363d" } : {}) }}
-            onClick={() => setAxes([2, 3])}
-          >
-            PC3 vs PC4
-          </button>
-        </div>
-      </div>
-      <div style={{ ...s.card, padding: 0, overflow: "hidden" }}>
-        <canvas
-          ref={canvasRef}
-          width={760}
-          height={440}
-          style={{ width: "100%", height: "auto", display: "block" }}
-        />
-      </div>
-    </div>
-  );
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   Population Breakdown
-   ═══════════════════════════════════════════════════════════════ */
-function PopulationBreakdown({ popProportions, proportions }) {
-  const [open, setOpen] = useState(false);
-  if (!popProportions || Object.keys(popProportions).length === 0) return null;
-
-  // Group populations by their continental group
-  const grouped = {};
-  for (const [pop, val] of Object.entries(popProportions)) {
-    const group = POP_TO_GROUP[pop] || "Other";
-    if (!grouped[group]) grouped[group] = [];
-    grouped[group].push([pop, val]);
-  }
-  // Sort groups by group-level proportion, pops within by value
-  const sortedGroups = Object.entries(grouped)
-    .sort((a, b) => {
-      const aSum = a[1].reduce((s, [, v]) => s + v, 0);
-      const bSum = b[1].reduce((s, [, v]) => s + v, 0);
-      return bSum - aSum;
-    });
-  for (const [, pops] of sortedGroups) {
-    pops.sort((a, b) => b[1] - a[1]);
-  }
-
-  return (
-    <div>
-      <div
-        style={{ ...s.sectionTitle, fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}
-        onClick={() => setOpen(!open)}
-      >
-        Population-Level Detail
-        <span style={{ fontSize: 12, color: "#8b949e" }}>{open ? "▲" : "▼"}</span>
-        <span style={{ fontSize: 12, color: "#8b949e", fontWeight: 400 }}>
-          ({Object.keys(popProportions).length} populations detected)
-        </span>
-      </div>
-      {open && (
-        <div style={s.card}>
-          {sortedGroups.map(([group, pops]) => (
-            <div key={group} style={{ marginBottom: 16 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <div style={{ width: 10, height: 10, borderRadius: "50%", background: groupColor(group), flexShrink: 0 }} />
-                <span style={{ fontSize: 14, fontWeight: 600, color: "#e6edf3" }}>{group}</span>
-                <span style={{ fontSize: 12, color: "#8b949e" }}>
-                  ({(pops.reduce((s, [, v]) => s + v, 0) * 100).toFixed(1)}%)
-                </span>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 6, marginLeft: 18 }}>
-                {pops.map(([pop, val]) => (
-                  <div key={pop} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 10px", background: "#0d1117", borderRadius: 4, border: "1px solid #21262d" }}>
-                    <span style={{ fontSize: 12, color: "#c9d1d9" }}>{pop}</span>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: groupColor(group) }}>
-                      {(val * 100).toFixed(1)}%
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
+          {[[0,1],[0,2],[1,2],[0,3]].map(([a,b]) => (
+            <button key={`${a}-${b}`}
+              style={{ ...s.btn, padding: "4px 10px", fontSize: 11,
+                ...(axes[0] === a && axes[1] === b ? { background: "#21262d", color: "#e6edf3" } : { background: "transparent", color: "#8b949e", border: "1px solid #30363d" }) }}
+              onClick={() => setAxes([a, b])}>
+              {pcLabels[a]} vs {pcLabels[b]}
+            </button>
           ))}
         </div>
-      )}
+      </div>
+      <canvas ref={canvasRef} width={760} height={500} style={{ width: "100%", borderRadius: 8, border: "1px solid #21262d" }} />
+      <div style={{ fontSize: 12, color: "#8b949e", marginTop: 8 }}>
+        Each dot is a reference sample from the gnomAD HGDP+1kGP panel. Your sample is the orange marker.
+        PCA captures the major axes of genetic variation.
+      </div>
     </div>
   );
 }
 
+
 /* ═══════════════════════════════════════════════════════════════
-   Composition, Flags, ROH, TechDetails (existing)
+   Composition Chart
    ═══════════════════════════════════════════════════════════════ */
 function CompositionChart({ proportions }) {
+  if (!proportions) return null;
   const sorted = Object.entries(proportions).sort((a, b) => b[1] - a[1]);
+  const visible = sorted.filter(([, v]) => v > 0.005);
+
   return (
-    <>
+    <div>
+      {/* Composition bar */}
       <div style={s.compBar}>
-        {sorted.map(([g, v]) => (
-          <div key={g} title={`${g}: ${(v * 100).toFixed(1)}%`}
-            style={{ ...s.compSegment, width: `${Math.max(v * 100, 0.5)}%`, background: groupColor(g) }}>
-            {v > 0.05 ? `${(v * 100).toFixed(0)}%` : ""}
+        {visible.map(([g, v]) => (
+          <div key={g} style={{ ...s.compSegment, width: `${v * 100}%`, background: groupColor(g) }}
+            title={`${g}: ${(v * 100).toFixed(1)}%`}>
+            {v > 0.06 ? `${(v * 100).toFixed(0)}%` : ""}
           </div>
         ))}
       </div>
+      {/* Proportion cards */}
       <div style={s.compGrid}>
-        {sorted.filter(([, v]) => v > 0.005).map(([g, v]) => (
+        {visible.map(([g, v]) => (
           <div key={g} style={s.compCard}>
             <div style={{ ...s.compDot, background: groupColor(g) }} />
             <div>
@@ -349,133 +281,34 @@ function CompositionChart({ proportions }) {
           </div>
         ))}
       </div>
-    </>
-  );
-}
-
-function SignatureCard({ match }) {
-  const isHigh = match.confidence >= 0.7;
-  const borderColor = isHigh ? "#3fb950" : "#d29922";
-  const badgeBg = isHigh ? "#0d3117" : "#2d2000";
-  const badgeColor = isHigh ? "#3fb950" : "#d29922";
-  const confLabel = isHigh ? "High" : "Moderate";
-  const confPct = Math.round(match.confidence * 100);
-
-  return (
-    <div style={{
-      background: "#161b22", border: `1px solid ${borderColor}`, borderLeft: `4px solid ${borderColor}`,
-      borderRadius: 10, padding: "20px 24px", marginBottom: 12,
-    }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-        <div style={{ fontSize: 17, fontWeight: 700, color: "#e6edf3" }}>{match.display_name}</div>
-        <span style={{
-          padding: "3px 10px", borderRadius: 12, fontSize: 12, fontWeight: 600,
-          background: badgeBg, color: badgeColor, whiteSpace: "nowrap",
-        }}>
-          {confLabel} ({confPct}%)
-        </span>
-      </div>
-      {match.description && (
-        <div style={{ fontSize: 13, color: "#8b949e", lineHeight: 1.5, marginBottom: 14 }}>
-          {match.description}
-        </div>
-      )}
-      {match.details && match.details.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          {match.details.map((d, i) => (
-            <div key={i} style={{
-              background: "#0d1117", border: "1px solid #30363d", borderRadius: 6,
-              padding: "6px 12px", display: "flex", alignItems: "center", gap: 8, fontSize: 12,
-            }}>
-              <span style={{ color: "#e6edf3", fontWeight: 600 }}>{d.group}</span>
-              <span style={{ color: d.in_range ? "#3fb950" : "#f85149", fontWeight: 700 }}>
-                {d.actual}%
-              </span>
-              <span style={{ color: "#6e7681" }}>
-                [{d.range[0]}-{d.range[1]}%]
-              </span>
-              <span style={{ fontSize: 10 }}>
-                {d.in_range ? "\u2713" : "\u2717"}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
 
-function SignaturesSection({ signatures }) {
-  const [showPartial, setShowPartial] = useState(false);
 
-  if (!signatures || signatures.length === 0) return null;
-
-  const full = signatures.filter((sig) => sig.confidence >= 0.3);
-  const partial = signatures.filter((sig) => sig.confidence > 0 && sig.confidence < 0.3);
-
-  if (full.length === 0 && partial.length === 0) return null;
-
-  return (
-    <div>
-      <div style={{ ...s.sectionTitle, fontSize: 16 }}>Population Signatures</div>
-      {full.map((m, i) => <SignatureCard key={m.id || i} match={m} />)}
-      {partial.length > 0 && (
-        <div>
-          <div
-            style={{ fontSize: 13, color: "#8b949e", cursor: "pointer", marginTop: 8, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}
-            onClick={() => setShowPartial(!showPartial)}
-          >
-            {partial.length} partial match{partial.length > 1 ? "es" : ""}
-            <span style={{ fontSize: 10 }}>{showPartial ? "\u25B2" : "\u25BC"}</span>
-          </div>
-          {showPartial && partial.map((m, i) => <SignatureCard key={m.id || i} match={m} />)}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function Flags({ flags }) {
-  if (!flags || !flags.length) return null;
-  return (
-    <div>
-      <div style={{ ...s.sectionTitle, fontSize: 16 }}>Interpretation</div>
-      {flags.map((f, i) => (
-        <div key={i} style={s.flagBox}>
-          <span style={{ fontSize: 18, flexShrink: 0 }}>🔍</span>
-          <span style={{ fontSize: 13, lineHeight: 1.5 }}>{f}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
+/* ═══════════════════════════════════════════════════════════════
+   Ancestry Context (group detail cards)
+   ═══════════════════════════════════════════════════════════════ */
 function AncestryContext({ proportions }) {
-  const significant = Object.entries(proportions)
-    .filter(([, v]) => v > 0.02)
-    .sort((a, b) => b[1] - a[1]);
-  if (significant.length === 0) return null;
+  if (!proportions) return null;
+  const sorted = Object.entries(proportions).sort((a, b) => b[1] - a[1]).filter(([, v]) => v > 0.005);
 
   return (
-    <div>
-      <div style={{ ...s.sectionTitle, fontSize: 16 }}>Ancestry Context</div>
-      {significant.map(([group, val]) => {
-        const info = GROUP_INFO[group];
-        if (!info) return null;
+    <div style={s.card}>
+      <div style={s.sectionTitle}>Ancestry Context</div>
+      {sorted.map(([g, v]) => {
+        const info = GROUP_INFO[g] || {};
         return (
-          <div key={group} style={{
-            background: "#161b22", border: "1px solid #30363d", borderRadius: 8,
-            padding: "14px 18px", marginBottom: 10, display: "flex", gap: 14, alignItems: "flex-start",
-          }}>
-            <span style={{ fontSize: 28, flexShrink: 0, lineHeight: 1 }}>{info.emoji}</span>
-            <div style={{ flex: 1 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
-                <span style={{ fontSize: 14, fontWeight: 600, color: groupColor(group) }}>{group}</span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "#e6edf3" }}>{(val * 100).toFixed(1)}%</span>
+          <div key={g} style={{ padding: "14px 0", borderBottom: "1px solid #21262d" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <span style={{ fontSize: 20 }}>{info.emoji || "🌐"}</span>
+              <div>
+                <span style={{ fontSize: 14, fontWeight: 600, color: groupColor(g) }}>{g}</span>
+                <span style={{ fontSize: 12, color: "#8b949e", marginLeft: 8 }}>{info.region || ""}</span>
               </div>
-              <div style={{ fontSize: 11, color: "#58a6ff", marginBottom: 4 }}>{info.region}</div>
-              <div style={{ fontSize: 12, color: "#8b949e", lineHeight: 1.6 }}>{info.desc}</div>
+              <span style={{ marginLeft: "auto", fontSize: 16, fontWeight: 700, color: "#e6edf3" }}>{(v * 100).toFixed(1)}%</span>
             </div>
+            <div style={{ fontSize: 13, color: "#8b949e", lineHeight: 1.6, paddingLeft: 30 }}>{info.desc || ""}</div>
           </div>
         );
       })}
@@ -483,143 +316,318 @@ function AncestryContext({ proportions }) {
   );
 }
 
-function WorldMap({ proportions }) {
-  const canvasRef = useRef(null);
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const W = canvas.width, H = canvas.height;
+/* ═══════════════════════════════════════════════════════════════
+   Population Breakdown (detailed pop-level results)
+   ═══════════════════════════════════════════════════════════════ */
+function PopulationBreakdown({ popProportions, proportions }) {
+  const [showAll, setShowAll] = useState(false);
+  if (!popProportions || Object.keys(popProportions).length === 0) return null;
 
-    ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = "#0d1117";
-    ctx.fillRect(0, 0, W, H);
-
-    // Simple equirectangular projection: lon [-180,180] -> [0,W], lat [-60,80] -> [H,0]
-    const lonToX = (lon) => ((lon + 180) / 360) * W;
-    const latToY = (lat) => ((80 - lat) / 140) * H;
-
-    // Draw simplified continent outlines (coarse polygons)
-    const continents = [
-      // Europe
-      [[-10,36],[-10,60],[0,62],[10,65],[30,70],[40,65],[45,55],[40,40],[25,35],[10,36]],
-      // Africa
-      [[-18,15],[-18,35],[-5,36],[10,36],[15,30],[35,30],[42,12],[50,5],[42,-5],[35,-25],[28,-35],[18,-35],[10,-20],[5,5],[-5,5],[-18,10]],
-      // Asia
-      [[30,70],[40,65],[45,55],[50,50],[60,55],[70,55],[80,50],[90,50],[100,55],[110,55],[120,55],[130,50],[140,45],[145,50],[150,60],[160,65],[170,65],[180,65],[180,25],[140,20],[120,10],[105,10],[100,20],[95,20],[80,25],[70,25],[60,30],[50,40],[40,40],[35,35],[30,35],[30,70]],
-      // Americas
-      [[-130,55],[-125,60],[-140,70],[-170,65],[-165,60],[-140,55],[-125,50],[-120,35],[-115,30],[-105,20],[-100,20],[-85,10],[-80,10],[-75,5],[-80,0],[-75,-10],[-60,-5],[-50,-5],[-45,-15],[-40,-20],[-50,-30],[-55,-40],[-70,-55],[-75,-50],[-75,-40],[-70,-18],[-80,-5],[-80,5],[-85,12],[-90,15],[-95,20],[-105,25],[-120,35],[-125,48]],
-      // Australia
-      [[115,-12],[130,-12],[140,-12],[150,-18],[153,-25],[150,-35],[140,-38],[130,-35],[120,-25],[115,-20]],
-    ];
-
-    ctx.strokeStyle = "#21262d";
-    ctx.lineWidth = 1;
-    for (const poly of continents) {
-      ctx.beginPath();
-      for (let i = 0; i < poly.length; i++) {
-        const x = lonToX(poly[i][0]), y = latToY(poly[i][1]);
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.closePath();
-      ctx.fillStyle = "#161b2288";
-      ctx.fill();
-      ctx.stroke();
-    }
-
-    // Draw ancestry bubbles
-    const significant = Object.entries(proportions).filter(([, v]) => v > 0.01).sort((a, b) => b[1] - a[1]);
-    for (const [group, val] of significant) {
-      const geo = GROUP_GEO[group];
-      if (!geo) continue;
-      const x = lonToX(geo[0]), y = latToY(geo[1]);
-      const radius = Math.max(8, Math.sqrt(val) * 50);
-
-      // Glow
-      ctx.globalAlpha = 0.2;
-      ctx.fillStyle = groupColor(group);
-      ctx.beginPath(); ctx.arc(x, y, radius + 8, 0, Math.PI * 2); ctx.fill();
-
-      // Solid circle
-      ctx.globalAlpha = 0.7;
-      ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill();
-
-      // Percentage label
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = "#fff";
-      ctx.font = `bold ${Math.max(11, radius * 0.5)}px -apple-system, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      const pctText = `${(val * 100).toFixed(0)}%`;
-      ctx.fillText(pctText, x, y);
-
-      // Group name below
-      ctx.fillStyle = "#c9d1d9";
-      ctx.font = "10px -apple-system, sans-serif";
-      ctx.fillText(group, x, y + radius + 14);
-    }
-    ctx.textAlign = "start";
-    ctx.textBaseline = "alphabetic";
-    ctx.globalAlpha = 1;
-  }, [proportions]);
+  const sorted = Object.entries(popProportions).sort((a, b) => b[1] - a[1]);
+  const display = showAll ? sorted : sorted.filter(([, v]) => v > 0.005);
 
   return (
-    <div>
-      <div style={{ ...s.sectionTitle, fontSize: 16 }}>Ancestry Map</div>
-      <div style={{ ...s.card, padding: 0, overflow: "hidden" }}>
-        <canvas ref={canvasRef} width={760} height={380}
-          style={{ width: "100%", height: "auto", display: "block" }} />
+    <div style={s.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={s.sectionTitle}>Population-Level Breakdown</div>
+        <button style={{ ...s.btn, ...s.btnSecondary, padding: "4px 12px", fontSize: 12 }}
+          onClick={() => setShowAll(!showAll)}>{showAll ? "Show significant" : "Show all"}</button>
+      </div>
+      <div style={{ fontSize: 12, color: "#8b949e", marginBottom: 16 }}>
+        NNLS decomposition across {Object.keys(popProportions).length} reference populations
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid #30363d" }}>
+            <th style={{ textAlign: "left", padding: "8px 12px", fontSize: 12, color: "#8b949e", fontWeight: 500 }}>Population</th>
+            <th style={{ textAlign: "left", padding: "8px 12px", fontSize: 12, color: "#8b949e", fontWeight: 500 }}>Group</th>
+            <th style={{ textAlign: "right", padding: "8px 12px", fontSize: 12, color: "#8b949e", fontWeight: 500 }}>%</th>
+            <th style={{ textAlign: "left", padding: "8px 12px", fontSize: 12, color: "#8b949e", fontWeight: 500, width: "40%" }}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {display.map(([pop, val]) => {
+            const group = POP_TO_GROUP[pop] || "Unknown";
+            return (
+              <tr key={pop} style={{ borderBottom: "1px solid #161b22" }}>
+                <td style={{ padding: "6px 12px", fontSize: 13, color: "#e6edf3" }}>{pop}</td>
+                <td style={{ padding: "6px 12px", fontSize: 12 }}>
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor(group), display: "inline-block" }} />
+                    <span style={{ color: "#8b949e" }}>{group}</span>
+                  </span>
+                </td>
+                <td style={{ padding: "6px 12px", fontSize: 13, color: "#e6edf3", textAlign: "right", fontWeight: 500 }}>
+                  {(val * 100).toFixed(1)}
+                </td>
+                <td style={{ padding: "6px 12px" }}>
+                  <div style={{ height: 6, background: "#21262d", borderRadius: 3, overflow: "hidden" }}>
+                    <div style={{ height: "100%", width: `${Math.min(val * 100 * 2, 100)}%`, background: groupColor(group), borderRadius: 3 }} />
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   Flags
+   ═══════════════════════════════════════════════════════════════ */
+function Flags({ flags }) {
+  if (!flags || flags.length === 0) return null;
+  return (
+    <div style={s.card}>
+      <div style={s.sectionTitle}>Flags & Insights</div>
+      {flags.map((f, i) => (
+        <div key={i} style={s.flagBox}>
+          <span style={{ fontSize: 18 }}>🔍</span>
+          <div style={{ fontSize: 13, color: "#c9d1d9", lineHeight: 1.6 }}>{f}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   ROH (Runs of Homozygosity)
+   ═══════════════════════════════════════════════════════════════ */
+function ROH({ roh }) {
+  if (!roh) return null;
+  return (
+    <div style={s.card}>
+      <div style={s.sectionTitle}>Runs of Homozygosity (ROH)</div>
+      <div style={s.rohCard}>
+        <div>
+          <div style={s.rohVal}>{typeof roh.total_mb === "number" ? roh.total_mb.toFixed(1) : roh.total_mb ?? "—"}</div>
+          <div style={s.rohLabel}>Total ROH (Mb)</div>
+        </div>
+        <div>
+          <div style={s.rohVal}>{roh.n_segments ?? "—"}</div>
+          <div style={s.rohLabel}>Segments</div>
+        </div>
+        <div>
+          <div style={s.rohVal}>{typeof roh.avg_kb === "number" ? roh.avg_kb.toFixed(0) : roh.avg_kb ?? "—"}</div>
+          <div style={s.rohLabel}>Avg Segment (kb)</div>
+        </div>
+        <div>
+          <div style={{ ...s.rohVal, color: roh.bottleneck ? "#d29922" : "#3fb950" }}>
+            {roh.bottleneck ? "Yes" : "No"}
+          </div>
+          <div style={s.rohLabel}>Bottleneck Signal</div>
+        </div>
+      </div>
+      <div style={{ fontSize: 12, color: "#8b949e", marginTop: 12, lineHeight: 1.6 }}>
+        ROH reflect identical-by-descent segments inherited from shared ancestors. Higher values can
+        indicate founder effects, endogamy, or recent consanguinity. Typical ranges: outbred
+        populations ~0–50 Mb; founder populations (e.g. Finnish, Ashkenazi) ~50–200 Mb.
       </div>
     </div>
   );
 }
 
-function ROH({ roh }) {
-  if (!roh) return null;
+
+/* ═══════════════════════════════════════════════════════════════
+   Technical Details
+   ═══════════════════════════════════════════════════════════════ */
+function TechDetails({ result, job }) {
+  const [open, setOpen] = useState(false);
+  if (!result) return null;
   return (
-    <div>
-      <div style={{ ...s.sectionTitle, fontSize: 16 }}>Runs of Homozygosity (ROH)</div>
-      <div style={s.rohCard}>
-        <div><div style={s.rohVal}>{roh.total_mb?.toFixed(1) || "0"}</div><div style={s.rohLabel}>Total ROH (Mb)</div></div>
-        <div><div style={s.rohVal}>{roh.n_segments || 0}</div><div style={s.rohLabel}>Segments</div></div>
-        <div><div style={s.rohVal}>{roh.avg_kb?.toFixed(0) || "0"}</div><div style={s.rohLabel}>Avg Segment (kb)</div></div>
-        <div><div style={{ ...s.rohVal, color: roh.bottleneck ? "#d29922" : "#3fb950" }}>{roh.bottleneck ? "Yes" : "No"}</div><div style={s.rohLabel}>Bottleneck</div></div>
+    <div style={{ ...s.card, marginTop: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setOpen(!open)}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: "#8b949e" }}>Technical Details</div>
+        <span style={{ color: "#8b949e", fontSize: 12 }}>{open ? "▲ Hide" : "▼ Show"}</span>
       </div>
-      {roh.bottleneck && (
-        <div style={{ ...s.flagBox, marginTop: 10 }}>
-          <span style={{ fontSize: 18 }}>⚠️</span>
-          <span style={{ fontSize: 13, lineHeight: 1.5 }}>
-            Elevated ROH ({roh.total_mb?.toFixed(0)} Mb) indicates a population bottleneck in recent ancestry.
-            This is common in Ashkenazi Jewish, Finnish, and certain island populations.
-          </span>
+      {open && (
+        <div style={{ marginTop: 16 }}>
+          {[
+            ["Sample", result.sample_name],
+            ["Panel", result.panel],
+            ["Variants Extracted", result.variants_extracted?.toLocaleString()],
+            ["Variants Used (merged)", result.variants_used?.toLocaleString()],
+            ["Input Type", result.input_type],
+          ].map(([k, v]) => v != null && (
+            <div key={k} style={s.techRow}>
+              <span style={{ color: "#8b949e" }}>{k}</span>
+              <span>{v}</span>
+            </div>
+          ))}
+          {job?.created_at && <div style={s.techRow}><span style={{ color: "#8b949e" }}>Started</span><span>{new Date(job.created_at).toLocaleString()}</span></div>}
+          {job?.completed_at && <div style={s.techRow}><span style={{ color: "#8b949e" }}>Completed</span><span>{new Date(job.completed_at).toLocaleString()}</span></div>}
         </div>
       )}
     </div>
   );
 }
 
-function TechDetails({ result, job }) {
-  const [open, setOpen] = useState(false);
+
+/* ═══════════════════════════════════════════════════════════════
+   Ancestry Signature Heatmap
+   ═══════════════════════════════════════════════════════════════ */
+function SignaturesSection({ signatures }) {
+  if (!signatures || signatures.length === 0) return null;
+
+  // Sort by strength descending
+  const sorted = [...signatures].sort((a, b) => (b.strength || 0) - (a.strength || 0));
+
+  return (
+    <div style={s.card}>
+      <div style={s.sectionTitle}>Ancestry Signatures</div>
+      <div style={{ fontSize: 12, color: "#8b949e", marginBottom: 16 }}>
+        Characteristic patterns detected in your ancestry composition
+      </div>
+      {sorted.map((sig, i) => (
+        <div key={i} style={{
+          padding: "12px 16px", marginBottom: 8,
+          background: "#0d1117", border: "1px solid #21262d", borderRadius: 8,
+          borderLeft: `3px solid ${sig.strength > 0.7 ? "#3fb950" : sig.strength > 0.4 ? "#d29922" : "#8b949e"}`,
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: "#e6edf3" }}>{sig.label}</span>
+            <span style={{
+              fontSize: 11, padding: "2px 8px", borderRadius: 10,
+              background: sig.strength > 0.7 ? "#238636" : sig.strength > 0.4 ? "#9e6a03" : "#30363d",
+              color: "#e6edf3",
+            }}>
+              {sig.strength > 0.7 ? "Strong" : sig.strength > 0.4 ? "Moderate" : "Weak"}
+            </span>
+          </div>
+          <div style={{ fontSize: 12, color: "#8b949e", lineHeight: 1.5 }}>{sig.description}</div>
+          {sig.components && (
+            <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {sig.components.map((c, j) => (
+                <span key={j} style={{
+                  fontSize: 11, padding: "2px 8px", borderRadius: 4,
+                  background: "#161b22", border: "1px solid #30363d", color: "#c9d1d9",
+                }}>
+                  {c.group}: {(c.proportion * 100).toFixed(1)}%
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   World Map (SVG)
+   ═══════════════════════════════════════════════════════════════ */
+function WorldMap({ proportions }) {
+  if (!proportions) return null;
+  const sorted = Object.entries(proportions).sort((a, b) => b[1] - a[1]).filter(([, v]) => v > 0.01);
+  if (sorted.length === 0) return null;
+
+  // Simple equirectangular projection
+  const W = 760, H = 380;
+  const project = ([lon, lat]) => [(lon + 180) / 360 * W, (90 - lat) / 180 * H];
+
+  return (
+    <div style={s.card}>
+      <div style={s.sectionTitle}>Geographic Distribution</div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", background: "#0d1117", borderRadius: 8, border: "1px solid #21262d" }}>
+        {/* World outline — simplified continental shapes */}
+        <rect x={0} y={0} width={W} height={H} fill="#0d1117" />
+        {/* Grid lines */}
+        {[-60, -30, 0, 30, 60].map((lat) => {
+          const [, y] = project([0, lat]);
+          return <line key={`lat${lat}`} x1={0} y1={y} x2={W} y2={y} stroke="#161b22" strokeWidth={0.5} />;
+        })}
+        {[-120, -60, 0, 60, 120].map((lon) => {
+          const [x] = project([lon, 0]);
+          return <line key={`lon${lon}`} x1={x} y1={0} x2={x} y2={H} stroke="#161b22" strokeWidth={0.5} />;
+        })}
+        {/* Equator */}
+        {(() => { const [, y] = project([0, 0]); return <line x1={0} y1={y} x2={W} y2={y} stroke="#21262d" strokeWidth={1} strokeDasharray="4 4" />; })()}
+        {/* Group markers */}
+        {sorted.map(([g, v]) => {
+          const geo = GROUP_GEO[g];
+          if (!geo) return null;
+          const [cx, cy] = project(geo);
+          const r = Math.max(8, Math.sqrt(v) * 60);
+          return (
+            <g key={g}>
+              <circle cx={cx} cy={cy} r={r} fill={groupColor(g)} opacity={0.25} />
+              <circle cx={cx} cy={cy} r={Math.max(4, r * 0.4)} fill={groupColor(g)} opacity={0.7} />
+              <text x={cx} y={cy - r - 6} textAnchor="middle" fill="#c9d1d9" fontSize={11} fontWeight={600}>
+                {g} {(v * 100).toFixed(0)}%
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   Overview Tab
+   ═══════════════════════════════════════════════════════════════ */
+function OverviewTab({ refStatus, refDetail, onStartAnalysis, history, viewJob }) {
+  const completedJobs = history.filter((h) => h.status === "complete" && h.result_summary);
+
   return (
     <div>
-      <div style={{ ...s.sectionTitle, fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}
-        onClick={() => setOpen(!open)}>
-        Technical Details
-        <span style={{ fontSize: 12, color: "#8b949e" }}>{open ? "▲" : "▼"}</span>
-      </div>
-      {open && (
-        <div style={{ ...s.card, padding: "12px 20px" }}>
-          <div style={s.techRow}><span style={{ color: "#8b949e" }}>Variants used</span><span>{result.variants_used?.toLocaleString()}</span></div>
-          <div style={s.techRow}><span style={{ color: "#8b949e" }}>Reference panel</span><span>{result.panel}</span></div>
-          <div style={s.techRow}><span style={{ color: "#8b949e" }}>Primary ancestry</span>
-            <span>{result.primary} ({fmtPct(result.primary_pct)}%)</span>
+      {completedJobs.length > 0 && (
+        <div style={s.card}>
+          <div style={{ ...s.sectionTitle, marginTop: 0 }}>Recent Results</div>
+          {completedJobs.slice(0, 5).map((h) => (
+            <div key={h.job_id}
+              style={{ display: "flex", alignItems: "center", gap: 12, padding: "10px 0", borderBottom: "1px solid #21262d", cursor: "pointer" }}
+              onClick={() => viewJob(h.job_id)}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#3fb950", flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 500, color: "#e6edf3" }}>{h.sample_name}</div>
+                <div style={{ fontSize: 12, color: "#8b949e" }}>
+                  {h.result_summary.primary} ({fmtPct(h.result_summary.primary_pct)}%)
+                  {h.result_summary.is_admixed && " · Admixed"}
+                </div>
+              </div>
+              <span style={{ fontSize: 12, color: "#8b949e" }}>{timeAgo(h.created_at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {refStatus && (
+        <div style={s.card}>
+          <div style={{ ...s.sectionTitle, marginTop: 0 }}>Reference Panel Status</div>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8, marginBottom: 16,
+            padding: "8px 12px", borderRadius: 6,
+            background: refStatus.ready ? "#238636" + "22" : "#f85149" + "22",
+            border: `1px solid ${refStatus.ready ? "#238636" : "#f85149"}44`,
+          }}>
+            <span style={{ fontSize: 16 }}>{refStatus.ready ? "✓" : "✗"}</span>
+            <span style={{ fontSize: 14, color: refStatus.ready ? "#3fb950" : "#f85149" }}>
+              {refStatus.ready ? "Reference panel ready" : "Reference panel not ready"}
+            </span>
           </div>
-          <div style={s.techRow}><span style={{ color: "#8b949e" }}>Admixed</span><span>{result.is_admixed ? "Yes" : "No"}</span></div>
-          {job && (
-            <div style={{ ...s.techRow, borderBottom: "none" }}>
-              <span style={{ color: "#8b949e" }}>Duration</span>
-              <span>{job.completed_at && job.created_at ? `${Math.round((new Date(job.completed_at) - new Date(job.created_at)) / 1000)}s` : "--"}</span>
+
+          {refDetail && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 12 }}>
+              {[
+                ["Variants", refDetail.stats?.variant_count?.toLocaleString() || "—"],
+                ["Samples", refDetail.stats?.sample_count?.toLocaleString() || "—"],
+                ["Populations", refDetail.stats?.population_count || "—"],
+                ["Groups", refDetail.stats?.group_count || "—"],
+                ["Size", `${refDetail.stats?.total_size_gb || "—"} GB`],
+              ].map(([label, value]) => (
+                <div key={label} style={s.statBox}>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: "#e6edf3" }}>{value}</div>
+                  <div style={{ fontSize: 11, color: "#8b949e", marginTop: 2 }}>{label}</div>
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -628,18 +636,28 @@ function TechDetails({ result, job }) {
   );
 }
 
+
 /* ═══════════════════════════════════════════════════════════════
-   Comparison View
+   Compare Tab
    ═══════════════════════════════════════════════════════════════ */
 function CompareTab({ history, loadHistory }) {
   const [selected, setSelected] = useState(new Set());
-  const [results, setResults] = useState(null);
+  const [comparison, setComparison] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
 
   useEffect(() => { loadHistory(); }, []);
 
   const completedJobs = history.filter((h) => h.status === "complete" && h.has_result);
+
+  async function runCompare() {
+    if (selected.size < 2) return;
+    setLoading(true);
+    try {
+      const data = await api(`/jobs/compare?ids=${[...selected].join(",")}`);
+      setComparison(data.comparisons);
+    } catch (e) { toast(e.message, "error"); }
+    finally { setLoading(false); }
+  }
 
   function toggle(id) {
     setSelected((prev) => {
@@ -649,376 +667,123 @@ function CompareTab({ history, loadHistory }) {
     });
   }
 
-  async function compare() {
-    if (selected.size < 2) return;
-    setLoading(true); setError(null); setResults(null);
-    try {
-      const data = await api(`/jobs/compare?ids=${[...selected].join(",")}`);
-      setResults(data.comparisons);
-    } catch (e) { setError(e.message); }
-    finally { setLoading(false); }
+  if (comparison) {
+    // All groups across all results
+    const allGroups = new Set();
+    for (const r of comparison) Object.keys(r.proportions).forEach((g) => allGroups.add(g));
+    const groups = [...allGroups].sort();
+
+    // First result's PCA data for overlay
+    const basePCA = comparison[0]?.pca;
+    const extraQueries = comparison.slice(1).map((c) => ({ pca: c.pca, sample_name: c.sample_name }));
+
+    return (
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+          <div style={s.sectionTitle}>Comparison ({comparison.length} samples)</div>
+          <button style={{ ...s.btn, ...s.btnSecondary }} onClick={() => setComparison(null)}>Back</button>
+        </div>
+
+        {/* Stacked bars */}
+        <div style={s.card}>
+          {comparison.map((r) => (
+            <div key={r.job_id} style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "#e6edf3", marginBottom: 4 }}>
+                {r.sample_name}
+                <span style={{ fontSize: 12, fontWeight: 400, color: "#8b949e", marginLeft: 8 }}>
+                  {r.primary} ({fmtPct(r.primary_pct)}%)
+                </span>
+              </div>
+              <div style={s.compBar}>
+                {Object.entries(r.proportions).sort((a, b) => b[1] - a[1]).map(([g, v]) => (
+                  <div key={g} style={{ ...s.compSegment, width: `${v * 100}%`, background: groupColor(g) }}
+                    title={`${g}: ${(v * 100).toFixed(1)}%`}>
+                    {v > 0.08 ? `${(v * 100).toFixed(0)}%` : ""}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Table */}
+        <div style={s.card}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ borderBottom: "2px solid #30363d" }}>
+                  <th style={{ textAlign: "left", padding: "8px 12px", fontSize: 12, color: "#8b949e" }}>Sample</th>
+                  {groups.map((g) => (
+                    <th key={g} style={{ textAlign: "right", padding: "8px 6px", fontSize: 11, color: groupColor(g) }}>{g}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {comparison.map((r) => (
+                  <tr key={r.job_id} style={{ borderBottom: "1px solid #21262d" }}>
+                    <td style={{ padding: "8px 12px", fontSize: 13, color: "#e6edf3", fontWeight: 500, whiteSpace: "nowrap" }}>{r.sample_name}</td>
+                    {groups.map((g) => {
+                      const v = r.proportions[g] || 0;
+                      return (
+                        <td key={g} style={{ textAlign: "right", padding: "8px 6px", fontSize: 13, color: v > 0.01 ? "#e6edf3" : "#30363d" }}>
+                          {v > 0.005 ? (v * 100).toFixed(1) : "—"}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* PCA overlay */}
+        {basePCA && <PCAPlot pca={basePCA} sampleName={comparison[0]?.sample_name} extraQueries={extraQueries} />}
+      </div>
+    );
   }
 
-  // All groups across all results
-  const allGroups = results
-    ? [...new Set(results.flatMap((r) => Object.keys(r.proportions)))]
-        .sort((a, b) => {
-          const maxA = Math.max(...results.map((r) => r.proportions[a] || 0));
-          const maxB = Math.max(...results.map((r) => r.proportions[b] || 0));
-          return maxB - maxA;
-        })
-    : [];
-
   return (
     <div>
-      <div style={{ ...s.sectionTitle, margin: "0 0 16px" }}>Compare Samples</div>
-
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div style={s.sectionTitle}>Compare Samples</div>
+        <button style={{ ...s.btn, ...s.btnPrimary, ...(selected.size < 2 || loading ? s.btnDisabled : {}) }}
+          disabled={selected.size < 2 || loading}
+          onClick={runCompare}>
+          {loading ? "Comparing..." : `Compare ${selected.size} Selected`}
+        </button>
+      </div>
       {completedJobs.length < 2 && (
         <div style={{ color: "#8b949e", textAlign: "center", padding: 40 }}>
-          Need at least 2 completed analyses to compare. Run more analyses first.
+          Need at least 2 completed analyses to compare.
         </div>
       )}
-
-      {completedJobs.length >= 2 && !results && (
-        <div style={s.card}>
-          <p style={{ fontSize: 13, color: "#8b949e", margin: "0 0 16px" }}>
-            Select 2 or more completed analyses to compare side by side.
-          </p>
-          {completedJobs.map((h) => (
-            <label key={h.job_id} style={{
-              display: "flex", alignItems: "center", gap: 10, padding: "10px 12px",
-              background: selected.has(h.job_id) ? "#21262d" : "#0d1117",
-              border: `1px solid ${selected.has(h.job_id) ? "#58a6ff" : "#21262d"}`,
-              borderRadius: 6, marginBottom: 6, cursor: "pointer",
-            }}>
-              <input type="checkbox" checked={selected.has(h.job_id)} onChange={() => toggle(h.job_id)}
-                style={{ accentColor: "#58a6ff" }} />
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14, fontWeight: 500, color: "#e6edf3" }}>{h.sample_name}</div>
-                <div style={{ fontSize: 12, color: "#8b949e" }}>
-                  {h.result_summary?.primary} ({fmtPct(h.result_summary?.primary_pct || 0)}%)
-                  {" · "}{timeAgo(h.created_at)}
-                </div>
+      {completedJobs.map((h) => (
+        <div key={h.job_id} style={{
+          ...s.historyRow,
+          border: selected.has(h.job_id) ? "1px solid #58a6ff" : "1px solid #21262d",
+          background: selected.has(h.job_id) ? "#161b2288" : "#161b22",
+        }} onClick={() => toggle(h.job_id)}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <input type="checkbox" checked={selected.has(h.job_id)} readOnly
+              style={{ accentColor: "#58a6ff" }} />
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 500, color: "#e6edf3" }}>{h.sample_name}</div>
+              <div style={{ fontSize: 12, color: "#8b949e" }}>
+                {h.result_summary?.primary} ({fmtPct(h.result_summary?.primary_pct)}%)
               </div>
-            </label>
-          ))}
-          <div style={{ marginTop: 16, display: "flex", gap: 12, alignItems: "center" }}>
-            <button style={{ ...s.btn, ...s.btnPrimary, ...(selected.size < 2 || loading ? s.btnDisabled : {}) }}
-              disabled={selected.size < 2 || loading} onClick={compare}>
-              {loading ? "Loading..." : `Compare ${selected.size} Samples`}
-            </button>
-            {error && <span style={{ color: "#f85149", fontSize: 13 }}>{error}</span>}
-          </div>
-        </div>
-      )}
-
-      {results && (
-        <div>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-            <span style={{ fontSize: 14, color: "#8b949e" }}>{results.length} samples compared</span>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button style={{ ...s.btn, ...s.btnSecondary, padding: "6px 14px", fontSize: 13 }}
-                onClick={() => window.open("/api/export/all-csv", "_blank")}>
-                Export CSV
-              </button>
-              <button style={{ ...s.btn, ...s.btnSecondary, padding: "6px 14px", fontSize: 13 }}
-                onClick={() => { setResults(null); setSelected(new Set()); }}>
-                New Comparison
-              </button>
             </div>
           </div>
-
-          {/* Stacked composition bars */}
-          <div style={s.card}>
-            <div style={{ ...s.sectionTitle, fontSize: 16, marginTop: 0 }}>Ancestry Composition</div>
-            {results.map((r) => (
-              <div key={r.job_id} style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: "#e6edf3", marginBottom: 6 }}>{r.sample_name}</div>
-                <div style={s.compBar}>
-                  {Object.entries(r.proportions).sort((a, b) => b[1] - a[1]).map(([g, v]) => (
-                    <div key={g} title={`${g}: ${(v * 100).toFixed(1)}%`}
-                      style={{ ...s.compSegment, width: `${Math.max(v * 100, 0.5)}%`, background: groupColor(g) }}>
-                      {v > 0.08 ? `${(v * 100).toFixed(0)}%` : ""}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {/* Comparison table */}
-          <div style={s.card}>
-            <div style={{ ...s.sectionTitle, fontSize: 16, marginTop: 0 }}>Proportions Table</div>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
-                  <tr>
-                    <th style={thStyle}>Group</th>
-                    {results.map((r) => (
-                      <th key={r.job_id} style={thStyle}>{r.sample_name}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {allGroups.map((g) => (
-                    <tr key={g}>
-                      <td style={{ ...tdStyle, display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ width: 8, height: 8, borderRadius: "50%", background: groupColor(g), display: "inline-block", flexShrink: 0 }} />
-                        {g}
-                      </td>
-                      {results.map((r) => {
-                        const v = r.proportions[g] || 0;
-                        return (
-                          <td key={r.job_id} style={{ ...tdStyle, fontWeight: v > 0.1 ? 600 : 400, color: v > 0.1 ? "#e6edf3" : "#8b949e" }}>
-                            {v > 0.005 ? `${(v * 100).toFixed(1)}%` : "-"}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* PCA overlay if any result has PCA data */}
-          {results.some((r) => r.pca?.query) && (
-            <PCAPlot
-              pca={results.find((r) => r.pca?.query)?.pca}
-              sampleName={results.find((r) => r.pca?.query)?.sample_name}
-              extraQueries={results.filter((r) => r.pca?.query).slice(1)}
-            />
-          )}
+          <span style={{ fontSize: 12, color: "#8b949e" }}>{timeAgo(h.created_at)}</span>
         </div>
-      )}
+      ))}
     </div>
   );
 }
 
-const thStyle = { textAlign: "left", padding: "8px 12px", borderBottom: "1px solid #30363d", color: "#8b949e", fontWeight: 500 };
-const tdStyle = { padding: "8px 12px", borderBottom: "1px solid #21262d", color: "#c9d1d9" };
 
 /* ═══════════════════════════════════════════════════════════════
-   Overview Tab
-   ═══════════════════════════════════════════════════════════════ */
-function MethodologySection() {
-  const [open, setOpen] = useState(false);
-  return (
-    <div>
-      <div style={{ ...s.sectionTitle, fontSize: 15, margin: "24px 0 12px", cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}
-        onClick={() => setOpen(!open)}>
-        Methodology
-        <span style={{ fontSize: 12, color: "#8b949e" }}>{open ? "▲" : "▼"}</span>
-      </div>
-      {open && (
-        <div style={{ ...s.card, fontSize: 13, color: "#8b949e", lineHeight: 1.8 }}>
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontWeight: 600, color: "#e6edf3", marginBottom: 4 }}>Reference Panel</div>
-            The gnomAD v3.1 HGDP+1kGP joint callset contains 4,091 high-coverage whole-genome sequenced
-            samples from 78 populations across 8 continental groups. The panel includes 157 Middle Eastern
-            samples (Druze, Palestinian, Bedouin, Mozabite) essential for detecting Ashkenazi Jewish ancestry.
-            Coordinates are GRCh38. Variants are LD-pruned (r² &lt; 0.2, 1000-variant windows) yielding ~240K
-            independent SNPs.
-          </div>
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontWeight: 600, color: "#e6edf3", marginBottom: 4 }}>Pipeline Steps</div>
-            <ol style={{ margin: "4px 0", paddingLeft: 20 }}>
-              <li><strong>Variant Extraction</strong> — For BAM/CRAM: bcftools mpileup at reference panel
-              positions, then bcftools call. For VCF: normalize, filter biallelic SNPs.</li>
-              <li><strong>Allele Alignment</strong> — Intersect with reference variants, align REF/ALT alleles,
-              resolve strand mismatches.</li>
-              <li><strong>Merge &amp; PCA</strong> — Merge sample with reference panel using PLINK 1.9, apply
-              QC filters (mind 0.1, geno 0.1, maf 0.01), compute 20 principal components via PLINK2.</li>
-              <li><strong>Rye Decomposition</strong> — Non-negative least squares (NNLS) decomposition using
-              the Rye algorithm (Conley &amp; Rishishwar, 2021). Optimizes PC weights and shrinkage parameters
-              across 50 rounds × 50 iterations to minimize reference classification error.</li>
-              <li><strong>ROH Analysis</strong> — Runs of Homozygosity detection (VCF/gVCF only) using PLINK
-              1.9 with 300kb minimum, 50-SNP windows. Flags population bottleneck (&gt;50 Mb) and
-              consanguinity (&gt;100 Mb).</li>
-            </ol>
-          </div>
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontWeight: 600, color: "#e6edf3", marginBottom: 4 }}>Interpretation</div>
-            Admixture is flagged when no single component exceeds 85%. Ashkenazi Jewish (ASJ) pattern detection
-            triggers when European ancestry is 25–65% and Middle Eastern is 15–50%. Multi-way admixture is
-            flagged for 3+ components above 5%.
-          </div>
-          <div>
-            <div style={{ fontWeight: 600, color: "#e6edf3", marginBottom: 4 }}>Limitations</div>
-            Results are population-level estimates, not genealogical. The 8-group decomposition is coarser than
-            commercial tests. Proportions depend on reference panel composition — populations not represented
-            (e.g., Roma, Ethiopian Jewish) may be assigned to the closest available group. BAM input requires
-            sufficient coverage for reliable variant calling.
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function OverviewTab({ refStatus, refDetail, onStartAnalysis, history, viewJob }) {
-  const ready = refStatus?.ready;
-  const stats = refDetail?.stats;
-  const groups = refDetail?.groups;
-  const pops = refDetail?.populations;
-  const tools = refDetail?.tool_versions;
-  const [showAllPops, setShowAllPops] = useState(false);
-  const popEntries = pops ? Object.entries(pops) : [];
-  const shownPops = showAllPops ? popEntries : popEntries.slice(0, 12);
-
-  const completedJobs = (history || []).filter((h) => h.status === "complete" && h.result_summary);
-
-  return (
-    <div>
-      {/* Getting started (empty state) */}
-      {completedJobs.length === 0 && (
-        <div style={{ ...s.card, textAlign: "center", padding: "40px 24px" }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>🧬</div>
-          <div style={{ fontSize: 18, fontWeight: 600, color: "#e6edf3", marginBottom: 8 }}>Welcome to 23andClaude Ancestry</div>
-          <p style={{ fontSize: 14, color: "#8b949e", lineHeight: 1.6, maxWidth: 460, margin: "0 auto 24px" }}>
-            Analyze whole-genome sequencing data to discover ancestral composition across 8 continental groups
-            using the gnomAD HGDP+1kGP reference panel with 4,091 samples from 78 populations.
-          </p>
-          <div style={{ display: "flex", gap: 16, justifyContent: "center", flexWrap: "wrap", marginBottom: 24 }}>
-            {[["1", "Select a BAM or VCF file", "📁"], ["2", "Pipeline runs (~20 min for BAM)", "⚙️"], ["3", "View ancestry proportions + PCA", "📊"]].map(([n, text, icon]) => (
-              <div key={n} style={{ background: "#0d1117", border: "1px solid #21262d", borderRadius: 8, padding: "16px 20px", width: 180, textAlign: "center" }}>
-                <div style={{ fontSize: 24, marginBottom: 6 }}>{icon}</div>
-                <div style={{ fontSize: 12, color: "#58a6ff", fontWeight: 600, marginBottom: 4 }}>Step {n}</div>
-                <div style={{ fontSize: 12, color: "#8b949e" }}>{text}</div>
-              </div>
-            ))}
-          </div>
-          <button style={{ ...s.btn, ...s.btnPrimary, padding: "12px 32px", fontSize: 15 }} onClick={onStartAnalysis}>
-            Start Your First Analysis
-          </button>
-        </div>
-      )}
-
-      {/* Recent analyses dashboard */}
-      {completedJobs.length > 0 && (
-        <div style={{ marginBottom: 24 }}>
-          <div style={{ ...s.sectionTitle, margin: "0 0 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Completed Analyses ({completedJobs.length})</span>
-            <button style={{ ...s.btn, ...s.btnPrimary, padding: "6px 16px", fontSize: 13 }} onClick={onStartAnalysis}>
-              + New Analysis
-            </button>
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 10 }}>
-            {completedJobs.map((h) => (
-              <div key={h.job_id}
-                style={{ background: "#161b22", border: "1px solid #30363d", borderRadius: 8, padding: "14px 16px", cursor: "pointer", transition: "border-color 0.15s" }}
-                onClick={() => viewJob(h.job_id)}
-                onMouseEnter={(e) => e.currentTarget.style.borderColor = "#58a6ff"}
-                onMouseLeave={(e) => e.currentTarget.style.borderColor = "#30363d"}>
-                <div style={{ fontSize: 15, fontWeight: 600, color: "#e6edf3", marginBottom: 6 }}>{h.sample_name}</div>
-                <div style={s.compBar}>
-                  {h.result_summary?.proportions ? Object.entries(h.result_summary.proportions).sort((a, b) => b[1] - a[1]).map(([g, v]) => (
-                    <div key={g} style={{ ...s.compSegment, width: `${Math.max(v * 100, 1)}%`, background: groupColor(g), height: 20, fontSize: 9 }}>
-                      {v > 0.1 ? `${(v * 100).toFixed(0)}%` : ""}
-                    </div>
-                  )) : null}
-                </div>
-                <div style={{ fontSize: 12, color: "#8b949e" }}>
-                  {h.result_summary.primary} ({fmtPct(h.result_summary.primary_pct)}%)
-                  {h.result_summary.is_admixed ? " · Admixed" : ""}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div style={s.card}>
-        <div style={{ fontSize: 16, fontWeight: 600, color: "#e6edf3", marginBottom: 6 }}>Reference Panel</div>
-        <p style={{ fontSize: 13, color: "#8b949e", margin: "0 0 16px", lineHeight: 1.5 }}>
-          gnomAD HGDP + 1000 Genomes reference panel for ancestry inference.
-        </p>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-          <span style={{ width: 10, height: 10, borderRadius: "50%", background: ready ? "#3fb950" : "#f85149" }} />
-          <span style={{ fontSize: 14, color: ready ? "#3fb950" : "#f85149" }}>{ready ? "Ready" : "Not Ready"}</span>
-        </div>
-        {stats && (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 12 }}>
-            {[[stats.variant_count?.toLocaleString(), "Variants"], [stats.sample_count?.toLocaleString(), "Samples"],
-              [stats.population_count, "Populations"], [stats.group_count, "Groups"],
-              [`${stats.total_size_gb} GB`, "Total Size"]].map(([v, l]) => (
-              <div key={l} style={s.statBox}>
-                <div style={{ fontSize: 20, fontWeight: 700, color: "#e6edf3" }}>{v}</div>
-                <div style={{ fontSize: 12, color: "#8b949e" }}>{l}</div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {groups && (
-        <div>
-          <div style={{ ...s.sectionTitle, fontSize: 15, margin: "24px 0 12px" }}>Ancestry Groups ({Object.keys(groups).length})</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 8 }}>
-            {Object.entries(groups).map(([g, n]) => (
-              <div key={g} style={{ background: "#161b22", border: "1px solid #21262d", borderRadius: 8, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ width: 10, height: 10, borderRadius: "50%", background: groupColor(g), flexShrink: 0 }} />
-                <div>
-                  <div style={{ fontSize: 13, color: "#e6edf3", fontWeight: 500 }}>{g}</div>
-                  <div style={{ fontSize: 11, color: "#8b949e" }}>{n} samples</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {popEntries.length > 0 && (
-        <div>
-          <div style={{ ...s.sectionTitle, fontSize: 15, margin: "24px 0 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span>Individual Populations ({popEntries.length})</span>
-            {popEntries.length > 12 && (
-              <button style={{ ...s.btn, ...s.btnSecondary, padding: "4px 12px", fontSize: 12 }}
-                onClick={() => setShowAllPops(!showAllPops)}>
-                {showAllPops ? "Show less" : `Show all ${popEntries.length}`}
-              </button>
-            )}
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 6 }}>
-            {shownPops.map(([p, n]) => (
-              <div key={p} style={{ background: "#0d1117", border: "1px solid #21262d", borderRadius: 6, padding: "8px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ fontSize: 12, color: "#c9d1d9" }}>{p}</span>
-                <span style={{ fontSize: 12, color: "#8b949e", fontWeight: 600 }}>{n}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {tools && (
-        <div>
-          <div style={{ ...s.sectionTitle, fontSize: 15, margin: "24px 0 12px" }}>Tools</div>
-          <div style={{ ...s.card, padding: "12px 20px" }}>
-            {Object.entries(tools).map(([t, v]) => (
-              <div key={t} style={s.techRow}>
-                <span style={{ color: "#8b949e" }}>{t}</span>
-                <span style={{ fontSize: 12, color: v ? "#c9d1d9" : "#f85149" }}>{v || "not found"}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Methodology */}
-      <MethodologySection />
-
-      <div style={{ textAlign: "center", marginTop: 32 }}>
-        <button style={{ ...s.btn, ...s.btnPrimary }} onClick={onStartAnalysis}>Start Analysis</button>
-      </div>
-    </div>
-  );
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   Batch Analyze
-   ═══════════════════════════════════════════════════════════════ */
-/* ═══════════════════════════════════════════════════════════════
-   History Tab with auto-refresh
+   History Tab
    ═══════════════════════════════════════════════════════════════ */
 function HistoryTab({ history, loadHistory, viewJob, goAnalyze }) {
   const autoRef = useRef(null);
@@ -1150,9 +915,6 @@ function BatchAnalyze({ serverFiles, onQueued }) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   Main App
-   ═══════════════════════════════════════════════════════════════ */
-/* ═══════════════════════════════════════════════════════════════
    Toast Notification System
    ═══════════════════════════════════════════════════════════════ */
 let _toastId = 0;
@@ -1184,10 +946,168 @@ function ToastContainer({ toasts }) {
   );
 }
 
+
+/* ═══════════════════════════════════════════════════════════════
+   Login Screen
+   ═══════════════════════════════════════════════════════════════ */
+function LoginScreen({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!email.trim() || !password) return;
+    setLoading(true); setError(null);
+    try {
+      const res = await fetch(`${API}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Login failed");
+      onLogin(data.user);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div style={{
+      minHeight: "100vh", background: "#0d1117", display: "flex",
+      alignItems: "center", justifyContent: "center", padding: 16,
+    }}>
+      <div style={{
+        background: "#161b22", border: "1px solid #30363d", borderRadius: 12,
+        padding: "40px 36px", width: 380, maxWidth: "90vw",
+      }}>
+        <div style={{ textAlign: "center", marginBottom: 32 }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>🧬</div>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: "#e6edf3" }}>23andClaude</h1>
+          <p style={{ margin: "6px 0 0", fontSize: 13, color: "#8b949e" }}>Ancestry Inference Platform</p>
+        </div>
+
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "#c9d1d9", marginBottom: 6 }}>Email</label>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+              autoFocus
+              style={{
+                width: "100%", padding: "10px 14px", background: "#0d1117",
+                border: "1px solid #30363d", borderRadius: 6, color: "#c9d1d9",
+                fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none",
+              }}
+            />
+          </div>
+          <div style={{ marginBottom: 24 }}>
+            <label style={{ display: "block", fontSize: 13, fontWeight: 500, color: "#c9d1d9", marginBottom: 6 }}>Password</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Enter your password"
+              style={{
+                width: "100%", padding: "10px 14px", background: "#0d1117",
+                border: "1px solid #30363d", borderRadius: 6, color: "#c9d1d9",
+                fontSize: 14, fontFamily: "inherit", boxSizing: "border-box", outline: "none",
+              }}
+            />
+          </div>
+
+          {error && (
+            <div style={{
+              background: "#f8514922", border: "1px solid #f8514944", borderRadius: 6,
+              padding: "10px 14px", color: "#f85149", fontSize: 13, marginBottom: 16,
+            }}>
+              {error}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading || !email.trim() || !password}
+            style={{
+              width: "100%", padding: "12px 24px", borderRadius: 6, border: "none",
+              fontSize: 14, fontWeight: 600, cursor: loading ? "wait" : "pointer",
+              fontFamily: "inherit",
+              background: loading ? "#21262d" : "#238636", color: "#fff",
+              opacity: (!email.trim() || !password) ? 0.5 : 1,
+            }}
+          >
+            {loading ? "Signing in..." : "Sign In"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+
+/* ═══════════════════════════════════════════════════════════════
+   Main App
+   ═══════════════════════════════════════════════════════════════ */
 export default function App() {
   const [toasts, setToasts] = useState([]);
   _setToasts = setToasts;
 
+  // Auth state
+  const [user, setUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // Check existing session on mount
+  useEffect(() => {
+    fetch(`${API}/auth/me`).then((r) => {
+      if (r.ok) return r.json();
+      throw new Error("not authed");
+    }).then((u) => {
+      setUser(u);
+      setAuthChecked(true);
+    }).catch(() => {
+      setAuthChecked(true);
+    });
+  }, []);
+
+  async function handleLogout() {
+    try {
+      await fetch(`${API}/auth/logout`, { method: "POST" });
+    } catch {}
+    setUser(null);
+  }
+
+  // Show nothing while checking auth
+  if (!authChecked) {
+    return (
+      <div style={{ minHeight: "100vh", background: "#0d1117", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ color: "#8b949e", fontSize: 14 }}>Loading...</div>
+      </div>
+    );
+  }
+
+  // Show login if not authenticated
+  if (!user) {
+    return (
+      <>
+        <LoginScreen onLogin={(u) => setUser(u)} />
+        <ToastContainer toasts={toasts} />
+        <style>{responsiveCSS}</style>
+      </>
+    );
+  }
+
+  // Authenticated — render main app
+  return <MainApp user={user} onLogout={handleLogout} toasts={toasts} />;
+}
+
+
+function MainApp({ user, onLogout, toasts }) {
   const [tab, setTab] = useState("home");
   const [refStatus, setRefStatus] = useState(null);
   const [refDetail, setRefDetail] = useState(null);
@@ -1487,7 +1407,19 @@ export default function App() {
               <p style={s.headerSub}>Population composition from whole-genome data</p>
             </div>
           </div>
-          <a href="/" style={s.backLink}>← Dashboard</a>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontSize: 13, color: "#8b949e" }}>{user.email}</span>
+            <button
+              onClick={onLogout}
+              style={{
+                background: "none", border: "1px solid #30363d", borderRadius: 6,
+                color: "#8b949e", padding: "6px 12px", fontSize: 12, cursor: "pointer",
+                fontFamily: "inherit",
+              }}
+            >
+              Sign Out
+            </button>
+          </div>
         </div>
 
         {/* Tabs */}
@@ -1523,7 +1455,7 @@ export default function App() {
                     const match = serverFiles.find((f) => f.path === path);
                     if (match) setSampleName(match.sample_name);
                     if (path.toLowerCase().endsWith(".bam") || path.toLowerCase().endsWith(".cram")) {
-                      setFastaPath("/data/reference/GRCh38.fa");
+                      setFastaPath("/data/genom-nimo/reference.fasta");
                     } else {
                       setFastaPath("");
                     }
@@ -1577,7 +1509,7 @@ export default function App() {
 
                   <div style={{ marginBottom: 20 }}>
                     <label style={s.label}>Sample Name</label>
-                    <input style={s.input} value={sampleName} onChange={(e) => setSampleName(e.target.value)} placeholder="e.g., Sample_WGS" />
+                    <input style={s.input} value={sampleName} onChange={(e) => setSampleName(e.target.value)} placeholder="e.g., Nimo_WGS" />
                   </div>
 
                   <div style={{ marginBottom: 20 }}>
@@ -1620,7 +1552,7 @@ export default function App() {
                                 const match = serverFiles.find((f) => f.path === path);
                                 if (match && !sampleName.trim()) setSampleName(match.sample_name);
                                 if (path.toLowerCase().endsWith(".bam") || path.toLowerCase().endsWith(".cram")) {
-                                  if (!fastaPath.trim()) setFastaPath("/data/reference/GRCh38.fa");
+                                  if (!fastaPath.trim()) setFastaPath("/data/genom-nimo/reference.fasta");
                                 }
                               }
                             }}>

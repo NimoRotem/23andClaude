@@ -1,0 +1,335 @@
+# Population signatures for ancestry detection.
+# Each signature defines expected ancestry proportion ranges for a known population.
+#
+# Fields:
+#   display_name: Human-readable label shown in UI
+#   description:  Short explanation of the genetic background
+#   required:     Ancestry groups that MUST be present within given [min, max] range (fractions)
+#   optional:     Ancestry groups that MAY be present (contribute to confidence if within range)
+#   max_other:    Maximum allowed proportion from all non-required/non-optional groups combined
+#   sub_labels:   Human-readable labels for how each Rye component maps to a population-specific term
+#   roh_boost:    If present and ROH bottleneck is detected, multiply confidence by this factor
+#   confidence_method: range_centrality (default) — high when centered, moderate at edges
+#
+# Ordering: Admixed/specific signatures first, continental fallbacks last.
+# Group aliases are resolved at match time. "European" matches European + Finnish.
+# Group name matching is case-insensitive and ignores spaces/hyphens/underscores.
+
+signatures:
+
+  # ═══════════════════════════════════════════════════════════════
+  # Admixed populations (check these first — more specific)
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: ashkenazi_jewish
+    display_name: Ashkenazi Jewish
+    description: >-
+      Ashkenazi Jews descend from a small medieval founding population in the Rhineland,
+      producing a distinctive mix of Southern European and Levantine/Middle Eastern ancestry
+      with a characteristic founder-effect ROH signature.
+    required:
+      MiddleEastern: [0.35, 0.80]
+      European: [0.15, 0.45]
+    optional:
+      African: [0.00, 0.10]
+    max_other: 0.05
+    sub_labels:
+      MiddleEastern: "Levantine"
+      European: "Southern European"
+      African: "North African"
+    roh_boost: 1.3
+
+  - id: sephardic_jewish
+    display_name: Sephardic Jewish
+    description: >-
+      Sephardic Jews originate from the Iberian Peninsula and North Africa, with
+      a higher Middle Eastern component than Ashkenazi and traces of Iberian admixture.
+    required:
+      MiddleEastern: [0.45, 0.85]
+      European: [0.10, 0.35]
+    optional:
+      African: [0.02, 0.15]
+    max_other: 0.05
+    sub_labels:
+      MiddleEastern: "Levantine / North African"
+      European: "Southern European / Iberian"
+      African: "North African"
+
+  - id: mizrahi_jewish
+    display_name: Mizrahi Jewish
+    description: >-
+      Mizrahi Jews from Iraq, Iran, Yemen, and other Middle Eastern communities
+      carry predominantly Middle Eastern ancestry with minimal European admixture.
+    required:
+      MiddleEastern: [0.75, 0.95]
+    optional:
+      European: [0.00, 0.15]
+      SouthAsian: [0.00, 0.10]
+      African: [0.00, 0.10]
+    max_other: 0.05
+    sub_labels:
+      MiddleEastern: "Mesopotamian / Levantine"
+      European: "Mediterranean"
+
+  - id: asj_with_african
+    display_name: Ashkenazi Jewish + African admixture
+    description: >-
+      Individuals with Ashkenazi Jewish heritage and significant recent African
+      admixture, such as children of ASJ and African American parents. Shows the
+      classic ASJ European/ME split attenuated by an African component.
+    required:
+      MiddleEastern: [0.30, 0.65]
+      European: [0.10, 0.35]
+      African: [0.10, 0.25]
+    max_other: 0.10
+    sub_labels:
+      MiddleEastern: "Levantine"
+      European: "Southern European"
+      African: "West / Central African"
+    roh_boost: 1.2
+
+  - id: latino_caribbean
+    display_name: Latino (Caribbean)
+    description: >-
+      Caribbean Latino populations show European, Indigenous American, and
+      substantial African ancestry reflecting the colonial history of the Caribbean islands.
+    required:
+      European: [0.20, 0.70]
+      American: [0.10, 0.50]
+    optional:
+      African: [0.05, 0.40]
+    max_other: 0.10
+    sub_labels:
+      European: "Iberian / Southern European"
+      American: "Indigenous American"
+      African: "West African"
+
+  - id: latino_mestizo
+    display_name: Latino (Mestizo)
+    description: >-
+      Mestizo populations from mainland Latin America show primarily European
+      and Indigenous American ancestry with minimal African admixture.
+    required:
+      European: [0.20, 0.65]
+      American: [0.30, 0.70]
+    optional:
+      African: [0.00, 0.10]
+    max_other: 0.05
+    sub_labels:
+      European: "Iberian / Southern European"
+      American: "Indigenous American"
+
+  - id: ethiopian
+    display_name: Ethiopian / Horn of Africa
+    description: >-
+      Ethiopian and other Horn of Africa populations carry a roughly equal mix of
+      Sub-Saharan African and Middle Eastern (Levantine) ancestry, reflecting ancient
+      back-migration from the Near East into East Africa.
+    required:
+      African: [0.40, 0.65]
+      MiddleEastern: [0.35, 0.60]
+    max_other: 0.05
+    sub_labels:
+      African: "East African"
+      MiddleEastern: "Levantine / Arabian Peninsula"
+
+  - id: ethiopian_jewish
+    display_name: Ethiopian Jewish (Beta Israel)
+    description: >-
+      Ethiopian Jewish (Beta Israel) communities show a higher African component
+      than other Ethiopian groups with a smaller but significant Levantine contribution.
+    required:
+      African: [0.50, 0.75]
+      MiddleEastern: [0.20, 0.45]
+    optional:
+      European: [0.00, 0.05]
+    max_other: 0.05
+    sub_labels:
+      African: "East African / Beta Israel"
+      MiddleEastern: "Levantine"
+
+  - id: african_american
+    display_name: African American
+    description: >-
+      African Americans typically show predominantly West/Central African ancestry
+      with significant European admixture, reflecting the historical population
+      dynamics of the Trans-Atlantic slave trade and subsequent generations.
+    required:
+      African: [0.60, 0.90]
+      European: [0.10, 0.35]
+    optional:
+      American: [0.00, 0.05]
+    max_other: 0.05
+    sub_labels:
+      African: "West / Central African"
+      European: "Northwestern European"
+
+  - id: uyghur
+    display_name: Uyghur
+    description: >-
+      The Uyghur people of Central Asia sit at the crossroads of East Asian and
+      European genetic ancestry, reflecting millennia of Silk Road admixture between
+      eastern and western Eurasian populations.
+    required:
+      EastAsian: [0.35, 0.65]
+      European: [0.25, 0.55]
+    optional:
+      SouthAsian: [0.00, 0.10]
+    max_other: 0.10
+    sub_labels:
+      EastAsian: "Central / East Asian"
+      European: "West Eurasian"
+
+  - id: hazara
+    display_name: Hazara
+    description: >-
+      The Hazara people of Afghanistan and Pakistan carry a mix of East Asian
+      (Mongolic) and South Asian/Iranian ancestry, reflecting Mongol expansion
+      into Central and South Asia.
+    required:
+      EastAsian: [0.30, 0.55]
+      SouthAsian: [0.25, 0.50]
+    optional:
+      European: [0.00, 0.15]
+    max_other: 0.10
+    sub_labels:
+      EastAsian: "Mongolic / Central Asian"
+      SouthAsian: "South Asian / Iranian"
+
+  - id: malagasy
+    display_name: Malagasy
+    description: >-
+      The Malagasy people of Madagascar descend from both Austronesian seafarers
+      (primarily from Borneo/Southeast Asia) and Bantu-speaking Africans from
+      the East African coast, producing a roughly 50/50 SEA-African split.
+    required:
+      SoutheastAsian: [0.35, 0.65]
+      African: [0.35, 0.65]
+    max_other: 0.05
+    sub_labels:
+      SoutheastAsian: "Austronesian"
+      African: "East African / Bantu"
+
+  - id: cape_coloured
+    display_name: Cape Coloured (South Africa)
+    description: >-
+      The Cape Coloured community of South Africa has one of the most complex
+      admixture profiles in the world, with contributions from Khoisan, Bantu,
+      European, South Asian, and Southeast Asian (Malay) sources.
+    required:
+      African: [0.25, 0.55]
+      European: [0.15, 0.35]
+    optional:
+      SouthAsian: [0.05, 0.25]
+      SoutheastAsian: [0.05, 0.20]
+    max_other: 0.10
+    sub_labels:
+      African: "Khoisan / Bantu"
+      European: "Northern European"
+      SouthAsian: "South Asian"
+      SoutheastAsian: "Austronesian / Malay"
+
+  # ═══════════════════════════════════════════════════════════════
+  # Continental / unadmixed (check these last — broader, fallback)
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: european
+    display_name: European
+    description: >-
+      Predominantly European genetic ancestry tracing to Western, Southern,
+      Eastern, and Northern European populations.
+    required:
+      European: [0.85, 1.00]
+    optional:
+      Finnish: [0.00, 1.00]
+    max_other: 0.10
+    sub_labels:
+      European: "European"
+      Finnish: "Finnish"
+
+  - id: finnish
+    display_name: Finnish
+    description: >-
+      Finnish populations have a distinct genetic profile due to a historical
+      population bottleneck. Genetically related to other Europeans but with
+      unique founder effects and elevated runs of homozygosity.
+    required:
+      Finnish: [0.70, 1.00]
+    optional:
+      European: [0.00, 0.30]
+    max_other: 0.05
+    sub_labels:
+      Finnish: "Finnish"
+
+  - id: east_asian
+    display_name: East Asian
+    description: >-
+      Predominantly East Asian genetic ancestry from populations including
+      Han Chinese, Japanese, and Korean groups.
+    required:
+      EastAsian: [0.85, 1.00]
+    max_other: 0.10
+    sub_labels:
+      EastAsian: "East Asian"
+
+  - id: southeast_asian
+    display_name: Southeast Asian
+    description: >-
+      Predominantly Southeast Asian genetic ancestry from populations including
+      Cambodian, Lahu, and other mainland/island Southeast Asian groups.
+    required:
+      SoutheastAsian: [0.70, 1.00]
+    optional:
+      EastAsian: [0.00, 0.20]
+    max_other: 0.10
+    sub_labels:
+      SoutheastAsian: "Southeast Asian"
+
+  - id: south_asian
+    display_name: South Asian
+    description: >-
+      Predominantly South Asian genetic ancestry from the Indian subcontinent
+      and Central Asia, including Punjabi, Bengali, and Gujarati populations.
+    required:
+      SouthAsian: [0.80, 1.00]
+    optional:
+      European: [0.00, 0.10]
+      MiddleEastern: [0.00, 0.10]
+    max_other: 0.15
+    sub_labels:
+      SouthAsian: "South Asian"
+
+  - id: middle_eastern
+    display_name: Middle Eastern
+    description: >-
+      Predominantly Middle Eastern genetic ancestry from Levantine and
+      North African populations including Druze, Palestinian, and Bedouin.
+    required:
+      MiddleEastern: [0.85, 1.00]
+    max_other: 0.10
+    sub_labels:
+      MiddleEastern: "Middle Eastern"
+
+  - id: west_african
+    display_name: West / Central African
+    description: >-
+      Predominantly Sub-Saharan African genetic ancestry from West and Central
+      African populations including Yoruba, Mandinka, and Bantu groups.
+    required:
+      African: [0.90, 1.00]
+    max_other: 0.05
+    sub_labels:
+      African: "West / Central African"
+
+  - id: oceanian
+    display_name: Oceanian / Papuan
+    description: >-
+      Predominantly Oceanian genetic ancestry from Papua New Guinea and
+      Melanesian populations, carrying ancient Denisovan admixture.
+    required:
+      Oceanian: [0.70, 1.00]
+    optional:
+      SoutheastAsian: [0.00, 0.20]
+    max_other: 0.10
+    sub_labels:
+      Oceanian: "Oceanian / Papuan"
