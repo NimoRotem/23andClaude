@@ -5,8 +5,11 @@ gnomAD HGDP+1kGP reference panel + plink2 + Rye.
 """
 
 import asyncio
+import bcrypt
 import json
 import os
+import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -17,10 +20,12 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Cookie, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from pydantic import BaseModel
 
 from pipeline import (
     APP_ROOT,
@@ -54,6 +59,153 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# User / Auth system
+# ---------------------------------------------------------------------------
+
+USERS_FILE = os.path.join(APP_ROOT, "users.json")
+SESSIONS_FILE = os.path.join(APP_ROOT, "sessions.json")
+SESSION_COOKIE = "ancestry_session"
+SESSION_MAX_AGE = 30 * 24 * 3600  # 30 days
+
+users_lock = threading.Lock()
+sessions_lock = threading.Lock()
+
+# In-memory stores, loaded from disk
+_users: dict[str, dict] = {}    # user_id -> {id, email, password_hash, created_at}
+_sessions: dict[str, dict] = {} # session_token -> {user_id, created_at}
+
+
+def _load_users() -> None:
+    global _users
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r") as f:
+            data = json.load(f)
+        _users = {u["id"]: u for u in data}
+
+
+def _save_users() -> None:
+    with open(USERS_FILE, "w") as f:
+        json.dump(list(_users.values()), f, indent=2)
+    os.chmod(USERS_FILE, 0o600)
+
+
+def _load_sessions() -> None:
+    global _sessions
+    if os.path.exists(SESSIONS_FILE):
+        with open(SESSIONS_FILE, "r") as f:
+            _sessions = json.load(f)
+
+
+def _save_sessions() -> None:
+    with open(SESSIONS_FILE, "w") as f:
+        json.dump(_sessions, f, indent=2)
+    os.chmod(SESSIONS_FILE, 0o600)
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def _check_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode(), hashed.encode())
+
+
+def _find_user_by_email(email: str) -> Optional[dict]:
+    email_lower = email.lower().strip()
+    for u in _users.values():
+        if u["email"].lower() == email_lower:
+            return u
+    return None
+
+
+def _get_current_user(request: Request) -> Optional[dict]:
+    """Extract user from session cookie. Returns None if not authed."""
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return None
+    with sessions_lock:
+        sess = _sessions.get(token)
+    if not sess:
+        return None
+    # Check expiry
+    created = datetime.fromisoformat(sess["created_at"])
+    if (datetime.now(timezone.utc) - created).total_seconds() > SESSION_MAX_AGE:
+        with sessions_lock:
+            _sessions.pop(token, None)
+            _save_sessions()
+        return None
+    with users_lock:
+        return _users.get(sess["user_id"])
+
+
+def _require_user(request: Request) -> dict:
+    """Like _get_current_user but raises 401 if not authenticated."""
+    user = _get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
+
+
+# Auth endpoints
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/api/auth/login")
+async def auth_login(req: LoginRequest):
+    email = req.email.strip()
+    password = req.password
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email and password required")
+
+    user = _find_user_by_email(email)
+    if not user or not _check_password(password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    # Create session
+    token = secrets.token_urlsafe(48)
+    with sessions_lock:
+        _sessions[token] = {
+            "user_id": user["id"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_sessions()
+
+    response = JSONResponse({"ok": True, "user": {"id": user["id"], "email": user["email"]}})
+    response.set_cookie(
+        SESSION_COOKIE, token,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=False,  # Set True if behind HTTPS
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    token = request.cookies.get(SESSION_COOKIE)
+    if token:
+        with sessions_lock:
+            _sessions.pop(token, None)
+            _save_sessions()
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    user = _get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"id": user["id"], "email": user["email"]}
+
 
 # ---------------------------------------------------------------------------
 # In-memory job store + persistence
@@ -113,13 +265,14 @@ def _load_jobs_from_disk() -> None:
             continue
 
 
-def _make_job(sample_name: str) -> dict:
+def _make_job(sample_name: str, user_id: Optional[str] = None) -> dict:
     """Create a new job record."""
     job_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     job = {
         "id": job_id,
         "sample_name": sample_name,
+        "user_id": user_id,
         "status": "queued",
         "progress": 0,
         "current_step": "Queued",
@@ -242,7 +395,9 @@ def _run_job(job_id: str, input_path: str, sample_name: str, fasta_path: Optiona
 
 @app.on_event("startup")
 async def startup_event():
-    """Load persisted jobs on startup."""
+    """Load persisted data on startup."""
+    _load_users()
+    _load_sessions()
     _load_jobs_from_disk()
 
 
@@ -445,19 +600,13 @@ async def reference_detail():
     }
 
 
-# Directories scanned for sample files. Override with SAMPLE_DIRS env var
-# (comma-separated list of directories).
-_default_sample_dirs = [
+SAMPLE_DIRS = [
     "/data/aligned_bams",
     os.path.join(APP_ROOT, "uploads"),
 ]
-SAMPLE_DIRS = [
-    p.strip() for p in os.environ.get("SAMPLE_DIRS", ",".join(_default_sample_dirs)).split(",")
-    if p.strip()
-]
 
-# Also scan for VCF/gVCF files in nimog (BAM-to-VCF converter) output directories.
-_NIMOG_ROOT = os.environ.get("NIMOG_OUTPUT_ROOT", "/scratch/nimog_output")
+# Also scan for VCF/gVCF files in nimog output directories
+_NIMOG_ROOT = "/scratch/nimog_output"
 if os.path.isdir(_NIMOG_ROOT):
     for _run_dir in os.listdir(_NIMOG_ROOT):
         _dv_dir = os.path.join(_NIMOG_ROOT, _run_dir, "dv")
@@ -476,8 +625,10 @@ def _is_supported_file(filename: str) -> bool:
 
 
 @app.get("/api/server-files")
-async def list_server_files():
-    """List genomic files available on the server for analysis."""
+async def list_server_files(request: Request):
+    """List genomic files available on the server for analysis.
+    All authenticated users see all files."""
+    _require_user(request)
     files = []
     for dirpath in SAMPLE_DIRS:
         if not os.path.isdir(dirpath):
@@ -505,12 +656,13 @@ async def list_server_files():
     return {"files": files}
 
 
-DEFAULT_FASTA = os.environ.get("DEFAULT_FASTA", "/data/reference/reference.fasta")
+DEFAULT_FASTA = "/data/genom-nimo/reference.fasta"
 
 
 @app.post("/api/analyze/batch")
-async def batch_analysis():
+async def batch_analysis(request: Request):
     """Start ancestry analysis on all server-side sample files that haven't been analyzed yet."""
+    user = _require_user(request)
     # List available files
     all_files = []
     for dirpath in SAMPLE_DIRS:
@@ -532,12 +684,12 @@ async def batch_analysis():
     if not all_files:
         raise HTTPException(status_code=400, detail="No sample files found on server")
 
-    # Check which samples already have completed jobs
+    # Check which samples this user already has completed jobs for
     with jobs_lock:
         completed_names = {
             j["sample_name"]
             for j in jobs.values()
-            if j.get("status") == "complete" and j.get("result")
+            if j.get("status") == "complete" and j.get("result") and j.get("user_id") == user["id"]
         }
 
     queued = []
@@ -552,7 +704,7 @@ async def batch_analysis():
         if fasta and not os.path.exists(fasta):
             fasta = None
 
-        job = _make_job(sf["sample_name"])
+        job = _make_job(sf["sample_name"], user_id=user["id"])
         thread = threading.Thread(
             target=_run_job,
             args=(job["id"], sf["path"], sf["sample_name"], fasta),
@@ -566,6 +718,7 @@ async def batch_analysis():
 
 @app.post("/api/analyze")
 async def start_analysis(
+    request: Request,
     sample_name: str = Form(...),
     file: Optional[UploadFile] = File(None),
     file_path: Optional[str] = Form(None),
@@ -577,6 +730,8 @@ async def start_analysis(
     Accepts either a file upload or a server-local file path.
     Returns a job_id immediately; pipeline runs in background.
     """
+    user = _require_user(request)
+
     # Validate input source
     if file is None and not file_path:
         raise HTTPException(
@@ -637,8 +792,8 @@ async def start_analysis(
             detail=f"Reference FASTA not found: {fasta_path}",
         )
 
-    # Create job
-    job = _make_job(sample_name)
+    # Create job with user association
+    job = _make_job(sample_name, user_id=user["id"])
     job_id = job["id"]
 
     # Start background thread
@@ -652,9 +807,282 @@ async def start_analysis(
     return {"job_id": job_id, "status": "queued"}
 
 
+# ---------------------------------------------------------------------------
+# Remote file fetch (HTTP / Google Drive)
+# ---------------------------------------------------------------------------
+
+# Drive URL patterns: drive.google.com/file/d/{id}/...,
+# drive.google.com/open?id={id}, drive.google.com/uc?id={id},
+# docs.google.com/uc?id={id}
+_GDRIVE_HOST_RE = re.compile(r"(?:^|\.)(?:drive|docs)\.google\.com$", re.IGNORECASE)
+_GDRIVE_ID_RE = re.compile(r"/file/d/([a-zA-Z0-9_-]{10,})")
+
+
+def _is_gdrive_url(url: str) -> bool:
+    try:
+        host = urlparse(url).hostname or ""
+    except Exception:
+        return False
+    return bool(_GDRIVE_HOST_RE.search(host))
+
+
+def _sanitize_filename(name: str) -> str:
+    """Strip path separators and dangerous chars; cap length."""
+    name = unquote(name or "").strip()
+    name = name.replace("\x00", "")
+    # Drop any path components
+    name = os.path.basename(name)
+    # Replace anything that's not safe
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    # Forbid leading dots (no hidden files)
+    name = name.lstrip(".") or "download"
+    # Cap length
+    return name[:200]
+
+
+def _filename_from_response(resp, fallback_url: str) -> str:
+    """Extract a filename from Content-Disposition or URL path."""
+    cd = resp.headers.get("content-disposition", "")
+    # filename*=UTF-8''... (RFC 5987) takes priority
+    m = re.search(r"filename\*\s*=\s*[^']*''([^;]+)", cd, re.IGNORECASE)
+    if not m:
+        m = re.search(r'filename\s*=\s*"([^"]+)"', cd, re.IGNORECASE)
+    if not m:
+        m = re.search(r"filename\s*=\s*([^;]+)", cd, re.IGNORECASE)
+    if m:
+        return _sanitize_filename(m.group(1))
+    # Fall back to URL path basename
+    path = urlparse(fallback_url).path
+    return _sanitize_filename(os.path.basename(path) or "download")
+
+
+def _unique_upload_path(filename: str) -> str:
+    """Return UPLOADS_DIR/<8char>_<filename>, ensured to stay inside UPLOADS_DIR."""
+    safe = _sanitize_filename(filename)
+    short = uuid.uuid4().hex[:8]
+    candidate = os.path.join(UPLOADS_DIR, f"{short}_{safe}")
+    resolved = os.path.realpath(candidate)
+    uploads_real = os.path.realpath(UPLOADS_DIR)
+    if not resolved.startswith(uploads_real + os.sep):
+        raise ValueError("Resolved path escapes uploads directory")
+    return candidate
+
+
+def _fetch_http(url: str, dest_path: str, job_id: str, requested_filename: Optional[str]) -> str:
+    """Stream-download an HTTP(S) URL to dest_path with progress updates.
+
+    Returns the final on-disk path (may differ from dest_path if the server
+    suggested a filename via Content-Disposition and no name was requested).
+    """
+    import requests  # local import keeps cold-start cheap
+
+    headers = {"User-Agent": "23andClaude-Ancestry/1.0 (+remote-fetch)"}
+    with requests.get(url, stream=True, headers=headers, timeout=(15, 600), allow_redirects=True) as r:
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code} from {url}")
+
+        # If caller didn't pin a filename, take it from response
+        final_path = dest_path
+        if not requested_filename:
+            inferred = _filename_from_response(r, url)
+            if inferred:
+                final_path = _unique_upload_path(inferred)
+
+        total = int(r.headers.get("content-length") or 0)
+        downloaded = 0
+        last_pct = -1
+        last_emit = 0.0
+
+        with open(final_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                downloaded += len(chunk)
+
+                now = time.monotonic()
+                if total > 0:
+                    pct = int(downloaded * 100 / total)
+                    if pct != last_pct and (now - last_emit) >= 0.5:
+                        _update_job(
+                            job_id,
+                            progress=min(pct, 99),
+                            current_step=f"Downloading {downloaded / (1024*1024):.1f} / {total / (1024*1024):.1f} MB",
+                        )
+                        last_pct = pct
+                        last_emit = now
+                else:
+                    if (now - last_emit) >= 1.0:
+                        _update_job(
+                            job_id,
+                            current_step=f"Downloading {downloaded / (1024*1024):.1f} MB",
+                        )
+                        last_emit = now
+
+    return final_path
+
+
+def _fetch_gdrive(url: str, job_id: str, requested_filename: Optional[str]) -> str:
+    """Download a public Google Drive file via gdown.
+
+    gdown handles the large-file confirmation token automatically.
+    Progress is reported by polling the destination file size in a
+    watcher thread (gdown's quiet mode hides its own bar).
+    """
+    import gdown  # local import
+
+    # gdown.download(fuzzy=True) accepts the share-link form and figures out
+    # the file id. We pass output as a directory so gdown picks the metadata
+    # filename, then locate the resulting file.
+    work_dir = tempfile.mkdtemp(prefix=f"gdrive_{job_id[:8]}_", dir=UPLOADS_DIR)
+    stop_watcher = threading.Event()
+
+    def _watcher():
+        """Poll the work_dir size every second and surface progress."""
+        last_size = -1
+        while not stop_watcher.is_set():
+            try:
+                total = 0
+                for entry in os.listdir(work_dir):
+                    p = os.path.join(work_dir, entry)
+                    if os.path.isfile(p):
+                        total += os.path.getsize(p)
+                if total != last_size:
+                    _update_job(
+                        job_id,
+                        current_step=f"Downloading from Google Drive ({total / (1024*1024):.1f} MB)",
+                    )
+                    last_size = total
+            except Exception:
+                pass
+            stop_watcher.wait(1.0)
+
+    watcher_thread = threading.Thread(target=_watcher, daemon=True)
+    watcher_thread.start()
+
+    try:
+        # gdown returns the path it wrote to, or None on failure.
+        # output ending in os.sep tells gdown to use it as a directory.
+        result_path = gdown.download(
+            url=url,
+            output=work_dir + os.sep,
+            quiet=True,
+            fuzzy=True,
+        )
+    finally:
+        stop_watcher.set()
+        watcher_thread.join(timeout=2)
+
+    if not result_path or not os.path.exists(result_path):
+        # gdown sometimes returns None even on success — fall back to scan
+        files = [
+            os.path.join(work_dir, n)
+            for n in os.listdir(work_dir)
+            if os.path.isfile(os.path.join(work_dir, n))
+        ]
+        if not files:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise RuntimeError(
+                "gdown returned no file. The Drive link must be public "
+                "('Anyone with the link') and not be a folder."
+            )
+        result_path = max(files, key=os.path.getmtime)
+
+    # Move the downloaded file out of the temp work_dir into UPLOADS_DIR
+    # with a unique safe name.
+    src_basename = os.path.basename(result_path)
+    chosen_name = requested_filename or src_basename
+    final_path = _unique_upload_path(chosen_name)
+    shutil.move(result_path, final_path)
+    shutil.rmtree(work_dir, ignore_errors=True)
+    return final_path
+
+
+def _run_remote_fetch(job_id: str, url: str, requested_filename: Optional[str]) -> None:
+    """Background worker: download a remote URL into UPLOADS_DIR."""
+    try:
+        _update_job(job_id, status="running", progress=0, current_step="Resolving URL")
+
+        if _is_gdrive_url(url):
+            final_path = _fetch_gdrive(url, job_id, requested_filename)
+        else:
+            initial_name = _sanitize_filename(requested_filename) if requested_filename else "download"
+            dest_path = _unique_upload_path(initial_name)
+            final_path = _fetch_http(url, dest_path, job_id, requested_filename)
+
+        size_bytes = os.path.getsize(final_path)
+        _update_job(
+            job_id,
+            status="complete",
+            progress=100,
+            current_step="Complete",
+            result={
+                "path": final_path,
+                "filename": os.path.basename(final_path),
+                "size_bytes": size_bytes,
+                "size_mb": round(size_bytes / (1024 * 1024), 2),
+                "source_url": url,
+            },
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception as e:
+        _update_job(
+            job_id,
+            status="failed",
+            current_step="Failed",
+            error=f"{type(e).__name__}: {e}",
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+
+class RemoteFetchRequest(BaseModel):
+    url: str
+    filename: Optional[str] = None
+
+
+@app.post("/api/fetch-remote")
+async def fetch_remote(req: RemoteFetchRequest, request: Request):
+    """Download a public remote file (HTTP/HTTPS or Google Drive) into the
+    uploads directory in the background.
+
+    Body:
+      - url: HTTPS link, or a public Google Drive share link.
+      - filename: optional override for the saved filename.
+
+    Returns: {job_id, status}. Poll GET /api/jobs/{job_id} for progress.
+    On completion, job.result contains {path, filename, size_bytes, ...}.
+    """
+    user = _require_user(request)
+
+    url = (req.url or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only http/https URLs are allowed")
+    if not parsed.netloc:
+        raise HTTPException(status_code=400, detail="URL is missing a host")
+
+    # Reuse the existing job machinery so the same /api/jobs/{id} endpoint works.
+    # The "sample_name" slot doubles as a human label for the fetch job.
+    label = req.filename or os.path.basename(parsed.path) or parsed.netloc
+    job = _make_job(_sanitize_filename(label), user_id=user["id"])
+    job_id = job["id"]
+
+    threading.Thread(
+        target=_run_remote_fetch,
+        args=(job_id, url, req.filename),
+        daemon=True,
+    ).start()
+
+    return {"job_id": job_id, "status": "queued"}
+
+
 @app.get("/api/jobs/{job_id}")
-async def get_job(job_id: str):
-    """Get job status and results."""
+async def get_job(job_id: str, request: Request):
+    """Get job status and results. Users can only view their own jobs."""
+    user = _require_user(request)
+
     with jobs_lock:
         job = jobs.get(job_id)
 
@@ -672,6 +1100,10 @@ async def get_job(job_id: str):
         else:
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
+    # Check ownership
+    if job.get("user_id") and job["user_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
     # Normalize key name for frontend
     result = dict(job)
     result["job_id"] = result.pop("id", job_id)
@@ -679,16 +1111,20 @@ async def get_job(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/stream")
-async def stream_job_progress(job_id: str):
+async def stream_job_progress(job_id: str, request: Request):
     """Stream job progress via Server-Sent Events (SSE).
 
     Uses JobTracker.snapshot() for rich state when available (live_line,
     step timings, sub-tasks, log_lines). Falls back to basic job dict.
     Sends events every ~2s to match user's "update every 2-3 seconds" request.
     """
+    user = _require_user(request)
+
     with jobs_lock:
         job = jobs.get(job_id)
     if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    if job.get("user_id") and job["user_id"] != user["id"]:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
     async def event_generator():
@@ -751,10 +1187,12 @@ async def stream_job_progress(job_id: str):
 
 
 @app.get("/api/jobs")
-async def list_jobs():
-    """List all jobs, most recent first."""
+async def list_jobs(request: Request):
+    """List current user's jobs, most recent first."""
+    user = _require_user(request)
+
     with jobs_lock:
-        all_jobs = list(jobs.values())
+        all_jobs = [j for j in jobs.values() if j.get("user_id") == user["id"]]
 
     # Sort by created_at descending
     all_jobs.sort(key=lambda j: j.get("created_at", ""), reverse=True)
@@ -789,8 +1227,9 @@ async def list_jobs():
 
 
 @app.get("/api/jobs/compare")
-async def compare_jobs(ids: str):
+async def compare_jobs(ids: str, request: Request):
     """Compare ancestry results across multiple jobs. Pass comma-separated job IDs."""
+    user = _require_user(request)
     job_ids = [j.strip() for j in ids.split(",") if j.strip()]
     if len(job_ids) < 2:
         raise HTTPException(status_code=400, detail="At least 2 job IDs required for comparison")
@@ -806,6 +1245,8 @@ async def compare_jobs(ids: str):
                     job = json.load(f)
             else:
                 raise HTTPException(status_code=404, detail=f"Job not found: {jid}")
+        if job.get("user_id") and job["user_id"] != user["id"]:
+            raise HTTPException(status_code=404, detail=f"Job not found: {jid}")
         if not job.get("result"):
             raise HTTPException(status_code=400, detail=f"Job {jid} has no results yet")
         results.append({
@@ -823,8 +1264,10 @@ async def compare_jobs(ids: str):
 
 
 @app.get("/api/jobs/{job_id}/csv")
-async def export_job_csv(job_id: str):
+async def export_job_csv(job_id: str, request: Request):
     """Export a job's ancestry results as CSV."""
+    user = _require_user(request)
+
     with jobs_lock:
         job = jobs.get(job_id)
 
@@ -835,6 +1278,9 @@ async def export_job_csv(job_id: str):
                 job = json.load(f)
         else:
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    if job.get("user_id") and job["user_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
 
     result = job.get("result")
     if not result:
@@ -905,10 +1351,15 @@ async def export_job_csv(job_id: str):
 
 
 @app.get("/api/export/all-csv")
-async def export_all_csv():
-    """Export all completed analyses as a single comparison CSV."""
+async def export_all_csv(request: Request):
+    """Export all of this user's completed analyses as a single comparison CSV."""
+    user = _require_user(request)
+
     with jobs_lock:
-        completed = [j for j in jobs.values() if j.get("status") == "complete" and j.get("result")]
+        completed = [
+            j for j in jobs.values()
+            if j.get("status") == "complete" and j.get("result") and j.get("user_id") == user["id"]
+        ]
 
     if not completed:
         raise HTTPException(status_code=400, detail="No completed analyses to export")
@@ -951,13 +1402,17 @@ async def export_all_csv():
 
 
 @app.delete("/api/jobs/{job_id}")
-async def delete_job(job_id: str):
-    """Delete a job and its persisted data."""
-    with jobs_lock:
-        job = jobs.pop(job_id, None)
+async def delete_job(job_id: str, request: Request):
+    """Delete a job and its persisted data. Users can only delete their own jobs."""
+    user = _require_user(request)
 
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+        if job.get("user_id") and job["user_id"] != user["id"]:
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+        jobs.pop(job_id, None)
 
     # Remove persisted file
     path = _job_path(job_id)

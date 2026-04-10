@@ -45,6 +45,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+package-lock.json
 
 # =============================================================================
 # Editors / OS
@@ -80,6 +81,7 @@ Thumbs.db
 **/reference/*.tsv
 **/reference/high_ld_regions_hg38.txt
 **/reference/ref_pruned*
+**/reference/rebuild_work/
 
 # Sample / pipeline outputs
 **/uploads/
@@ -118,10 +120,25 @@ Thumbs.db
 # =============================================================================
 # App-specific runtime state (regenerated)
 # =============================================================================
-main/nimog/jobs/*.json
+converter/jobs/*.json
+users.json
+sessions.json
+errors.log
+**/users/
+**/reports/
+**/cram_vcf_cache/
+**/ref_cache/
+**/pgs_cache/
 main/data/
 main/sex_check*
 main/plink2.log
+
+# Backup files
+*.backup-*
+*.bak-*
+*.pre-*-backup-*
+*.away
+*.bak
 
 # =============================================================================
 # Local / personal Claude Code state
