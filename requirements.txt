@@ -1,0 +1,21 @@
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+pydantic>=2.0
+python-multipart
+python-dotenv
+aiofiles
+httpx
+
+# PGx star-allele calling dependencies
+pysam>=0.22.0
+scipy>=1.10.0
+statsmodels>=0.14.0
+
+# Cyrius CYP2D6 star-allele caller (Illumina)
+# Install: git clone https://github.com/Illumina/Cyrius.git /opt/cyrius
+# Usage: python3 /opt/cyrius/star_caller.py --manifest bams.txt --genome 38 --prefix sample --outDir out/
+
+# ExpansionHunter v5.0.0 (Illumina) - repeat expansion caller
+# Install binary: wget https://github.com/Illumina/ExpansionHunter/releases/download/v5.0.0/ExpansionHunter-v5.0.0-linux_x86_64.tar.gz
+# Binary: /usr/local/bin/ExpansionHunter
+# Catalogs: /opt/expansion-hunter/variant_catalog/{grch38,hg38}/variant_catalog.json
