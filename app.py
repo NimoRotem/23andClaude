@@ -36,6 +36,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Streamin
 import uvicorn
 
 from test_registry import TESTS, TESTS_BY_ID, CATEGORIES, CURATED_IDS
+from runners import (set_task_context, clear_task_context, cancel_task,
+                     is_task_cancelled, _uncancel_task, TaskCancelled,
+                     _tracked_procs, _tracked_procs_lock)
 from runners import run_test
 
 from google import genai
@@ -63,11 +66,10 @@ LEGACY_CUSTOM_PGS  = SG_DATA_ROOT / "custom_pgs.json"
 LEGACY_ERRORS_LOG  = SG_DATA_ROOT / "errors.log"
 LEGACY_CHAT_MSGS   = SG_DATA_ROOT / "chat_messages.json"
 
-# Number of concurrent test workers. The 44-core box can comfortably
-# handle 4 workers in parallel — each plink2/bcftools sub-process inside
-# a worker uses ~4 threads, so 4×4=16 cores during scoring, plus a
-# transient ~16 cores during the one-time pgen build.
-NUM_WORKERS = int(os.getenv("SIMPLE_GENOMICS_WORKERS", "8"))
+# Number of concurrent test workers. 32-core machine: BAM/CRAM takes
+# ~23 cores (gated to 1 concurrent), PGS scoring uses 1 core each so
+# 8+ can run in parallel, plus headroom for other tasks.
+NUM_WORKERS = int(os.getenv("SIMPLE_GENOMICS_WORKERS", "12"))
 
 PGS_CATALOG_API = "https://www.pgscatalog.org/rest"
 
@@ -1486,8 +1488,28 @@ def queue_worker(worker_id):
                 """Update the in-flight task headline so the frontend can show progress."""
                 task_results[task_id]["headline"] = step_msg
 
-            result = run_test(vcf_path, test_def, progress_cb=progress_cb)
+            # Set task context for subprocess tracking (cancellation support)
+            set_task_context(task_id)
+            try:
+                result = run_test(vcf_path, test_def, progress_cb=progress_cb)
+            finally:
+                clear_task_context()
             elapsed = time.time() - start
+
+            # Check if task was cancelled during execution
+            if is_task_cancelled(task_id):
+                _uncancel_task(task_id)
+                task_results[task_id] = {
+                    "status": "stopped",
+                    "test_id": test_id,
+                    "test_name": test_def["name"],
+                    "file_id": file_id,
+                    "username": username,
+                    "headline": "Stopped by user",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                logger.info(f"STOPPED [{username}]: {test_def['name']} ({test_id})")
+                continue
 
             runner_status = result.get("status", "passed")
             headline = result.get("headline", "")
@@ -1587,6 +1609,18 @@ def queue_worker(worker_id):
                         task_results[task_id]["retried_as"] = new_tid
                         task_results[task_id]["retry_reason"] = retry_reason
 
+        except TaskCancelled:
+            _uncancel_task(task_id)
+            task_results[task_id] = {
+                "status": "stopped",
+                "test_id": test_id,
+                "test_name": test_def["name"],
+                "file_id": file_id,
+                "username": username,
+                "headline": "Stopped by user",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            logger.info(f"STOPPED [{username}]: {test_def['name']} ({test_id})")
         except Exception as e:
             logger.error(f"Test {test_id} crashed: {e}", exc_info=True)
             err = f"{type(e).__name__}: {e}"
@@ -2869,9 +2903,19 @@ async def run_category(
 
 @app.post("/api/run-all")
 async def run_all_tests(file_id: str = "", profile_id: str = "",
+                        tab: str = "",
                         username: str = Depends(current_user)):
+    # Filter tests by tab if specified
+    if tab and tab in TAB_DEFS:
+        if tab == "curated":
+            run_tests = [t for t in TESTS if t["id"] in CURATED_IDS]
+        else:
+            run_tests = [t for t in TESTS if _tab_for_category(t["category"]) == tab]
+    else:
+        run_tests = list(TESTS)
+
     if profile_id:
-        task_ids = [tid for test in TESTS
+        task_ids = [tid for test in run_tests
                     if (tid := _queue_task(username, test, None, profile_id=profile_id))]
         return {"ok": True, "task_ids": task_ids, "count": len(task_ids), "profile_id": profile_id}
 
@@ -2879,7 +2923,7 @@ async def run_all_tests(file_id: str = "", profile_id: str = "",
     if not target:
         return JSONResponse({"ok": False, "error": "No file selected."}, status_code=400)
 
-    task_ids = [_queue_task(username, test, target) for test in TESTS]
+    task_ids = [_queue_task(username, test, target) for test in run_tests]
     return {"ok": True, "task_ids": task_ids, "count": len(task_ids), "file_id": target["id"]}
 
 
@@ -3607,16 +3651,68 @@ def system_stats():
 
 @app.post("/api/clear-queue")
 async def clear_queue(username: str = Depends(current_user)):
-    """Clear queued (not running) tasks owned by the calling user."""
+    """Clear ALL queued + running tasks owned by the calling user."""
     user_lc = _norm_username(username)
+
+    # 1. Clear queued tasks
     with queue_lock:
         before = len(task_queue)
-        # Drop only this user's queued tasks
         kept = deque(t for t in task_queue if t.get("username") != user_lc)
         cleared = before - len(kept)
         task_queue.clear()
         task_queue.extend(kept)
-    return {"ok": True, "cleared": cleared}
+
+    # 2. Stop any running tasks for this user
+    stopped = 0
+    with queue_lock:
+        user_running = [tid for tid in running_tasks
+                        if task_results.get(tid, {}).get("username") == user_lc]
+    for tid in user_running:
+        cancel_task(tid)
+        stopped += 1
+
+    return {"ok": True, "cleared": cleared, "stopped": stopped}
+
+@app.post("/api/task/{task_id}/stop")
+async def stop_task(task_id: str, username: str = Depends(current_user)):
+    """Stop a specific running or queued task and kill its subprocesses."""
+    user_lc = _norm_username(username)
+
+    # Check ownership
+    tr = task_results.get(task_id, {})
+    if tr.get("username") != user_lc:
+        # Maybe it's still queued — check queue
+        found_in_queue = False
+        with queue_lock:
+            for t in task_queue:
+                if t["id"] == task_id and t.get("username") == user_lc:
+                    found_in_queue = True
+                    break
+        if not found_in_queue:
+            return JSONResponse({"ok": False, "error": "Task not found"}, status_code=404)
+
+    # Remove from queue if still queued
+    with queue_lock:
+        before = len(task_queue)
+        new_q = deque(t for t in task_queue if t["id"] != task_id)
+        removed = before - len(new_q)
+        task_queue.clear()
+        task_queue.extend(new_q)
+
+    # If running, kill subprocesses
+    was_running = task_id in running_tasks
+    if was_running:
+        cancel_task(task_id)
+
+    # Update status
+    task_results[task_id] = {
+        **task_results.get(task_id, {}),
+        "status": "stopped",
+        "headline": "Stopped by user",
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    return {"ok": True, "was_running": was_running, "was_queued": removed > 0}
 
 
 # ── PGS Catalog search / custom PGS management ───────────────────
@@ -5567,6 +5663,7 @@ input[type="file"] { display: none; }
 }
 .status-dot.idle { background: var(--border); }
 .status-dot.queued { background: var(--yellow); opacity: 0.6; }
+.status-dot.stopped { background: var(--red, #e74c3c); opacity: 0.7; }
 .status-dot.running { background: var(--accent); animation: pulse 1s infinite; }
 .status-dot.passed { background: var(--green); }
 .status-dot.completed { background: var(--green); }
@@ -5594,6 +5691,30 @@ input[type="file"] { display: none; }
   font-size: 0.8rem;
 }
 .view-btn:hover { background: var(--green); color: white; }
+.stop-btn {
+  background: var(--red, #e74c3c);
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  opacity: 0.9;
+}
+.stop-btn:hover { opacity: 1; }
+.stop-btn-sm {
+  background: var(--red, #e74c3c);
+  color: white;
+  border: none;
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 0.65rem;
+  cursor: pointer;
+  line-height: 1;
+  opacity: 0.9;
+}
+.stop-btn-sm:hover { opacity: 1; }
 .clear-row-btn {
   padding: 6px 10px;
   border: 1px solid var(--border);
@@ -5823,6 +5944,10 @@ input[type="file"] { display: none; }
   opacity: 0.7;
 }
 .tests-tab.active .tab-count { color: var(--accent); opacity: 0.85; }
+.tb-badge { font-size: 0.6rem; margin-left: 4px; padding: 1px 3px; border-radius: 3px; vertical-align: middle; font-weight: 600; letter-spacing: -0.3px; }
+.tb-done { color: var(--green, #27ae60); opacity: 0.8; }
+.tb-run { color: var(--accent, #6c9fff); animation: pulse 1.4s infinite; }
+.tb-queue { color: var(--yellow, #f39c12); opacity: 0.7; }
 
 /* Filter bar */
 .filter-bar, .filter-inline {
@@ -6863,6 +6988,32 @@ input[type="file"] { display: none; }
   background: rgba(59, 130, 246, 0.08);
 }
 .data-files-row.active-row .df-name { color: var(--accent2); font-weight: 600; }
+
+/* ── Resize handles ─────────────────────────────────────────── */
+.resize-handle {
+  width: 100%;
+  height: 8px;
+  cursor: ns-resize;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 5;
+}
+.resize-handle:hover { background: rgba(48, 54, 61, 0.5); }
+.resize-handle::after {
+  content: '';
+  width: 40px;
+  height: 3px;
+  border-radius: 2px;
+  background: #30363d;
+}
+.resize-handle:hover::after { background: #484f58; }
+.resize-handle:active::after { background: #58a6ff; }
+.master-summary-body.resizing { max-height: none !important; }
 </style>
 </head>
 <body>
@@ -7033,6 +7184,12 @@ input[type="file"] { display: none; }
           <button class="chat-send-btn" id="chatSendBtn" onclick="chatSend()">Send</button>
         </div>
 
+        <!-- Resize handle: drag to split chat vs. summary -->
+        <div class="resize-handle" id="chatSplitHandle"
+             onmousedown="startChatSplitResize(event)"
+             ontouchstart="startChatSplitResize(event)"
+             title="Drag to resize"></div>
+
         <!-- Master Summary section -->
         <div class="master-summary-section" id="masterSummarySection">
           <div class="master-summary-header" onclick="masterSummaryToggle()">
@@ -7101,6 +7258,10 @@ input[type="file"] { display: none; }
         <div class="chat-raw-output" id="chatRawOutput">
           <div class="chat-raw-empty">Loading terminal output...</div>
         </div>
+        <div class="resize-handle" id="terminalResizeHandle"
+             onmousedown="startTerminalResize(event)"
+             ontouchstart="startTerminalResize(event)"
+             title="Drag to resize terminal"></div>
         <div class="cmd-bar" style="position:relative">
           <span class="chat-raw-prompt">$</span>
           <textarea id="chatRawInput" rows="1" placeholder="Type a command and press Enter..."
@@ -7411,9 +7572,21 @@ function renderTabs() {
   const vis = applyFilter(tests);
   el.innerHTML = TAB_ORDER.map(tk => {
     const def = TAB_DEFS[tk];
-    const count = testsForTab(tk, vis).length;
+    const tabT = testsForTab(tk, vis);
+    const total = tabT.length;
+    let done = 0, running = 0, queued = 0;
+    for (const t of tabT) {
+      const st = (testStatus[t.id] || {}).status;
+      if (st === 'passed' || st === 'warning' || st === 'completed') done++;
+      else if (st === 'running' || st === 'waiting_for_resources') running++;
+      else if (st === 'queued') queued++;
+    }
     const cls = tk === activeTab ? 'tests-tab active' : 'tests-tab';
-    return `<button class="${cls}" onclick="switchTab('${tk}')">${def.label}<span class="tab-count">${count}</span></button>`;
+    let badges = '';
+    if (done)    badges += `<span class="tb-badge tb-done" title="${done} completed">&#10003;${done}</span>`;
+    if (running) badges += `<span class="tb-badge tb-run" title="${running} running">&#9654;${running}</span>`;
+    if (queued)  badges += `<span class="tb-badge tb-queue" title="${queued} queued">&#9679;${queued}</span>`;
+    return `<button class="${cls}" onclick="switchTab('${tk}')">${def.label}<span class="tab-count">${total}</span>${badges}</button>`;
   }).join('');
 }
 
@@ -8483,8 +8656,12 @@ function renderTestRow(t) {
           ${chip}${pctBar}${viewBtn}`;
       }
 
+      const stopBtn = fRunning && res && res.task_id
+        ? `<button class="stop-btn stop-btn-sm" onclick="event.stopPropagation(); stopTaskById('${res.task_id}','${t.id}')" title="Stop">&#9632;</button>`
+        : '';
       return `<div class="file-run-line">
         <button class="${playCls}" onclick="event.stopPropagation(); runTestWithFile('${t.id}','${f.id}')" ${fRunning ? 'disabled' : ''} title="Run with ${escapeHtml(f.name)}">&#9654;</button>
+        ${stopBtn}
         <span class="frl-type">${(f.file_type || '').toUpperCase()}</span>
         <span class="frl-name" title="${escapeHtml(f.name)}">${escapeHtml(shortName)}</span>
         <div class="frl-result">${resultHtml}</div>
@@ -8535,6 +8712,7 @@ function renderTestRow(t) {
       <div>
         ${hasAnyReport ? `<button class="clear-row-btn" onclick="clearSingleReport('${t.id}')" title="Delete this report so you can re-run">Clear</button>` : ''}
         ${hasAnyReport ? `<button class="view-btn" onclick="viewReport('${t.id}')">View</button>` : ''}
+        ${isRunning ? `<button class="stop-btn" onclick="stopTask('${t.id}')" title="Stop this test">Stop</button>` : ''}
         <button class="run-btn" onclick="runTest('${t.id}')" ${isRunning ? 'disabled' : ''}>Run</button>
       </div>
     </div>
@@ -8702,7 +8880,7 @@ async function runAll() {
           `This may take a while.`)) return;
   }
   for (const fid of targets) {
-    const data = await _postRun(`${BASE}/api/run-all`, fid);
+    const data = await _postRun(`${BASE}/api/run-all?tab=${activeTab}`, fid);
     if (!data.ok) { alert(data.error); continue; }
     if (!fid || fid === activeFileId) {
       for (const tid of data.task_ids) {
@@ -8718,7 +8896,46 @@ async function runAll() {
 }
 
 async function clearQueue() {
-  await fetch(BASE + '/api/clear-queue', { method: 'POST' });
+  const resp = await fetch(BASE + '/api/clear-queue', { method: 'POST' });
+  const data = await resp.json();
+  if (data.ok) {
+    // Reset queued AND running tests in local state so UI updates
+    for (const [testId, st] of Object.entries(testStatus)) {
+      if (st.status === 'queued' || st.status === 'running' || st.status === 'waiting_for_resources') {
+        delete testStatus[testId];
+        delete taskMap[testId];
+        updateRow(testId);
+      }
+    }
+    for (const cat of categories) updateCategoryHeader(cat);
+  }
+}
+
+async function stopTask(testId) {
+  const taskId = taskMap[testId];
+  if (!taskId) return;
+  const resp = await fetch(BASE + `/api/task/${taskId}/stop`, { method: 'POST' });
+  const data = await resp.json();
+  if (data.ok) {
+    testStatus[testId] = { status: 'stopped', headline: 'Stopped by user' };
+    delete taskMap[testId];
+    updateRow(testId);
+    for (const cat of categories) updateCategoryHeader(cat);
+  }
+}
+
+async function stopTaskById(taskId, testId) {
+  if (!taskId) return;
+  const resp = await fetch(BASE + `/api/task/${taskId}/stop`, { method: 'POST' });
+  const data = await resp.json();
+  if (data.ok) {
+    // Refresh status from server on next poll
+    if (testId && testStatus[testId]) {
+      testStatus[testId] = { status: 'stopped', headline: 'Stopped by user' };
+      updateRow(testId);
+    }
+    for (const cat of categories) updateCategoryHeader(cat);
+  }
 }
 
 async function clearSingleReport(testId) {
@@ -10163,7 +10380,7 @@ async function doLogout() {
   const _origRunAll = runAll;
   runAll = async function() {
     if (activeProfileId) {
-      const resp = await fetch(BASE + `/api/run-all?profile_id=${activeProfileId}`, { method: 'POST' });
+      const resp = await fetch(BASE + `/api/run-all?profile_id=${activeProfileId}&tab=${activeTab}`, { method: 'POST' });
       const data = await resp.json();
       if (!data.ok) { alert(data.error); return; }
       for (const tid of data.task_ids) {
@@ -11137,6 +11354,154 @@ async function removeProviderKey(provider) {
     console.error('Failed to remove key:', e);
   }
 }
+
+
+// ── Panel Resize Handles ────────────────────────────────────────
+
+// --- Chat sub-tab: splitter between chat-messages and master-summary ---
+var _chatSplitState = null;
+
+function startChatSplitResize(e) {
+  e.preventDefault();
+  var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  var chatMsgs = document.getElementById('chatMessages');
+  var msSection = document.getElementById('masterSummarySection');
+  var msBody = document.getElementById('msSummaryBody');
+  if (!chatMsgs || !msSection) return;
+  // Auto-expand master summary if collapsed
+  if (msBody && msBody.style.display === 'none') {
+    masterSummaryToggle();
+  }
+  var container = chatMsgs.closest('.chat-sub');
+  if (!container) return;
+  _chatSplitState = {
+    chatEl: chatMsgs,
+    msSection: msSection,
+    msBody: msBody,
+    container: container,
+    startY: clientY,
+    startChatH: chatMsgs.offsetHeight,
+    startMsH: msSection.offsetHeight
+  };
+  document.addEventListener('mousemove', doChatSplitResize);
+  document.addEventListener('mouseup', stopChatSplitResize);
+  document.addEventListener('touchmove', doChatSplitResize, { passive: false });
+  document.addEventListener('touchend', stopChatSplitResize);
+  document.body.style.cursor = 'ns-resize';
+  document.body.style.userSelect = 'none';
+  chatMsgs.style.flex = '0 0 auto';
+  if (msBody) msBody.classList.add('resizing');
+}
+
+function doChatSplitResize(e) {
+  if (!_chatSplitState) return;
+  if (e.cancelable) e.preventDefault();
+  var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  var delta = clientY - _chatSplitState.startY;
+  var newChatH = Math.max(120, _chatSplitState.startChatH + delta);
+  var newMsH = Math.max(80, _chatSplitState.startMsH - delta);
+  if (newMsH === 80) {
+    newChatH = _chatSplitState.startChatH + _chatSplitState.startMsH - 80;
+  }
+  if (newChatH === 120) {
+    newMsH = _chatSplitState.startChatH + _chatSplitState.startMsH - 120;
+  }
+  _chatSplitState.chatEl.style.height = newChatH + 'px';
+  if (_chatSplitState.msBody) {
+    _chatSplitState.msBody.style.maxHeight = newMsH + 'px';
+    _chatSplitState.msBody.style.display = '';
+  }
+}
+
+function stopChatSplitResize() {
+  if (!_chatSplitState) return;
+  var chatH = parseInt(_chatSplitState.chatEl.style.height) || 300;
+  var msMaxH = _chatSplitState.msBody
+    ? parseInt(_chatSplitState.msBody.style.maxHeight) || 200
+    : 200;
+  localStorage.setItem('sg_chatSplitChatH', String(chatH));
+  localStorage.setItem('sg_chatSplitMsH', String(msMaxH));
+  if (_chatSplitState.msBody) _chatSplitState.msBody.classList.remove('resizing');
+  _chatSplitState = null;
+  document.removeEventListener('mousemove', doChatSplitResize);
+  document.removeEventListener('mouseup', stopChatSplitResize);
+  document.removeEventListener('touchmove', doChatSplitResize);
+  document.removeEventListener('touchend', stopChatSplitResize);
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+}
+
+function restoreChatSplit() {
+  var savedChatH = localStorage.getItem('sg_chatSplitChatH');
+  var savedMsH = localStorage.getItem('sg_chatSplitMsH');
+  if (savedChatH) {
+    var chatMsgs = document.getElementById('chatMessages');
+    if (chatMsgs) {
+      chatMsgs.style.flex = '0 0 auto';
+      chatMsgs.style.height = savedChatH + 'px';
+    }
+  }
+  if (savedMsH) {
+    var msBody = document.getElementById('msSummaryBody');
+    if (msBody) msBody.style.maxHeight = savedMsH + 'px';
+  }
+}
+
+// --- Terminal sub-tab: simple height resize for #chatRawOutput ---
+var _termResizeState = null;
+
+function startTerminalResize(e) {
+  e.preventDefault();
+  var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  var rawEl = document.getElementById('chatRawOutput');
+  if (!rawEl) return;
+  _termResizeState = { el: rawEl, startY: clientY, startH: rawEl.offsetHeight };
+  document.addEventListener('mousemove', doTerminalResize);
+  document.addEventListener('mouseup', stopTerminalResize);
+  document.addEventListener('touchmove', doTerminalResize, { passive: false });
+  document.addEventListener('touchend', stopTerminalResize);
+  document.body.style.cursor = 'ns-resize';
+  document.body.style.userSelect = 'none';
+}
+
+function doTerminalResize(e) {
+  if (!_termResizeState) return;
+  if (e.cancelable) e.preventDefault();
+  var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  var delta = clientY - _termResizeState.startY;
+  var newH = Math.max(120, Math.min(window.innerHeight - 200, _termResizeState.startH + delta));
+  _termResizeState.el.style.maxHeight = newH + 'px';
+}
+
+function stopTerminalResize() {
+  if (!_termResizeState) return;
+  var finalH = parseInt(_termResizeState.el.style.maxHeight);
+  if (finalH) localStorage.setItem('sg_terminalHeight', String(finalH));
+  _termResizeState = null;
+  document.removeEventListener('mousemove', doTerminalResize);
+  document.removeEventListener('mouseup', stopTerminalResize);
+  document.removeEventListener('touchmove', doTerminalResize);
+  document.removeEventListener('touchend', stopTerminalResize);
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+}
+
+function restoreTerminalHeight() {
+  var saved = localStorage.getItem('sg_terminalHeight');
+  if (saved) {
+    var rawEl = document.getElementById('chatRawOutput');
+    if (rawEl) rawEl.style.maxHeight = saved + 'px';
+  }
+}
+
+// Initialize resize handles on page load
+(function initResizeHandles() {
+  setTimeout(function() {
+    restoreChatSplit();
+    restoreTerminalHeight();
+  }, 100);
+})();
+
 </script>
 </body>
 </html>"""
