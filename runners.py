@@ -2924,13 +2924,18 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
 
         raw_score = result.get("raw_score")
         _score_sum = result.get("score_sum")
+        # Build ancestry hint from user-selected ref population
+        _ancestry_hint = None
+        if ref_pop:
+            _ancestry_hint = {ref_pop: 1.0}  # treat as 100% selected pop
         percentile, pctl_details = _compute_percentile(
             pgs_id, raw_score or 0,
             scoring_file=scoring_file,
             matched_vars_path=vars_file,
             tmpdir=tmpdir,
             return_details=True,
-            score_sum=_score_sum)
+            score_sum=_score_sum,
+            ancestry_result=_ancestry_hint)
 
         pipeline_info = _build_pipeline_info(
             vcf_path, pgs_id, metadata, "fast_direct",
@@ -3031,6 +3036,7 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
     _progress = progress_cb or (lambda msg: None)
     pgs_id = params["pgs_id"]
     trait = params.get("trait", pgs_id)
+    ref_pop = params.get("ref_pop", "")  # user-selected reference population
 
     with tempfile.TemporaryDirectory(dir=SCRATCH, prefix=f"pgs_{pgs_id}_") as tmpdir:
         # Step 1: Download scoring file
