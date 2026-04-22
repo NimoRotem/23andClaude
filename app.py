@@ -36,6 +36,17 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Streamin
 import uvicorn
 
 from test_registry import TESTS, TESTS_BY_ID, CATEGORIES, CURATED_IDS
+
+# ── Pipeline DB (multi-pop percentile) ──
+try:
+    from pipeline import db as pipeline_db
+    from pipeline.scoring import compute_percentile_for_ref
+    from pipeline.config import POPULATIONS, ref_stats_path
+    _PIPELINE_DB_AVAILABLE = True
+    # Init DB at import time
+    pipeline_db.init_db()
+except ImportError:
+    _PIPELINE_DB_AVAILABLE = False
 from runners import (set_task_context, clear_task_context, cancel_task,
                      is_task_cancelled, _uncancel_task, TaskCancelled,
                      _tracked_procs, _tracked_procs_lock)
@@ -3942,6 +3953,96 @@ async def get_pgs_refresh_status(category: str, username: str = Depends(current_
     return status
 
 
+
+# ── Multi-Pop PGS Reference Stats API ────────────────────────────
+@app.get("/api/pgs/{pgs_id}/refs")
+async def get_pgs_refs(pgs_id: str, username: str = Depends(current_user)):
+    """Return available reference populations for a PGS ID."""
+    pgs_id = pgs_id.upper()
+    if not _PIPELINE_DB_AVAILABLE:
+        return {"pgs_id": pgs_id, "refs": [{"population": "EUR", "label": "European", "n_samples": 633}]}
+
+    refs = pipeline_db.get_available_refs(pgs_id)
+    if not refs:
+        # Check legacy stats
+        import os, json
+        legacy_dir = "/data/pgs2/ref_panel_stats"
+        for fname in os.listdir(legacy_dir):
+            if fname.startswith(pgs_id) and fname.endswith(".json"):
+                try:
+                    with open(os.path.join(legacy_dir, fname)) as f:
+                        stats = json.load(f)
+                    if stats.get("std", 0) > 0:
+                        refs = [{"population": "EUR", "n_samples": stats.get("n_samples", 633),
+                                 "mean": stats.get("mean"), "std": stats.get("std")}]
+                        break
+                except Exception:
+                    pass
+
+    # Enrich with labels
+    result_refs = []
+    for r in refs:
+        pop = r.get("population", "EUR")
+        label = POPULATIONS.get(pop, {}).get("label", pop) if _PIPELINE_DB_AVAILABLE else pop
+        result_refs.append({
+            "population": pop,
+            "label": label,
+            "n_samples": r.get("n_samples", 0),
+        })
+
+    return {"pgs_id": pgs_id, "refs": result_refs}
+
+
+@app.get("/api/pgs/{pgs_id}/percentile")
+async def get_pgs_percentile(pgs_id: str, task_id: str, ref: str = "EUR",
+                              username: str = Depends(current_user)):
+    """Re-compute percentile for a PGS result using a different reference population."""
+    pgs_id = pgs_id.upper()
+    ref = ref.upper()
+
+    if not _PIPELINE_DB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Pipeline scoring not available")
+
+    # Load the original result to get raw_score and score_sum
+    import os, json
+    user_hash = hashlib.md5(username.encode()).hexdigest()[:16]
+    user_dir = os.path.join(DATA_DIR, "users", user_hash)
+
+    # Search for the task result in reports
+    raw_score = None
+    score_sum = None
+    reports_dir = os.path.join(user_dir, "reports")
+    if os.path.isdir(reports_dir):
+        for file_dir in os.listdir(reports_dir):
+            task_path = os.path.join(reports_dir, file_dir, f"{task_id}.json")
+            if os.path.exists(task_path):
+                try:
+                    with open(task_path) as f:
+                        report = json.load(f)
+                    result = report.get("result", {})
+                    raw_score = result.get("raw_score")
+                    score_sum = result.get("score_sum")
+                    break
+                except Exception:
+                    pass
+
+    if raw_score is None:
+        raise HTTPException(status_code=404, detail="Task result not found or has no raw score")
+
+    # Compute percentile for the requested reference
+    percentile, details = compute_percentile_for_ref(
+        pgs_id, raw_score, ref, score_sum=score_sum)
+
+    return {
+        "pgs_id": pgs_id,
+        "ref": ref,
+        "percentile": percentile,
+        "details": details,
+        "label": POPULATIONS.get(ref, {}).get("label", ref),
+        "n_samples": details.get("n_samples"),
+    }
+
+
 @app.get("/api/errors")
 async def get_errors(limit: int = 200, username: str = Depends(current_user)):
     """Return recent failures from the calling user's errors.log."""
@@ -4756,6 +4857,30 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   display: none;
 }
 .error.show { display: block; }
+/* ── Resize handles ─────────────────────────────────────────── */
+.resize-handle {
+  width: 100%;
+  height: 12px;
+  cursor: ns-resize;
+  background: var(--surface2, #161b22);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border, #30363d);
+  border-bottom: 1px solid var(--border, #30363d);
+}
+.resize-handle:hover { background: rgba(88, 166, 255, 0.12); }
+.resize-handle::after {
+  content: '';
+  width: 48px;
+  height: 4px;
+  border-radius: 2px;
+  background: #484f58;
+}
+.resize-handle:hover::after { background: #58a6ff; }
+.resize-handle:active::after { background: #58a6ff; }
 </style>
 </head>
 <body>
@@ -4774,6 +4899,65 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 </div>
 <script>
 const BASE = window.location.pathname.startsWith('/simple') ? '/simple' : '';
+
+// Population labels for ref tabs
+window._POP_LABELS = {
+  EUR: 'European', EAS: 'East Asian', AFR: 'African',
+  SAS: 'South Asian', AMR: 'Admixed American',
+  MIX: 'Mixed / Global', MID: 'Middle Eastern',
+  ALL: 'All populations'
+};
+
+async function switchRef(pgsId, taskId, refCode) {
+  try {
+    const resp = await fetch(BASE + `/api/pgs/${pgsId}/percentile?task_id=${taskId}&ref=${refCode}`);
+    if (!resp.ok) { console.warn('switchRef failed:', resp.status); return; }
+    const data = await resp.json();
+    // Update the percentile display in the open report modal
+    const pctlVal = document.querySelector('.pctl-value');
+    if (pctlVal && data.percentile != null) {
+      pctlVal.textContent = data.percentile.toFixed(0) + '%';
+    } else if (pctlVal) {
+      pctlVal.textContent = '—';
+    }
+    // Update the large percentile bar
+    const lgTrack = document.querySelector('.pct-lg-fill');
+    const lgThumb = document.querySelector('.pct-lg-thumb');
+    const lgValue = document.querySelector('.pct-lg-value');
+    if (lgTrack && data.percentile != null) {
+      const c = pctColor(data.percentile);
+      lgTrack.style.width = data.percentile + '%';
+      lgTrack.style.background = c;
+      if (lgThumb) { lgThumb.style.left = data.percentile + '%'; lgThumb.style.background = c; }
+      if (lgValue) { lgValue.style.color = c; lgValue.textContent = data.percentile.toFixed(0) + 'th percentile'; }
+    } else if (lgValue) {
+      lgValue.textContent = '—';
+    }
+    // Update the label
+    const pctlLabel = document.querySelector('.score-item label');
+    // Find the label that says "Percentile (...)"
+    document.querySelectorAll('.score-item label').forEach(lbl => {
+      if (lbl.textContent.startsWith('Percentile')) {
+        const popLabel = (_POP_LABELS[refCode] || refCode);
+        lbl.textContent = `Percentile (${popLabel})`;
+      }
+    });
+    // Update active tab
+    document.querySelectorAll('.ref-tab').forEach(btn => {
+      btn.classList.toggle('ref-tab-active', btn.textContent.trim().startsWith(refCode));
+    });
+    // Update diagnostics if visible
+    const details = data.details || {};
+    document.querySelectorAll('.diag-item').forEach(item => {
+      const lbl = item.querySelector('label');
+      if (!lbl) return;
+      const val = item.querySelector('span');
+      if (lbl.textContent === 'Z-Score' && details.z_score != null) val.textContent = details.z_score.toFixed(3);
+      if (lbl.textContent === 'Ref Mean' && details.ref_mean != null) val.textContent = details.ref_mean.toFixed(6);
+      if (lbl.textContent === 'Ref Std' && details.ref_std != null) val.textContent = details.ref_std.toFixed(6);
+    });
+  } catch (e) { console.warn('switchRef error:', e); }
+}
 const MODE = '__MODE__';   // 'login' | 'signup'
 
 (function init() {
@@ -4823,6 +5007,49 @@ async function submitForm(e) {
   }
 }
 
+
+
+// ── Panel Resize ────────────────────────────────────────────
+// Each panel independently resizable. Page scrolls to fit.
+var _rs = null;
+function startResize(e, elId, key) {
+  e.preventDefault();
+  var y = e.touches ? e.touches[0].clientY : e.clientY;
+  var el = document.getElementById(elId);
+  if (!el) return;
+  // If target is hidden (master summary body collapsed), expand it
+  if (el.style.display === 'none' && typeof masterSummaryToggle === 'function') masterSummaryToggle();
+  _rs = { el: el, y0: y, h0: el.offsetHeight, key: key };
+  document.addEventListener('mousemove', onResize);
+  document.addEventListener('mouseup', endResize);
+  document.addEventListener('touchmove', onResize, { passive: false });
+  document.addEventListener('touchend', endResize);
+  document.body.style.cursor = 'ns-resize';
+  document.body.style.userSelect = 'none';
+}
+function onResize(e) {
+  if (!_rs) return;
+  if (e.cancelable) e.preventDefault();
+  var y = e.touches ? e.touches[0].clientY : e.clientY;
+  _rs.el.style.height = Math.max(60, _rs.h0 + y - _rs.y0) + 'px';
+}
+function endResize() {
+  if (!_rs) return;
+  localStorage.setItem(_rs.key, _rs.el.style.height);
+  _rs = null;
+  document.removeEventListener('mousemove', onResize);
+  document.removeEventListener('mouseup', endResize);
+  document.removeEventListener('touchmove', onResize);
+  document.removeEventListener('touchend', endResize);
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+}
+setTimeout(function() {
+  ['chatMessages:sg_chatH','chatRawOutput:sg_termH','msSummaryBody:sg_msH'].forEach(function(p) {
+    var parts = p.split(':'), el = document.getElementById(parts[0]), v = localStorage.getItem(parts[1]);
+    if (el && v) el.style.height = v;
+  });
+}, 200);
 
 </script>
 </body>
@@ -6065,7 +6292,7 @@ input[type="file"] { display: none; }
 .chat-view-wrap.active {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - var(--top-stack-h, 200px));
+  min-height: calc(100vh - var(--top-stack-h, 200px));
   margin: -24px;
   padding: 0;
 }
@@ -6076,7 +6303,6 @@ input[type="file"] { display: none; }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 0;
-  overflow: hidden;
   min-height: 0;
 }
 .chat-header {
@@ -6161,8 +6387,6 @@ input[type="file"] { display: none; }
 .chat-sub {
   display: flex;
   flex-direction: column;
-  flex: 1;
-  min-height: 0;
 }
 
 /* API Key first-run overlay */
@@ -6427,13 +6651,14 @@ input[type="file"] { display: none; }
 .settings-info-link:hover { text-decoration: underline; }
 
 .chat-messages {
-  flex: 1;
   overflow-y: auto;
   padding: 20px;
   background: var(--bg, #0d1117);
   display: flex;
   flex-direction: column;
   gap: 14px;
+  height: 50vh;
+  min-height: 120px;
 }
 .chat-welcome {
   color: var(--text2);
@@ -6595,7 +6820,6 @@ input[type="file"] { display: none; }
 }
 /* --- Master Summary --- */
 .master-summary-section {
-  flex-shrink: 0;
   border-top: 1px solid var(--border);
   background: var(--bg, #0d1117);
 }
@@ -6634,9 +6858,10 @@ input[type="file"] { display: none; }
 .master-summary-meta { font-size: 0.75rem; color: var(--muted); }
 .master-summary-new { color: #d29922; font-weight: 600; }
 .master-summary-body {
-  max-height: 50vh;
   overflow-y: auto;
   padding: 0 16px 12px;
+  height: 35vh;
+  min-height: 80px;
 }
 .master-summary-actions {
   display: flex;
@@ -6751,9 +6976,8 @@ input[type="file"] { display: none; }
   font-size: 0.8rem;
   line-height: 1.45;
   color: #c9d1d9;
-  flex: 1;
+  height: 50vh;
   min-height: 120px;
-  max-height: calc(100vh - 320px);
   overflow-y: auto;
   white-space: pre;
   word-wrap: normal;
@@ -6989,31 +7213,15 @@ input[type="file"] { display: none; }
 }
 .data-files-row.active-row .df-name { color: var(--accent2); font-weight: 600; }
 
-/* ── Resize handles ─────────────────────────────────────────── */
-.resize-handle {
-  width: 100%;
-  height: 8px;
-  cursor: ns-resize;
-  background: transparent;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  user-select: none;
-  flex-shrink: 0;
-  position: relative;
-  z-index: 5;
-}
-.resize-handle:hover { background: rgba(48, 54, 61, 0.5); }
-.resize-handle::after {
-  content: '';
-  width: 40px;
-  height: 3px;
-  border-radius: 2px;
-  background: #30363d;
-}
-.resize-handle:hover::after { background: #484f58; }
-.resize-handle:active::after { background: #58a6ff; }
-.master-summary-body.resizing { max-height: none !important; }
+/* ── Reference population tabs ── */
+.ref-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.ref-tab { padding: 3px 10px; border: 1px solid var(--border, #ddd); border-radius: 12px;
+  background: var(--bg2, #f5f5f5); color: var(--text2, #666); font-size: 0.75rem;
+  cursor: pointer; transition: all .15s; font-family: inherit; }
+.ref-tab:hover { border-color: var(--accent, #5b6abf); color: var(--accent, #5b6abf); }
+.ref-tab-active { background: var(--accent, #5b6abf); color: #fff; border-color: var(--accent, #5b6abf); }
+.ref-tab:disabled { opacity: 0.4; cursor: not-allowed; }
+.ref-model-hint { font-size: 0.7rem; color: var(--text3, #999); margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -7184,11 +7392,8 @@ input[type="file"] { display: none; }
           <button class="chat-send-btn" id="chatSendBtn" onclick="chatSend()">Send</button>
         </div>
 
-        <!-- Resize handle: drag to split chat vs. summary -->
-        <div class="resize-handle" id="chatSplitHandle"
-             onmousedown="startChatSplitResize(event)"
-             ontouchstart="startChatSplitResize(event)"
-             title="Drag to resize"></div>
+        <div class="resize-handle" onmousedown="startResize(event,'chatMessages','sg_chatH')"
+             ontouchstart="startResize(event,'chatMessages','sg_chatH')" title="Drag to resize chat"></div>
 
         <!-- Master Summary section -->
         <div class="master-summary-section" id="masterSummarySection">
@@ -7200,6 +7405,8 @@ input[type="file"] { display: none; }
             </div>
             <div class="master-summary-meta" id="msMeta"></div>
           </div>
+          <div class="resize-handle" onmousedown="startResize(event,'msSummaryBody','sg_msH')"
+               ontouchstart="startResize(event,'msSummaryBody','sg_msH')" title="Drag to resize report"></div>
           <div class="master-summary-body" id="msSummaryBody" style="display:none">
             <div class="master-summary-actions">
               <select id="msProfileSelect" class="ms-profile-select" onchange="masterSummaryProfileChanged()">
@@ -7258,10 +7465,8 @@ input[type="file"] { display: none; }
         <div class="chat-raw-output" id="chatRawOutput">
           <div class="chat-raw-empty">Loading terminal output...</div>
         </div>
-        <div class="resize-handle" id="terminalResizeHandle"
-             onmousedown="startTerminalResize(event)"
-             ontouchstart="startTerminalResize(event)"
-             title="Drag to resize terminal"></div>
+        <div class="resize-handle" onmousedown="startResize(event,'chatRawOutput','sg_termH')"
+             ontouchstart="startResize(event,'chatRawOutput','sg_termH')" title="Drag to resize terminal"></div>
         <div class="cmd-bar" style="position:relative">
           <span class="chat-raw-prompt">$</span>
           <textarea id="chatRawInput" rows="1" placeholder="Type a command and press Enter..."
@@ -10157,10 +10362,41 @@ function _openReportModal(report) {
     html += `<div class="score-item"><label>Matched Variants</label><span>${(result.matched_variants || 0).toLocaleString()} / ${(result.total_variants || 0).toLocaleString()}</span></div>`;
     html += `<div class="score-item"><label>Match Rate</label><span>${escapeHtml(result.match_rate || 'N/A')}</span></div>`;
     if (result.percentile != null) {
-      html += `<div class="score-item"><label>Percentile (EUR)</label><span class="pctl-value">${typeof result.percentile === 'number' ? result.percentile.toFixed(0) : result.percentile}%</span></div>`;
+      const _refLabel = result.selected_ref || 'EUR';
+      const _refPop = (window._POP_LABELS || {})[_refLabel] || _refLabel;
+      html += `<div class="score-item"><label>Percentile (${escapeHtml(_refPop)})</label><span class="pctl-value">${typeof result.percentile === 'number' ? result.percentile.toFixed(0) : result.percentile}%</span></div>`;
     }
     if (result.percentile != null) {
       html += `<div class="score-item" style="grid-column: 1 / -1">${pctBarLg(typeof result.percentile === 'number' ? result.percentile : parseFloat(result.percentile))}</div>`;
+    }
+    // ── Reference population tabs ──
+    const _availRefs = result.available_refs || ['EUR'];
+    const _selRef = result.selected_ref || 'EUR';
+    const _secPctls = result.secondary_percentiles || {};
+    if (_availRefs.length > 1) {
+      html += '<div class="score-item" style="grid-column: 1 / -1">';
+      html += '<label>Reference Population</label>';
+      html += '<div class="ref-tabs">';
+      for (const ref of _availRefs) {
+        const isActive = ref === _selRef;
+        const secPctl = _secPctls[ref];
+        const pctlHint = isActive && result.percentile != null
+          ? ` (${result.percentile.toFixed(0)}%)`
+          : secPctl != null ? ` (${secPctl.toFixed(0)}%)` : '';
+        const popLabel = (window._POP_LABELS || {})[ref] || ref;
+        html += `<button class="ref-tab ${isActive ? 'ref-tab-active' : ''}" `
+          + `onclick="switchRef('${escapeHtml(result.pgs_id)}', '${escapeHtml(report.task_id)}', '${ref}')" `
+          + `title="${popLabel}${pctlHint}">`
+          + `${ref}${pctlHint}</button>`;
+      }
+      html += '</div>';
+      if (result.ancestry_model) {
+        html += `<div class="ref-model-hint">${escapeHtml(result.ancestry_model)}</div>`;
+      }
+      html += '</div>';
+    } else if (result.percentile == null && !result.error) {
+      // No percentile available — show reason
+      html += '<div class="score-item" style="grid-column: 1 / -1"><label>Percentile</label><span title="No reference stats available for this PGS">—</span></div>';
     }
     if (result.genome_build) {
       html += `<div class="score-item"><label>Scoring Positions</label><span>${escapeHtml(result.genome_build)}</span></div>`;
@@ -11354,154 +11590,6 @@ async function removeProviderKey(provider) {
     console.error('Failed to remove key:', e);
   }
 }
-
-
-// ── Panel Resize Handles ────────────────────────────────────────
-
-// --- Chat sub-tab: splitter between chat-messages and master-summary ---
-var _chatSplitState = null;
-
-function startChatSplitResize(e) {
-  e.preventDefault();
-  var clientY = e.touches ? e.touches[0].clientY : e.clientY;
-  var chatMsgs = document.getElementById('chatMessages');
-  var msSection = document.getElementById('masterSummarySection');
-  var msBody = document.getElementById('msSummaryBody');
-  if (!chatMsgs || !msSection) return;
-  // Auto-expand master summary if collapsed
-  if (msBody && msBody.style.display === 'none') {
-    masterSummaryToggle();
-  }
-  var container = chatMsgs.closest('.chat-sub');
-  if (!container) return;
-  _chatSplitState = {
-    chatEl: chatMsgs,
-    msSection: msSection,
-    msBody: msBody,
-    container: container,
-    startY: clientY,
-    startChatH: chatMsgs.offsetHeight,
-    startMsH: msSection.offsetHeight
-  };
-  document.addEventListener('mousemove', doChatSplitResize);
-  document.addEventListener('mouseup', stopChatSplitResize);
-  document.addEventListener('touchmove', doChatSplitResize, { passive: false });
-  document.addEventListener('touchend', stopChatSplitResize);
-  document.body.style.cursor = 'ns-resize';
-  document.body.style.userSelect = 'none';
-  chatMsgs.style.flex = '0 0 auto';
-  if (msBody) msBody.classList.add('resizing');
-}
-
-function doChatSplitResize(e) {
-  if (!_chatSplitState) return;
-  if (e.cancelable) e.preventDefault();
-  var clientY = e.touches ? e.touches[0].clientY : e.clientY;
-  var delta = clientY - _chatSplitState.startY;
-  var newChatH = Math.max(120, _chatSplitState.startChatH + delta);
-  var newMsH = Math.max(80, _chatSplitState.startMsH - delta);
-  if (newMsH === 80) {
-    newChatH = _chatSplitState.startChatH + _chatSplitState.startMsH - 80;
-  }
-  if (newChatH === 120) {
-    newMsH = _chatSplitState.startChatH + _chatSplitState.startMsH - 120;
-  }
-  _chatSplitState.chatEl.style.height = newChatH + 'px';
-  if (_chatSplitState.msBody) {
-    _chatSplitState.msBody.style.maxHeight = newMsH + 'px';
-    _chatSplitState.msBody.style.display = '';
-  }
-}
-
-function stopChatSplitResize() {
-  if (!_chatSplitState) return;
-  var chatH = parseInt(_chatSplitState.chatEl.style.height) || 300;
-  var msMaxH = _chatSplitState.msBody
-    ? parseInt(_chatSplitState.msBody.style.maxHeight) || 200
-    : 200;
-  localStorage.setItem('sg_chatSplitChatH', String(chatH));
-  localStorage.setItem('sg_chatSplitMsH', String(msMaxH));
-  if (_chatSplitState.msBody) _chatSplitState.msBody.classList.remove('resizing');
-  _chatSplitState = null;
-  document.removeEventListener('mousemove', doChatSplitResize);
-  document.removeEventListener('mouseup', stopChatSplitResize);
-  document.removeEventListener('touchmove', doChatSplitResize);
-  document.removeEventListener('touchend', stopChatSplitResize);
-  document.body.style.cursor = '';
-  document.body.style.userSelect = '';
-}
-
-function restoreChatSplit() {
-  var savedChatH = localStorage.getItem('sg_chatSplitChatH');
-  var savedMsH = localStorage.getItem('sg_chatSplitMsH');
-  if (savedChatH) {
-    var chatMsgs = document.getElementById('chatMessages');
-    if (chatMsgs) {
-      chatMsgs.style.flex = '0 0 auto';
-      chatMsgs.style.height = savedChatH + 'px';
-    }
-  }
-  if (savedMsH) {
-    var msBody = document.getElementById('msSummaryBody');
-    if (msBody) msBody.style.maxHeight = savedMsH + 'px';
-  }
-}
-
-// --- Terminal sub-tab: simple height resize for #chatRawOutput ---
-var _termResizeState = null;
-
-function startTerminalResize(e) {
-  e.preventDefault();
-  var clientY = e.touches ? e.touches[0].clientY : e.clientY;
-  var rawEl = document.getElementById('chatRawOutput');
-  if (!rawEl) return;
-  _termResizeState = { el: rawEl, startY: clientY, startH: rawEl.offsetHeight };
-  document.addEventListener('mousemove', doTerminalResize);
-  document.addEventListener('mouseup', stopTerminalResize);
-  document.addEventListener('touchmove', doTerminalResize, { passive: false });
-  document.addEventListener('touchend', stopTerminalResize);
-  document.body.style.cursor = 'ns-resize';
-  document.body.style.userSelect = 'none';
-}
-
-function doTerminalResize(e) {
-  if (!_termResizeState) return;
-  if (e.cancelable) e.preventDefault();
-  var clientY = e.touches ? e.touches[0].clientY : e.clientY;
-  var delta = clientY - _termResizeState.startY;
-  var newH = Math.max(120, Math.min(window.innerHeight - 200, _termResizeState.startH + delta));
-  _termResizeState.el.style.maxHeight = newH + 'px';
-}
-
-function stopTerminalResize() {
-  if (!_termResizeState) return;
-  var finalH = parseInt(_termResizeState.el.style.maxHeight);
-  if (finalH) localStorage.setItem('sg_terminalHeight', String(finalH));
-  _termResizeState = null;
-  document.removeEventListener('mousemove', doTerminalResize);
-  document.removeEventListener('mouseup', stopTerminalResize);
-  document.removeEventListener('touchmove', doTerminalResize);
-  document.removeEventListener('touchend', stopTerminalResize);
-  document.body.style.cursor = '';
-  document.body.style.userSelect = '';
-}
-
-function restoreTerminalHeight() {
-  var saved = localStorage.getItem('sg_terminalHeight');
-  if (saved) {
-    var rawEl = document.getElementById('chatRawOutput');
-    if (rawEl) rawEl.style.maxHeight = saved + 'px';
-  }
-}
-
-// Initialize resize handles on page load
-(function initResizeHandles() {
-  setTimeout(function() {
-    restoreChatSplit();
-    restoreTerminalHeight();
-  }, 100);
-})();
-
 </script>
 </body>
 </html>"""
