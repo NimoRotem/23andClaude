@@ -20,8 +20,70 @@ import subprocess
 import tempfile
 from pathlib import Path
 from threading import Lock
+import threading
+import signal
+
+# ── Per-task subprocess tracking (for cancellation) ──────────────
+_task_context = threading.local()       # .task_id set by worker before run_test()
+_tracked_procs_lock = Lock()
+_tracked_procs = {}                     # task_id -> list of Popen objects
+_cancelled_tasks = set()                # task_ids that should be aborted
+
+
+class TaskCancelled(Exception):
+    """Raised when a task is cancelled by the user."""
+    pass
+
+
+def set_task_context(task_id):
+    """Called by app.py worker before run_test() to enable process tracking."""
+    _task_context.task_id = task_id
+
+
+def clear_task_context():
+    """Called by app.py worker after run_test() finishes."""
+    _task_context.task_id = None
+
+
+def cancel_task(task_id):
+    """Kill all tracked subprocesses for a task. Called from app.py stop endpoint."""
+    _cancelled_tasks.add(task_id)
+    with _tracked_procs_lock:
+        procs = _tracked_procs.pop(task_id, [])
+    for proc in procs:
+        try:
+            # Kill entire process group (catches child processes too)
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+
+
+def is_task_cancelled(task_id=None):
+    """Check if a task has been cancelled."""
+    tid = task_id or getattr(_task_context, 'task_id', None)
+    return tid in _cancelled_tasks if tid else False
+
+
+def _uncancel_task(task_id):
+    """Remove cancellation flag after worker handles it."""
+    _cancelled_tasks.discard(task_id)
 
 from rs_positions import RS_POSITIONS
+
+# ── Pipeline scoring (multi-pop percentile) ──
+try:
+    from pipeline.scoring import (
+        select_reference, compute_percentile_multipop, compute_percentile_for_ref
+    )
+    from pipeline import db as pipeline_db
+    PIPELINE_SCORING_AVAILABLE = True
+except ImportError:
+    PIPELINE_SCORING_AVAILABLE = False
+
 try:
     from rsid_list_positions import RSID_LIST_POSITIONS
 except ImportError:
@@ -84,17 +146,15 @@ CLINVAR_ANNOTATED_CACHE = os.getenv(
 CLINVAR_VCF_CHR  = os.getenv("CLINVAR_VCF_CHR",  "/data/clinvar/clinvar_chr.vcf.gz")
 CLINVAR_VCF_BARE = os.getenv("CLINVAR_VCF_BARE", "/data/clinvar/clinvar.vcf.gz")
 
-# Thread budgets. The 44-core box can comfortably run NUM_WORKERS test
-# tasks concurrently, each spawning plink2/bcftools with these thread
-# counts. Defaults are tuned for 4 workers × ~10 threads avg = ~40 cores.
-PLINK_BUILD_THREADS = int(os.getenv("PLINK_BUILD_THREADS", "16"))
-PLINK_SCORE_THREADS = int(os.getenv("PLINK_SCORE_THREADS", "8"))
-BCFTOOLS_THREADS    = int(os.getenv("BCFTOOLS_THREADS", "4"))
-# plink2 --memory is a hard cap on its internal allocations. 16 GB is too
-# low for a raw gVCF (plink2 OOMs before we can even strip the ref blocks).
-# 32 GB × 4 workers = 128 GB fits comfortably in 176 GB of system RAM,
-# and the build step happens once per file so even the peak is short.
-PLINK_MEMORY_MB     = int(os.getenv("PLINK_MEMORY_MB", "32000"))
+# Thread budgets for 32-core machine. Each PGS scoring task uses 1 thread
+# so 8+ can run concurrently. BAM/CRAM Pipeline E+ uses ~23 cores (gated
+# by semaphore to 1 concurrent). Pgen build uses 4 threads (one-off).
+PLINK_BUILD_THREADS = int(os.getenv("PLINK_BUILD_THREADS", "4"))
+PLINK_SCORE_THREADS = int(os.getenv("PLINK_SCORE_THREADS", "1"))
+BCFTOOLS_THREADS    = int(os.getenv("BCFTOOLS_THREADS", "1"))
+# plink2 --memory hard cap. 8 GB per worker × 12 workers = 96 GB max
+# (fits in 117 GB system RAM). Build step happens once per file.
+PLINK_MEMORY_MB     = int(os.getenv("PLINK_MEMORY_MB", "8000"))
 
 # Ensure scratch + pgen cache exist
 os.makedirs(SCRATCH, exist_ok=True)
@@ -147,10 +207,51 @@ def _get_normgvcf_lock(key):
 
 
 def _run(cmd, timeout=600):
-    """Run a shell command, return (stdout, stderr, returncode)."""
-    logger.info(f"Running: {' '.join(cmd[:6])}...")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    return result.stdout, result.stderr, result.returncode
+    """Run a shell command, return (stdout, stderr, returncode).
+    Tracks the subprocess so it can be killed if the task is cancelled."""
+    task_id = getattr(_task_context, 'task_id', None)
+
+    # Check cancellation before starting
+    if task_id and task_id in _cancelled_tasks:
+        raise TaskCancelled(f"Task {task_id} cancelled before subprocess start")
+
+    logger.info(f"Running: {' '.join(str(c) for c in cmd[:6])}...")
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, start_new_session=True,
+        )
+    except Exception:
+        raise
+
+    # Track this process
+    if task_id:
+        with _tracked_procs_lock:
+            _tracked_procs.setdefault(task_id, []).append(proc)
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        rc = proc.returncode
+
+        # Check cancellation after completion
+        if task_id and task_id in _cancelled_tasks:
+            raise TaskCancelled(f"Task {task_id} cancelled")
+
+        return stdout, stderr, rc
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        # Un-track this process
+        if task_id:
+            with _tracked_procs_lock:
+                pl = _tracked_procs.get(task_id, [])
+                _tracked_procs[task_id] = [p for p in pl if p is not proc]
 
 
 def _is_gvcf(vcf_path):
@@ -2892,6 +2993,32 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
         _conf, _conf_reasons = _compute_confidence(_fast_result, pctl_details, build_check)
         _fast_result["confidence"] = _conf
         _fast_result["confidence_reasons"] = _conf_reasons
+
+        # ── Multi-pop ref info ──
+        if pctl_details:
+            _fast_result["available_refs"] = pctl_details.get("available_refs", ["EUR"])
+            _fast_result["selected_ref"] = pctl_details.get("selected_ref", "EUR")
+            _fast_result["secondary_percentiles"] = pctl_details.get("secondary_percentiles", {})
+            _fast_result["ancestry_model"] = pctl_details.get("ancestry_model")
+        else:
+            _fast_result["available_refs"] = ["EUR"]
+            _fast_result["selected_ref"] = "EUR"
+            _fast_result["secondary_percentiles"] = {}
+            _fast_result["ancestry_model"] = None
+
+        # ── Record in pipeline DB ──
+        if PIPELINE_SCORING_AVAILABLE:
+            try:
+                pipeline_db.insert_sample_result(
+                    task_id=getattr(_task_context, 'task_id', '') or '',
+                    pgs_id=pgs_id, sample_id=result.get("sample_id"),
+                    raw_score=raw_score, percentile=percentile,
+                    selected_ref=_fast_result.get("selected_ref", "EUR"),
+                    match_rate=match_rate_pct,
+                )
+            except Exception:
+                pass
+
         return _fast_result
     except Exception as e:
         logger.warning(f"{pgs_id} fast path exception: {e}")
@@ -3138,6 +3265,32 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
         d["confidence_reasons"] = _conf_reasons
         if status == "warning":
             d["error"] = f"Low match rate: only {match_rate_pct:.1f}% of variants matched"
+
+        # ── Multi-pop ref info ──
+        if pctl_details:
+            d["available_refs"] = pctl_details.get("available_refs", ["EUR"])
+            d["selected_ref"] = pctl_details.get("selected_ref", "EUR")
+            d["secondary_percentiles"] = pctl_details.get("secondary_percentiles", {})
+            d["ancestry_model"] = pctl_details.get("ancestry_model")
+        else:
+            d["available_refs"] = ["EUR"]
+            d["selected_ref"] = "EUR"
+            d["secondary_percentiles"] = {}
+            d["ancestry_model"] = None
+
+        # ── Record in pipeline DB ──
+        if PIPELINE_SCORING_AVAILABLE:
+            try:
+                pipeline_db.insert_sample_result(
+                    task_id=getattr(_task_context, 'task_id', '') or '',
+                    pgs_id=pgs_id, sample_id=result.get("sample_id"),
+                    raw_score=raw_score, percentile=percentile,
+                    selected_ref=d.get("selected_ref", "EUR"),
+                    match_rate=match_rate_pct,
+                )
+            except Exception:
+                pass
+
         return d
 
 
@@ -3553,7 +3706,33 @@ def _apply_sanity_gates(pgs_id, z, std, mean, p, method_name, details, return_de
     return round(p, 1), details
 
 
-def _compute_percentile(pgs_id, raw_score, scoring_file=None,
+def _compute_percentile_multipop_wrapper(pgs_id, raw_score, scoring_file=None,
+                        matched_vars_path=None, tmpdir=None,
+                        return_details=False, score_sum=None,
+                        ancestry_result=None):
+    """Wrapper that tries pipeline.scoring for multi-pop, falls back to legacy."""
+    if PIPELINE_SCORING_AVAILABLE and ancestry_result is not None:
+        try:
+            ref_sel = select_reference(ancestry_result, pgs_id)
+            result = compute_percentile_multipop(
+                pgs_id, raw_score or 0, ref_sel, score_sum=score_sum)
+            if return_details:
+                details = result.primary_details or {}
+                details["available_refs"] = result.available_refs
+                details["selected_ref"] = result.selected_ref
+                details["secondary_percentiles"] = result.secondary_percentiles
+                details["ancestry_model"] = result.ancestry_model
+                return result.primary_percentile, details
+            return result.primary_percentile
+        except Exception as e:
+            logger.warning(f"{pgs_id}: pipeline scoring failed, falling back: {e}")
+    # Fall back to legacy single-pop EUR computation
+    return _compute_percentile_legacy(pgs_id, raw_score, scoring_file=scoring_file,
+                                      matched_vars_path=matched_vars_path, tmpdir=tmpdir,
+                                      return_details=return_details, score_sum=score_sum)
+
+
+def _compute_percentile_legacy(pgs_id, raw_score, scoring_file=None,
                         matched_vars_path=None, tmpdir=None,
                         return_details=False, score_sum=None):
     """Compute percentile of raw_score against the 1000G EUR reference panel.
@@ -3631,6 +3810,11 @@ def _compute_percentile(pgs_id, raw_score, scoring_file=None,
     if return_details:
         return pctl, gated_details if gated_details else details
     return pctl
+
+
+# _compute_percentile: dispatches to multipop wrapper if ancestry is available,
+# otherwise falls back to legacy EUR-only computation.
+_compute_percentile = _compute_percentile_multipop_wrapper
 
 
 def _compute_confidence(result, pctl_details, build_check):
