@@ -88,7 +88,7 @@ CLINVAR_VCF_BARE = os.getenv("CLINVAR_VCF_BARE", "/data/clinvar/clinvar.vcf.gz")
 # tasks concurrently, each spawning plink2/bcftools with these thread
 # counts. Defaults are tuned for 4 workers × ~10 threads avg = ~40 cores.
 PLINK_BUILD_THREADS = int(os.getenv("PLINK_BUILD_THREADS", "16"))
-PLINK_SCORE_THREADS = int(os.getenv("PLINK_SCORE_THREADS", "4"))
+PLINK_SCORE_THREADS = int(os.getenv("PLINK_SCORE_THREADS", "8"))
 BCFTOOLS_THREADS    = int(os.getenv("BCFTOOLS_THREADS", "4"))
 # plink2 --memory is a hard cap on its internal allocations. 16 GB is too
 # low for a raw gVCF (plink2 OOMs before we can even strip the ref blocks).
@@ -2606,12 +2606,13 @@ def _sex_from_vcf(vcf_path, method):
 
 # ─── PGS Scoring Runner ─────────────────────────────────────────
 
-def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tmpdir, trait=""):
-    """Fast PGS scoring for small variant sets -- bypasses full pgen build.
+def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tmpdir, trait="", build_check=None):
+    """Fast PGS scoring for small/medium variant sets -- bypasses full pgen build.
 
-    For a gVCF with <=500 PGS variants, expand only those positions with
-    bcftools convert --gvcf2vcf and score directly via plink2. Takes ~5s
-    instead of ~15min for the full normalization pipeline.
+    For a gVCF with <=2000 PGS variants, expand only those positions with
+    bcftools convert --gvcf2vcf (using -R for indexed random access) and
+    score directly via plink2. Takes ~2-10s instead of ~15min for the full
+    normalization pipeline.
     """
     variant_count = metadata.get("variant_count", 0)
     logger.info(f"{pgs_id}: using fast scoring path ({variant_count} variants)")
@@ -2638,11 +2639,16 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
 
         # 3. Expand gVCF at just these positions -> small VCF
         expanded_vcf = os.path.join(tmpdir, "fast_expanded.vcf.gz")
+        # Use -R (regions-file) for index-based random access instead of
+        # -T (targets) which streams through the entire file sequentially.
+        # --regions-overlap 1 ensures gVCF reference blocks (POS..END) that
+        # span a query position are included, not just records at exact POS.
         _, stderr, rc = _run([
             BCFTOOLS, "convert", "--gvcf2vcf",
             "-f", ref,
-            "-T", positions_file,
-            "--targets-overlap", "1",
+            "-R", positions_file,
+            "--regions-overlap", "1",
+            "--threads", str(BCFTOOLS_THREADS),
             "-Oz", "-o", expanded_vcf,
             str(vcf_path),
         ], timeout=300)
@@ -2690,9 +2696,9 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
 
         # Inline rewrite: strip trailing placeholders, rewrite pure ref-blocks
         placeholders = {"<*>", "<NON_REF>"}
-        reader = subprocess.Popen([BCFTOOLS, "view", expanded_vcf],
+        reader = subprocess.Popen([BCFTOOLS, "view", "--threads", str(BCFTOOLS_THREADS), expanded_vcf],
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-        writer = subprocess.Popen([BCFTOOLS, "view", "-Oz", "-o", rewritten_vcf, "-"],
+        writer = subprocess.Popen([BCFTOOLS, "view", "--threads", str(BCFTOOLS_THREADS), "-Oz", "-o", rewritten_vcf, "-"],
                                   stdin=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         for line in reader.stdout:
             if line.startswith("#"):
@@ -2732,7 +2738,7 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
         writer.wait()
 
         # 5. Index and convert to pgen
-        _run([BCFTOOLS, "index", "-t", rewritten_vcf], timeout=60)
+        _run([BCFTOOLS, "index", "--threads", str(BCFTOOLS_THREADS), "-t", rewritten_vcf], timeout=60)
         pgen_prefix = os.path.join(tmpdir, "fast_pgen")
 
         gvcf_has_chr = _detect_chr_prefix(vcf_path)
@@ -2753,6 +2759,8 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
             "--set-all-var-ids", var_id_template,
             "--new-id-max-allele-len", "100", "missing",
             "--rm-dup", "force-first",
+            "--threads", str(PLINK_SCORE_THREADS),
+            "--memory", str(PLINK_MEMORY_MB),
             "--out", pgen_prefix,
         ]
         _, stderr, rc = _run(cmd_pgen, timeout=120)
@@ -2767,6 +2775,8 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
             "--score", plink2_scoring, "header-read", "1", "2", "3",
             "cols=+scoresums", "no-mean-imputation", "list-variants",
             "--allow-extra-chr",
+            "--threads", str(PLINK_SCORE_THREADS),
+            "--memory", str(PLINK_MEMORY_MB),
             "--out", score_prefix,
         ]
         _, stderr, rc = _run(cmd_score, timeout=120)
@@ -2781,6 +2791,16 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
         if os.path.exists(vars_file):
             with open(vars_file) as f:
                 matched = sum(1 for _ in f)
+
+        # Adjust match count: plink2 lists variants found in the pgen in
+        # .sscore.vars, but some may have missing genotypes (./.).
+        # ALLELE_CT = 2 * (non-missing variants), so true_matched = ALLELE_CT / 2.
+        allele_ct = result.get("allele_count")
+        if allele_ct is not None and allele_ct < 2 * matched:
+            genotyped = allele_ct // 2
+            missing_in_score = matched - genotyped
+            logger.info(f"{pgs_id} fast path: {matched} vars in pgen, {genotyped} genotyped, {missing_in_score} missing (./.)")
+            matched = genotyped
 
         total = metadata.get("variant_count", 0)
         match_rate_pct = (matched / total * 100) if total else 0
@@ -2802,21 +2822,23 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
             }
 
         raw_score = result.get("raw_score")
+        _score_sum = result.get("score_sum")
         percentile, pctl_details = _compute_percentile(
             pgs_id, raw_score or 0,
             scoring_file=scoring_file,
             matched_vars_path=vars_file,
             tmpdir=tmpdir,
-            return_details=True)
+            return_details=True,
+            score_sum=_score_sum)
 
         pipeline_info = _build_pipeline_info(
             vcf_path, pgs_id, metadata, "fast_direct",
             percentile_details=pctl_details)
 
         status = "passed" if match_rate_pct >= 85 else "warning"
-        headline = f"{trait}: {match_rate_pct:.0f}% match ({matched}/{total})"
+        headline = f"{trait}: score={raw_score:.4g} ({matched:,}/{total:,} = {match_rate_pct:.0f}%)"
         if percentile is not None:
-            headline += f", percentile {percentile:.0f}"
+            headline += f", {percentile:.1f}%ile"
 
         # Build scoring diagnostics
         scoring_diagnostics = {
@@ -2836,11 +2858,19 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
 
         _sf_source, _sf_note = _scoring_file_source(scoring_file)
         _build_notes = _sf_note
+        _orig_build = metadata.get("genome_build", "")
+        _pos_build = metadata.get("positions_build",
+                                  metadata.get("HmPOS_build", "GRCh38"))
+        if _orig_build and _orig_build != _pos_build and _orig_build not in ("NR", "unknown", ""):
+            _build_notes += f" | Original study build: {_orig_build}, scoring positions: {_pos_build}"
         if metadata.get("liftover"):
             _build_notes += f" | Liftover applied: {metadata['liftover']}"
 
         logger.info(f"{pgs_id} fast path: score={raw_score}, match={matched}/{total} ({match_rate_pct:.0f}%), pctl={percentile}")
-        return {
+        _positions_build = metadata.get("positions_build",
+                                        metadata.get("HmPOS_build",
+                                        metadata.get("genome_build", "GRCh38")))
+        _fast_result = {
             "status": status, "test_type": "pgs_score",
             "pgs_id": pgs_id, "trait": trait,
             "matched_variants": matched, "total_variants": total,
@@ -2848,17 +2878,21 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
             "match_rate_value": round(match_rate_pct, 1),
             "raw_score": raw_score,
             "percentile": percentile,
-            "genome_build": metadata.get("genome_build",
-                                         metadata.get("HmPOS_build", "GRCh38")),
+            "genome_build": _positions_build,
             "scoring_file_source": _sf_source,
             "build_notes": _build_notes,
             "pipeline_info": pipeline_info,
+            "build_validation": build_check,
             "scoring_method": "fast_direct",
             "scoring_diagnostics": scoring_diagnostics,
             "summary": _summarize_pgs(pgs_id, trait, result, matched, metadata,
                                       percentile, pipeline_info=pipeline_info),
             "headline": headline,
         }
+        _conf, _conf_reasons = _compute_confidence(_fast_result, pctl_details, build_check)
+        _fast_result["confidence"] = _conf
+        _fast_result["confidence_reasons"] = _conf_reasons
+        return _fast_result
     except Exception as e:
         logger.warning(f"{pgs_id} fast path exception: {e}")
         return None  # fall back to full pgen path
@@ -2891,9 +2925,13 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
                          test_type="pgs_score", pgs_id=pgs_id, trait=trait)
 
         # Step 2b: Genome build validation — attempt liftover on mismatch
-        pgs_build = metadata.get("genome_build",
-                                 metadata.get("HmPOS_build", "GRCh38"))
-        _progress(f"Validating genome build ({pgs_build})…")
+        # Use positions_build (the actual coordinate system used for scoring),
+        # NOT genome_build (the original study build which may differ for
+        # harmonized files, e.g. genome_build=GRCh37 but positions are GRCh38).
+        pgs_build = metadata.get("positions_build",
+                                 metadata.get("HmPOS_build",
+                                 metadata.get("genome_build", "GRCh38")))
+        _progress(f"Validating genome build (scoring positions: {pgs_build})…")
         build_check = _validate_genome_build(vcf_path, reference_build=pgs_build)
         if build_check["status"] == "FAIL":
             vcf_build = _normalize_build_name(build_check.get("vcf_build"))
@@ -2914,14 +2952,16 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
         if build_check["status"] == "WARN":
             logger.warning(f"{pgs_id} build validation: {build_check['message']}")
 
-        # FAST PATH: For small PGS (<=500 variants) on gVCFs, score directly
-        # without building the full pgen cache. Avoids 15-min normalization.
+        # FAST PATH: For small/medium PGS (<=2000 variants) on gVCFs, score
+        # directly without building the full pgen cache. Uses indexed random
+        # access (-R) so bcftools reads only the target positions, not the
+        # entire multi-GB gVCF. Takes ~2-10s vs ~15min for full normalization.
         variant_count = metadata.get("variant_count", 0)
-        if variant_count <= 500 and _is_gvcf(vcf_path):
+        if variant_count <= 2000 and _is_gvcf(vcf_path):
             _progress(f"Fast-scoring {pgs_id} ({variant_count} variants)…")
             fast_result = _score_pgs_fast(vcf_path, pgs_id, scoring_file,
                                           plink2_scoring, metadata, tmpdir,
-                                          trait=trait)
+                                          trait=trait, build_check=build_check)
             if fast_result is not None:
                 return fast_result
             logger.warning(f"{pgs_id}: fast path failed, falling back to full pgen")
@@ -2970,6 +3010,17 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
             with open(vars_file) as f:
                 matched = sum(1 for _ in f)
 
+        # Adjust for missing genotypes: ALLELE_CT = 2 * (non-missing vars).
+        # Variants with ./. in the pgen are listed in .sscore.vars but
+        # contribute dosage=0 and shouldn't count as "matched".
+        allele_ct = result.get("allele_count")
+        if allele_ct is not None and allele_ct < 2 * matched:
+            genotyped = allele_ct // 2
+            missing_in_score = matched - genotyped
+            if missing_in_score > 0:
+                logger.info(f"{pgs_id}: {matched} vars in pgen, {genotyped} genotyped, {missing_in_score} missing (./.)")
+                matched = genotyped
+
         total = metadata.get("variant_count", 0)
         match_rate_pct = (matched / total * 100) if total else 0
 
@@ -3010,12 +3061,14 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
         # panel restricted to the user's matched variant subset (fall back to
         # a precomputed stats file inside the helper if this isn't possible).
         raw_score = result.get("raw_score")
+        _score_sum = result.get("score_sum")
         percentile, pctl_details = _compute_percentile(
             pgs_id, raw_score or 0,
             scoring_file=scoring_file,
             matched_vars_path=vars_file,
             tmpdir=tmpdir,
-            return_details=True)
+            return_details=True,
+            score_sum=_score_sum)
 
         pipeline_info = _build_pipeline_info(
             vcf_path, pgs_id, metadata, "pgen_cache",
@@ -3047,6 +3100,11 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
 
         _sf_source, _sf_note = _scoring_file_source(scoring_file)
         _build_notes = _sf_note
+        _orig_build = metadata.get("genome_build", "")
+        _pos_build = metadata.get("positions_build",
+                                  metadata.get("HmPOS_build", "GRCh38"))
+        if _orig_build and _orig_build != _pos_build and _orig_build not in ("NR", "unknown", ""):
+            _build_notes += f" | Original study build: {_orig_build}, scoring positions: {_pos_build}"
         if metadata.get("liftover"):
             _build_notes += f" | Liftover applied: {metadata['liftover']}"
 
@@ -3062,7 +3120,9 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
             "match_rate": f"{match_rate_pct:.1f}%",
             "match_rate_value": round(match_rate_pct, 1),
             "percentile": percentile,
-            "genome_build": metadata.get("genome_build", metadata.get("HmPOS_build", "unknown")),
+            "genome_build": metadata.get("positions_build",
+                              metadata.get("HmPOS_build",
+                              metadata.get("genome_build", "unknown"))),
             "scoring_file_source": _sf_source,
             "build_notes": _build_notes,
             "pipeline_info": pipeline_info,
@@ -3073,6 +3133,9 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
             "status": status,
             "headline": headline,
         }
+        _conf, _conf_reasons = _compute_confidence(d, pctl_details, build_check)
+        d["confidence"] = _conf
+        d["confidence_reasons"] = _conf_reasons
         if status == "warning":
             d["error"] = f"Low match rate: only {match_rate_pct:.1f}% of variants matched"
         return d
@@ -3274,6 +3337,14 @@ def _prepare_plink2_scoring(scoring_file, output_path):
             f.write(line + "\n")
 
     metadata['variant_count'] = len(unique)
+    # Record which coordinate columns were actually used.
+    # For harmonized files, hm_chr/hm_pos are GRCh38 even if genome_build says GRCh37.
+    _used_hm = col_names is not None and 'hm_chr' in col_names and 'hm_pos' in col_names
+    metadata['used_harmonized_columns'] = _used_hm
+    if _used_hm:
+        metadata['positions_build'] = metadata.get('HmPOS_build', 'GRCh38')
+    else:
+        metadata['positions_build'] = metadata.get('genome_build', 'unknown')
     return metadata
 
 
@@ -3298,9 +3369,14 @@ def _parse_sscore(sscore_path):
                 result['score_sum'] = float(v)
             except ValueError:
                 result['score_sum'] = 0.0
-        elif 'ALLELE_CT' in h:
+        elif h == 'ALLELE_CT' or (h.endswith('ALLELE_CT') and 'MISSING' not in h):
             try:
                 result['allele_count'] = int(v)
+            except ValueError:
+                pass
+        elif 'MISSING' in h and 'CT' in h:  # MISSING_ALLELE_CT
+            try:
+                result['missing_allele_count'] = int(v)
             except ValueError:
                 pass
         elif 'NAMED_ALLELE_DOSAGE_SUM' in h:
@@ -3330,15 +3406,20 @@ def _build_pipeline_info(vcf_path, pgs_id, metadata, scoring_method,
         input_type = "unknown"
 
     _liftover_note = metadata.get("liftover", "")
+    _positions_build = metadata.get("positions_build",
+                                    metadata.get("HmPOS_build",
+                                    metadata.get("genome_build", "GRCh38")))
+    _original_build = metadata.get("genome_build", "unknown")
+    _used_hm = metadata.get("used_harmonized_columns", False)
     return {
         "scoring_tool": "plink2 --score (cols=+scoresums, no-mean-imputation)",
         "scoring_method": scoring_method,
         "input_file": os.path.basename(str(vcf_path)),
         "input_type": input_type,
-        "genome_build": metadata.get("genome_build",
-                                     metadata.get("HmPOS_build", "GRCh38")),
-        "scoring_file_build": metadata.get("genome_build",
-                                           metadata.get("HmPOS_build", "GRCh38")),
+        "genome_build": _positions_build,
+        "scoring_file_build": _positions_build,
+        "original_study_build": _original_build,
+        "used_harmonized_positions": _used_hm,
         "liftover_applied": _liftover_note or None,
         "pgs_catalog_id": pgs_id,
         "pgs_catalog_url": f"https://www.pgscatalog.org/score/{pgs_id}/",
@@ -3393,6 +3474,23 @@ def _load_precomputed_stats(pgs_id):
                     return (mean, std, os.path.basename(path))
             except Exception:
                 pass
+    # Fallback: prefix glob for files like PGS000119_EUR_GRCh38_n22.json
+    prefix = f"{pgs_id}_EUR_GRCh38"
+    try:
+        for fname in os.listdir(REF_PANEL_STATS):
+            if fname.startswith(prefix) and fname.endswith(".json"):
+                path = os.path.join(REF_PANEL_STATS, fname)
+                try:
+                    with open(path) as f:
+                        stats = json.load(f)
+                    mean = stats.get("mean", 0)
+                    std = stats.get("std", 0)
+                    if std > 0:
+                        return (mean, std, fname)
+                except Exception:
+                    pass
+    except OSError:
+        pass
     return None
 
 
@@ -3457,19 +3555,12 @@ def _apply_sanity_gates(pgs_id, z, std, mean, p, method_name, details, return_de
 
 def _compute_percentile(pgs_id, raw_score, scoring_file=None,
                         matched_vars_path=None, tmpdir=None,
-                        return_details=False):
+                        return_details=False, score_sum=None):
     """Compute percentile of raw_score against the 1000G EUR reference panel.
 
-    Strategy:
-      1. Try precomputed stats first (reliable, computed on full ref panel)
-      2. Try dynamic scoring (restricted to matched variant subset)
-      3. Cross-validate when both available: if dynamic std < 10% of
-         precomputed std, dynamic is broken → use precomputed
-      4. Apply sanity gates to final result
-
-    Falls back to a precomputed stats file at
-    REF_PANEL_STATS/{pgs_id}_EUR_GRCh38.json when dynamic scoring isn't
-    possible (e.g. no matched_vars file or harmonized scoring file missing).
+    Uses precomputed stats ONLY. Dynamic scoring has been disabled because
+    it produces unstable percentiles (the reference distribution changes
+    with each variant subset).
 
     If return_details=True, returns (percentile, details_dict) tuple.
     """
@@ -3484,64 +3575,22 @@ def _compute_percentile(pgs_id, raw_score, scoring_file=None,
         "z_score": None,
     }
 
-    # 1. Try precomputed stats (reliable, computed on full ref panel)
+    # Load precomputed stats (the only method we trust)
     precomputed = _load_precomputed_stats(pgs_id)
 
-    # 2. Try dynamic scoring
-    dynamic = None
-    if scoring_file and matched_vars_path and tmpdir and os.path.exists(matched_vars_path):
-        try:
-            result = _score_ref_panel_matched(pgs_id, scoring_file,
-                                              matched_vars_path, tmpdir)
-            if result is not None:
-                dynamic = result  # (mean, std)
-        except Exception as e:
-            logger.warning(f"{pgs_id}: dynamic percentile failed ({e})")
-
-    # 3. Decision logic with cross-validation
-    mean = std = None
-    method_name = None
-
-    if precomputed and dynamic:
-        precomputed_mean, precomputed_std, stats_file = precomputed
-        dynamic_mean, dynamic_std = dynamic
-        # Cross-validate: if dynamic std < 10% of precomputed std, dynamic is broken
-        if dynamic_std < precomputed_std * 0.1:
-            logger.warning(f"{pgs_id}: dynamic std collapsed ({dynamic_std:.6f} vs "
-                           f"precomputed {precomputed_std:.6f}), using precomputed")
-            mean, std = precomputed_mean, precomputed_std
-            method_name = "precomputed_stats"
-            details["stats_file"] = stats_file
-            details["description"] = ("Dynamic scoring std collapsed; used precomputed "
-                                      "EUR reference distribution stats instead")
-            details["dynamic_std_collapsed"] = True
-            details["dynamic_std"] = round(dynamic_std, 6)
-        else:
-            mean, std = dynamic_mean, dynamic_std
-            method_name = "dynamic_1000g_scoring"
-            details["description"] = ("Scored 1000G EUR panel on same variant "
-                                      "subset matched in sample, then computed "
-                                      "z-score against EUR distribution")
-            details["cross_validated"] = True
-    elif precomputed:
-        precomputed_mean, precomputed_std, stats_file = precomputed
-        mean, std = precomputed_mean, precomputed_std
-        method_name = "precomputed_stats"
-        details["stats_file"] = stats_file
-        details["description"] = ("Used precomputed EUR reference distribution stats")
-    elif dynamic:
-        dynamic_mean, dynamic_std = dynamic
-        mean, std = dynamic_mean, dynamic_std
-        method_name = "dynamic_1000g_scoring"
-        details["description"] = ("Scored 1000G EUR panel on same variant "
-                                  "subset matched in sample (no precomputed stats "
-                                  "available for cross-validation)")
-    else:
+    if not precomputed:
+        details["method"] = "unavailable"
+        details["description"] = ("No precomputed reference stats available for this PGS. "
+                                  "Score computed but percentile cannot be determined.")
         if return_details:
-            details["method"] = "unavailable"
-            details["description"] = "No reference panel stats available for this PGS"
             return None, details
         return None
+
+    precomputed_mean, precomputed_std, stats_file = precomputed
+    mean, std = precomputed_mean, precomputed_std
+    method_name = "precomputed_stats"
+    details["stats_file"] = stats_file
+    details["description"] = "Used precomputed EUR reference distribution stats"
 
     if std <= 0:
         if return_details:
@@ -3550,8 +3599,18 @@ def _compute_percentile(pgs_id, raw_score, scoring_file=None,
             return None, details
         return None
 
+    # Scale reconciliation: precomputed stats may be on SUM scale while
+    # raw_score is on AVG scale (plink2 SCORE1_AVG = SUM / (2 * N_scored)).
+    # Detect by checking if the reference mean is orders of magnitude larger.
+    compare_score = raw_score
+    if score_sum is not None:
+        if abs(mean) > 1 and abs(raw_score) < abs(mean) * 0.001:
+            compare_score = score_sum
+            details["scale_correction"] = "Using score_sum vs precomputed SUM-scale stats"
+            logger.info(f"{pgs_id}: scale mismatch detected — raw_score={raw_score:.4g} vs ref_mean={mean:.4g}; using score_sum={score_sum:.4g}")
+
     # Compute z-score and raw percentile
-    z = (raw_score - mean) / std
+    z = (compare_score - mean) / std
     p = 0.5 * (1 + math.erf(z / math.sqrt(2))) * 100
 
     details["method"] = method_name
@@ -3572,6 +3631,34 @@ def _compute_percentile(pgs_id, raw_score, scoring_file=None,
     if return_details:
         return pctl, gated_details if gated_details else details
     return pctl
+
+
+def _compute_confidence(result, pctl_details, build_check):
+    """Compute confidence level for a PGS result.
+
+    Returns (confidence, reasons) where confidence is "high" or "low"
+    and reasons is a list of strings explaining why confidence is low.
+    """
+    reasons = []
+
+    pctl_method = (pctl_details or {}).get("method", "unavailable")
+    if pctl_method != "precomputed_stats":
+        reasons.append("no_precomputed_stats")
+
+    match_rate = result.get("match_rate_value", 0)
+    if match_rate < 95:
+        reasons.append("match_rate_below_95pct")
+
+    build_status = (build_check or {}).get("status", "unknown")
+    if build_status not in ("PASS",):
+        reasons.append("build_validation_not_passed")
+
+    gates = (pctl_details or {}).get("sanity", {}).get("gates_tripped", [])
+    if gates:
+        reasons.append("sanity_gates_tripped")
+
+    confidence = "high" if not reasons else "low"
+    return confidence, reasons
 
 
 def _parse_plink2_score_match_count(log_path):
@@ -3776,9 +3863,12 @@ def _summarize_pgs(pgs_id, trait, result, matched, metadata, percentile,
         lines.append(f"Scoring method: {pipeline_info.get('scoring_method', 'unknown')}")
         lines.append(f"Input file: {pipeline_info.get('input_file', 'unknown')}")
         lines.append(f"Input type: {pipeline_info.get('input_type', 'unknown')}")
-        lines.append(f"Genome build: {pipeline_info.get('genome_build', 'unknown')}")
-        if pipeline_info.get('scoring_file_build'):
-            lines.append(f"Scoring file build: {pipeline_info['scoring_file_build']}")
+        _pos_build = pipeline_info.get('genome_build', 'unknown')
+        _orig_build = pipeline_info.get('original_study_build', '')
+        if _orig_build and _orig_build != _pos_build and _orig_build not in ('NR', 'unknown', ''):
+            lines.append(f"Scoring positions: {_pos_build} (harmonized from original {_orig_build} study)")
+        else:
+            lines.append(f"Scoring positions: {_pos_build}")
         if pipeline_info.get('liftover_applied'):
             lines.append(f"Liftover: {pipeline_info['liftover_applied']}")
         if pipeline_info.get('scoring_file_source'):
@@ -7122,7 +7212,8 @@ def _run_pgs_score_pileup(bam_path, params, progress_cb=None):
             scoring_file=scoring_file,
             matched_vars_path=matched_vars_file,
             tmpdir=_pctl_tmpdir,
-            return_details=True)
+            return_details=True,
+            score_sum=pgs_sum)
 
         # Clean up
         try:
@@ -7163,7 +7254,7 @@ def _run_pgs_score_pileup(bam_path, params, progress_cb=None):
         "pgs_id": pgs_id,
         "trait": trait,
         "score": pgs_sum,
-        "raw_score": pgs_sum,
+        "raw_score": pgs_avg,
         "percentile": percentile,
         "variants_matched": matched,
         "variants_total": total,

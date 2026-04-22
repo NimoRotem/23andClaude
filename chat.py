@@ -296,11 +296,24 @@ def _inject_api_key(username, session):
 # ─── Session lifecycle ──────────────────────────────────────────────
 def _ensure_session(username, session):
     """Create + launch claude in the tmux session if it isn't running."""
+    def _sync_claude_md():
+        """Copy user's claude.md to WORK_DIR/CLAUDE.md so Claude Code reads it."""
+        try:
+            from app import _claude_md_path
+            umd = _claude_md_path(username)
+            wmd = Path(WORK_DIR) / "CLAUDE.md"
+            if umd.exists():
+                import shutil
+                shutil.copy2(str(umd), str(wmd))
+        except Exception:
+            pass
+
     if _session_exists(session):
         activity = _detect_activity(username, session)
         if activity["command"] in ("claude", "node"):
             return
         _inject_api_key(username, session)
+        _sync_claude_md()
         _run_tmux([
             "send-keys", "-t", session, "-l",
             f"{CLAUDE_CMD} --dangerously-skip-permissions --name {session}",
@@ -316,6 +329,7 @@ def _ensure_session(username, session):
             _run_tmux(["send-keys", "-t", session, "Enter"])
             time.sleep(0.5)
             _inject_api_key(username, session)
+            _sync_claude_md()
             _run_tmux([
                 "send-keys", "-t", session, "-l",
                 f"{CLAUDE_CMD} --dangerously-skip-permissions --name {session}",
@@ -435,7 +449,7 @@ def _extract_response(username, session, old_lines: int) -> Optional[str]:
             continue
         if "esc to interrupt" in s.lower():
             continue
-        if re.match(r"^\s*[╭╰│─╮╯]", line):
+        if re.match(r"^\s*[╭╰╮╯]", line) and not re.search(r"[│┌┬┐├┼┤└┴┘]", line):
             continue
         if re.match(r"^[⎿\s]*[\$>%#]", s):
             continue
@@ -452,6 +466,65 @@ def _extract_response(username, session, old_lines: int) -> Optional[str]:
         return None
     return response
 
+
+
+# ─── Model detection ──────────────────────────────────────────────
+_model_cache = {"model": "", "ts": 0}
+
+def _detect_model(username):
+    """Detect the current Claude model from JSONL logs."""
+    import json as _json
+    now = time.time()
+    if now - _model_cache["ts"] < 30:
+        return _model_cache["model"]
+    session = _session_name(username)
+    cwd = None
+    try:
+        r = subprocess.run(["tmux", "display-message", "-p", "-t", session, "#{pane_current_path}"],
+                           capture_output=True, text=True, timeout=5)
+        cwd = r.stdout.strip()
+    except Exception:
+        pass
+    if not cwd:
+        cwd = WORK_DIR
+    # Find JSONL files
+    sanitized = re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+    projects_base = os.path.expanduser("~/.claude/projects")
+    candidates = []
+    for prefix in [sanitized, "-" + sanitized.lstrip("-")]:
+        d = os.path.join(projects_base, prefix)
+        if os.path.isdir(d):
+            for fname in os.listdir(d):
+                if fname.endswith(".jsonl"):
+                    candidates.append(os.path.join(d, fname))
+    if not candidates:
+        _model_cache["model"] = ""
+        _model_cache["ts"] = now
+        return ""
+    newest = max(candidates, key=lambda f: os.path.getmtime(f))
+    model = ""
+    try:
+        with open(newest, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 32768))
+            tail = f.read().decode("utf-8", errors="replace")
+        for line in reversed(tail.strip().split("\n")):
+            try:
+                d = _json.loads(line)
+                if d.get("type") == "assistant":
+                    msg = d if "model" in d else d.get("message", {})
+                    m = msg.get("model", "")
+                    if m:
+                        model = m
+                        break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    _model_cache["model"] = model
+    _model_cache["ts"] = now
+    return model
 
 # ─── Request models ────────────────────────────────────────────────
 class SendRequest(BaseModel):
@@ -526,6 +599,7 @@ async def get_status(username: str = Depends(_current_user_dep)):
             "detail": activity["detail"],
             "messages": _load_messages(username),
             "session_exists": True,
+            "model": _detect_model(username),
         }
     except Exception as e:
         logger.exception("status failed")
@@ -610,3 +684,20 @@ async def get_raw_tail(
     if delta:
         delta = "\n" + delta if delta else delta
     return {"mode": "delta", "raw": delta, "total_lines": total, "session_exists": True}
+
+
+class SendKeysRequest(BaseModel):
+    keys: list  # e.g. ["Escape"], ["C-c"], ["Enter"]
+
+@router.post("/send-keys")
+async def send_keys(body: SendKeysRequest, username: str = Depends(_current_user_dep)):
+    """Send raw tmux keys to the session (Escape, C-c, Enter, etc.)."""
+    session = _session_name(username)
+    if not _session_exists(session):
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    try:
+        for key in body.keys:
+            _run_tmux(["send-keys", "-t", session, key], timeout=5)
+        return {"ok": True}
+    except Exception as e:
+        return JSONResponse({"error": f"Failed: {e}"}, status_code=500)
