@@ -1,0 +1,1749 @@
+{
+  "audit_date": "2026-04-22T08:13:36.343653+00:00",
+  "stats_dir": "/data/pgs2/ref_panel_stats",
+  "summary": {
+    "precomputed_ok": 41,
+    "precomputed_stale": 0,
+    "missing": 228,
+    "total": 269
+  },
+  "results": {
+    "PGS000001": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs000001",
+      "test_type": "pgs_score"
+    },
+    "PGS000004": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_breast_004",
+      "test_type": "pgs_score"
+    },
+    "PGS000005": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS000005_EUR_GRCh38.json",
+      "mean": -0.048858451816745654,
+      "std": 0.6309162600281462,
+      "n_samples": 633,
+      "test_id": "pgs_breast_5",
+      "test_type": "pgs_score"
+    },
+    "PGS000006": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS000006_EUR_GRCh38.json",
+      "mean": 0.1112345971563981,
+      "std": 0.5646775456038586,
+      "n_samples": 633,
+      "test_id": "pgs_breast_6",
+      "test_type": "pgs_score"
+    },
+    "PGS000013": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_coronary_13",
+      "test_type": "pgs_score"
+    },
+    "PGS000014": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_type_14",
+      "test_type": "pgs_score"
+    },
+    "PGS000016": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_afib_016",
+      "test_type": "pgs_score"
+    },
+    "PGS000018": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_coronary_18",
+      "test_type": "pgs_score"
+    },
+    "PGS000020": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ibd_20",
+      "test_type": "pgs_score"
+    },
+    "PGS000025": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_alzheimers_25",
+      "test_type": "pgs_score"
+    },
+    "PGS000027": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_bmi_027",
+      "test_type": "pgs_score"
+    },
+    "PGS000035": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_atrial_35",
+      "test_type": "pgs_score"
+    },
+    "PGS000039": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_stroke_39",
+      "test_type": "pgs_score"
+    },
+    "PGS000040": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_celiac_040",
+      "test_type": "pgs_score"
+    },
+    "PGS000043": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_vte_043",
+      "test_type": "pgs_score"
+    },
+    "PGS000049": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ovarian_49",
+      "test_type": "pgs_score"
+    },
+    "PGS000055": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_colorectal_55",
+      "test_type": "pgs_score"
+    },
+    "PGS000067": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_prostate_67",
+      "test_type": "pgs_score"
+    },
+    "PGS000070": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_esophageal_70",
+      "test_type": "pgs_score"
+    },
+    "PGS000071": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_bladder_071",
+      "test_type": "pgs_score"
+    },
+    "PGS000072": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_squamous_72",
+      "test_type": "pgs_score"
+    },
+    "PGS000073": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_cervical_073",
+      "test_type": "pgs_score"
+    },
+    "PGS000074": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_multiple_74",
+      "test_type": "pgs_score"
+    },
+    "PGS000077": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_cll_077",
+      "test_type": "pgs_score"
+    },
+    "PGS000078": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_lung_078",
+      "test_type": "pgs_score"
+    },
+    "PGS000080": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_nhl_080",
+      "test_type": "pgs_score"
+    },
+    "PGS000081": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_lung_81",
+      "test_type": "pgs_score"
+    },
+    "PGS000082": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_lung_82",
+      "test_type": "pgs_score"
+    },
+    "PGS000086": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_testicular_086",
+      "test_type": "pgs_score"
+    },
+    "PGS000115": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ldl_115",
+      "test_type": "pgs_score"
+    },
+    "PGS000119": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS000119_EUR_GRCh38_n22.json",
+      "mean": 3.1558275987361775,
+      "std": 0.4059730706921967,
+      "n_samples": 633,
+      "test_id": "pgs_bcc_119",
+      "test_type": "pgs_score"
+    },
+    "PGS000135": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_schiz_135",
+      "test_type": "pgs_score"
+    },
+    "PGS000205": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_risk_205",
+      "test_type": "pgs_score"
+    },
+    "PGS000297": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS000297_EUR_GRCh38.json",
+      "mean": 54.50888135860979,
+      "std": 0.7546931376645508,
+      "n_samples": 633,
+      "test_id": "custom_pgs000297",
+      "test_type": "pgs_score"
+    },
+    "PGS000321": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS000321_EUR_GRCh38.json",
+      "mean": 0.0642237603949447,
+      "std": 0.029858280287753548,
+      "n_samples": 633,
+      "test_id": "custom_pgs000321",
+      "test_type": "pgs_score"
+    },
+    "PGS000323": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS000323_EUR_GRCh38.json",
+      "mean": 0.013781575578672989,
+      "std": 0.04128367232385175,
+      "n_samples": 633,
+      "test_id": "custom_pgs000323",
+      "test_type": "pgs_score"
+    },
+    "PGS000327": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_autism_327",
+      "test_type": "pgs_score"
+    },
+    "PGS000328": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_sle_328",
+      "test_type": "pgs_score"
+    },
+    "PGS000333": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_prostate_333",
+      "test_type": "pgs_score"
+    },
+    "PGS000334": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_alzheimers_334",
+      "test_type": "pgs_score"
+    },
+    "PGS000335": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS000335_EUR_GRCh38.json",
+      "mean": -0.496757064107425,
+      "std": 0.23775006524906872,
+      "n_samples": 633,
+      "test_id": "pgs_breast_335",
+      "test_type": "pgs_score"
+    },
+    "PGS000339": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_type_339",
+      "test_type": "pgs_score"
+    },
+    "PGS000379": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_anorexia_379",
+      "test_type": "pgs_score"
+    },
+    "PGS000636": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_thyroid_636",
+      "test_type": "pgs_score"
+    },
+    "PGS000662": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_prostate_662",
+      "test_type": "pgs_score"
+    },
+    "PGS000663": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_prostate_663",
+      "test_type": "pgs_score"
+    },
+    "PGS000696": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs000696",
+      "test_type": "pgs_score"
+    },
+    "PGS000700": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_uric_700",
+      "test_type": "pgs_score"
+    },
+    "PGS000743": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS000743_EUR_GRCh38_n19.json",
+      "mean": 0.05086002413902053,
+      "std": 0.3966146566501286,
+      "n_samples": 633,
+      "test_id": "pgs_melanoma_743",
+      "test_type": "pgs_score"
+    },
+    "PGS000758": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS000758_EUR_GRCh38.json",
+      "mean": -0.2199409716208531,
+      "std": 0.6165116494640358,
+      "n_samples": 633,
+      "test_id": "custom_pgs000758",
+      "test_type": "pgs_score"
+    },
+    "PGS000762": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hearing_762",
+      "test_type": "pgs_score"
+    },
+    "PGS000782": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_bladder_782",
+      "test_type": "pgs_score"
+    },
+    "PGS000787": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_kidney_787",
+      "test_type": "pgs_score"
+    },
+    "PGS000794": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_pancreatic_794",
+      "test_type": "pgs_score"
+    },
+    "PGS000796": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_testicular_796",
+      "test_type": "pgs_score"
+    },
+    "PGS000820": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hypothyroid_820",
+      "test_type": "pgs_score"
+    },
+    "PGS000872": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hepatocellular_872",
+      "test_type": "pgs_score"
+    },
+    "PGS000874": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_cll_874",
+      "test_type": "pgs_score"
+    },
+    "PGS000903": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_parkinson_903",
+      "test_type": "pgs_score"
+    },
+    "PGS000906": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_longevity_906",
+      "test_type": "pgs_score"
+    },
+    "PGS000908": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_insomnia_908",
+      "test_type": "pgs_score"
+    },
+    "PGS001123": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_coffee_1123",
+      "test_type": "pgs_score"
+    },
+    "PGS001162": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_grip_1162",
+      "test_type": "pgs_score"
+    },
+    "PGS001183": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_age_1183",
+      "test_type": "pgs_score"
+    },
+    "PGS001229": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS001229_EUR_GRCh38.json",
+      "mean": 1.7109936534312797,
+      "std": 3.8007914606775888,
+      "n_samples": 633,
+      "test_id": "pgs_height_1229",
+      "test_type": "pgs_score"
+    },
+    "PGS001232": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS001232_EUR_GRCh38.json",
+      "mean": 0.8596665686097947,
+      "std": 0.4742563818434354,
+      "n_samples": 633,
+      "test_id": "custom_pgs001232",
+      "test_type": "pgs_score"
+    },
+    "PGS001267": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ankspon_1267",
+      "test_type": "pgs_score"
+    },
+    "PGS001284": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hypertrophic_1284",
+      "test_type": "pgs_score"
+    },
+    "PGS001285": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_aortic_1285",
+      "test_type": "pgs_score"
+    },
+    "PGS001287": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_psoriatic_1287",
+      "test_type": "pgs_score"
+    },
+    "PGS001288": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_psoriasis_1288",
+      "test_type": "pgs_score"
+    },
+    "PGS001289": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ankylosing_1289",
+      "test_type": "pgs_score"
+    },
+    "PGS001290": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_vitiligo_1290",
+      "test_type": "pgs_score"
+    },
+    "PGS001291": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_gallstones_1291",
+      "test_type": "pgs_score"
+    },
+    "PGS001296": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_osteoarthritis_1296",
+      "test_type": "pgs_score"
+    },
+    "PGS001299": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_cervical_1299",
+      "test_type": "pgs_score"
+    },
+    "PGS001308": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_sjogrens_1308",
+      "test_type": "pgs_score"
+    },
+    "PGS001312": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_psoriasis_1312",
+      "test_type": "pgs_score"
+    },
+    "PGS001405": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs001405",
+      "test_type": "pgs_score"
+    },
+    "PGS001790": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_heart_1790",
+      "test_type": "pgs_score"
+    },
+    "PGS001793": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_stroke_1793",
+      "test_type": "pgs_score"
+    },
+    "PGS001796": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_vte_1796",
+      "test_type": "pgs_score"
+    },
+    "PGS001797": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_glaucoma_1797",
+      "test_type": "pgs_score"
+    },
+    "PGS001897": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_skin_1897",
+      "test_type": "pgs_score"
+    },
+    "PGS001907": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_vitamin_1907",
+      "test_type": "pgs_score"
+    },
+    "PGS001919": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS001919_EUR_GRCh38.json",
+      "mean": -0.004611031780410742,
+      "std": 0.34982195107979686,
+      "n_samples": 633,
+      "test_id": "custom_pgs001919",
+      "test_type": "pgs_score"
+    },
+    "PGS001929": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS001929_EUR_GRCh38.json",
+      "mean": -1.4200163972669826,
+      "std": 3.651379068353375,
+      "n_samples": 633,
+      "test_id": "custom_pgs001929",
+      "test_type": "pgs_score"
+    },
+    "PGS001931": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS001931_EUR_GRCh38.json",
+      "mean": 9.082923080726698e-07,
+      "std": 5.8172263616849e-07,
+      "n_samples": 633,
+      "test_id": "custom_pgs001931",
+      "test_type": "pgs_score"
+    },
+    "PGS001988": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS001988_EUR_GRCh38.json",
+      "mean": 0.09091920413428119,
+      "std": 0.056416279379125606,
+      "n_samples": 633,
+      "test_id": "custom_pgs001988",
+      "test_type": "pgs_score"
+    },
+    "PGS002012": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002012_EUR_GRCh38.json",
+      "mean": 1.7632728390205373e-05,
+      "std": 7.252991484168339e-06,
+      "n_samples": 633,
+      "test_id": "pgs_edu_2012",
+      "test_type": "pgs_score"
+    },
+    "PGS002135": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002135_EUR_GRCh38.json",
+      "mean": -0.7968408276935229,
+      "std": 0.40594966179717834,
+      "n_samples": 633,
+      "test_id": "custom_pgs002135",
+      "test_type": "pgs_score"
+    },
+    "PGS002146": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002146",
+      "test_type": "pgs_score"
+    },
+    "PGS002148": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002148_EUR_GRCh38.json",
+      "mean": 2.8194477902053713e-08,
+      "std": 2.7826973583429283e-08,
+      "n_samples": 633,
+      "test_id": "custom_pgs002148",
+      "test_type": "pgs_score"
+    },
+    "PGS002205": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002205",
+      "test_type": "pgs_score"
+    },
+    "PGS002231": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002231_EUR_GRCh38.json",
+      "mean": 5.659142033064771e-07,
+      "std": 4.2486728319969036e-07,
+      "n_samples": 633,
+      "test_id": "custom_pgs002231",
+      "test_type": "pgs_score"
+    },
+    "PGS002242": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_breast_2242",
+      "test_type": "pgs_score"
+    },
+    "PGS002247": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002247_EUR_GRCh38_n36.json",
+      "mean": 0.18929488082938392,
+      "std": 0.442415837064654,
+      "n_samples": 633,
+      "test_id": "pgs_melanoma_2247",
+      "test_type": "pgs_score"
+    },
+    "PGS002254": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hepatocellular_2254",
+      "test_type": "pgs_score"
+    },
+    "PGS002264": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_pancreatic_2264",
+      "test_type": "pgs_score"
+    },
+    "PGS002280": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_alzheimers_2280",
+      "test_type": "pgs_score"
+    },
+    "PGS002281": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_multiple_2281",
+      "test_type": "pgs_score"
+    },
+    "PGS002283": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_nafld_2283",
+      "test_type": "pgs_score"
+    },
+    "PGS002297": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_coronary_2297",
+      "test_type": "pgs_score"
+    },
+    "PGS002303": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_bmi_2303",
+      "test_type": "pgs_score"
+    },
+    "PGS002305": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_height_2305",
+      "test_type": "pgs_score"
+    },
+    "PGS002308": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_t2d_2308",
+      "test_type": "pgs_score"
+    },
+    "PGS002311": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_asthma_2311",
+      "test_type": "pgs_score"
+    },
+    "PGS002312": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_multiple_2312",
+      "test_type": "pgs_score"
+    },
+    "PGS002314": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_baldness_2314",
+      "test_type": "pgs_score"
+    },
+    "PGS002318": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_chronotype_2318",
+      "test_type": "pgs_score"
+    },
+    "PGS002319": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002319_EUR_GRCh38.json",
+      "mean": 4.212442543443918e-07,
+      "std": 4.418159343754432e-08,
+      "n_samples": 633,
+      "test_id": "custom_pgs002319",
+      "test_type": "pgs_score"
+    },
+    "PGS002322": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_dbp_2322",
+      "test_type": "pgs_score"
+    },
+    "PGS002332": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002332_EUR_GRCh38.json",
+      "mean": -0.2568517329162717,
+      "std": 0.557089883392327,
+      "n_samples": 633,
+      "test_id": "custom_pgs002332",
+      "test_type": "pgs_score"
+    },
+    "PGS002337": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ldl_2337",
+      "test_type": "pgs_score"
+    },
+    "PGS002349": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_sbp_2349",
+      "test_type": "pgs_score"
+    },
+    "PGS002352": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_tc_2352",
+      "test_type": "pgs_score"
+    },
+    "PGS002353": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_tg_2353",
+      "test_type": "pgs_score"
+    },
+    "PGS002368": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002368",
+      "test_type": "pgs_score"
+    },
+    "PGS002391": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002391_EUR_GRCh38.json",
+      "mean": -0.012747118167456556,
+      "std": 9.533100114957768e-05,
+      "n_samples": 633,
+      "test_id": "custom_pgs002391",
+      "test_type": "pgs_score"
+    },
+    "PGS002404": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002404",
+      "test_type": "pgs_score"
+    },
+    "PGS002440": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002440_EUR_GRCh38.json",
+      "mean": -0.020365525750394943,
+      "std": 4.443775283480495e-05,
+      "n_samples": 633,
+      "test_id": "custom_pgs002440",
+      "test_type": "pgs_score"
+    },
+    "PGS002453": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002453",
+      "test_type": "pgs_score"
+    },
+    "PGS002489": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002489_EUR_GRCh38.json",
+      "mean": -0.018059403317535545,
+      "std": 2.0794397486453943e-05,
+      "n_samples": 633,
+      "test_id": "custom_pgs002489",
+      "test_type": "pgs_score"
+    },
+    "PGS002502": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002502",
+      "test_type": "pgs_score"
+    },
+    "PGS002538": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002538_EUR_GRCh38.json",
+      "mean": -0.0006186367964454977,
+      "std": 0.0002797053982602042,
+      "n_samples": 633,
+      "test_id": "custom_pgs002538",
+      "test_type": "pgs_score"
+    },
+    "PGS002551": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002551",
+      "test_type": "pgs_score"
+    },
+    "PGS002587": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002587_EUR_GRCh38.json",
+      "mean": -0.0005133302300442338,
+      "std": 0.00046360453742465225,
+      "n_samples": 633,
+      "test_id": "custom_pgs002587",
+      "test_type": "pgs_score"
+    },
+    "PGS002596": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_height_2596",
+      "test_type": "pgs_score"
+    },
+    "PGS002598": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hair_2598",
+      "test_type": "pgs_score"
+    },
+    "PGS002600": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002600",
+      "test_type": "pgs_score"
+    },
+    "PGS002603": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_resting_2603",
+      "test_type": "pgs_score"
+    },
+    "PGS002605": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_egfr_2605",
+      "test_type": "pgs_score"
+    },
+    "PGS002616": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_telomere_2616",
+      "test_type": "pgs_score"
+    },
+    "PGS002632": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_bmd_2632",
+      "test_type": "pgs_score"
+    },
+    "PGS002636": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002636_EUR_GRCh38.json",
+      "mean": -1.5197376461295418e-06,
+      "std": 1.5082120839657695e-07,
+      "n_samples": 633,
+      "test_id": "custom_pgs002636",
+      "test_type": "pgs_score"
+    },
+    "PGS002649": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002649",
+      "test_type": "pgs_score"
+    },
+    "PGS002685": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002685_EUR_GRCh38.json",
+      "mean": -1.980137832543444e-07,
+      "std": 6.02997451586083e-08,
+      "n_samples": 633,
+      "test_id": "custom_pgs002685",
+      "test_type": "pgs_score"
+    },
+    "PGS002698": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002698",
+      "test_type": "pgs_score"
+    },
+    "PGS002724": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS002724_EUR_GRCh38.json",
+      "mean": -2191538.4518167456,
+      "std": 312951.77517111675,
+      "n_samples": 633,
+      "test_id": "pgs_stroke_2724",
+      "test_type": "pgs_score"
+    },
+    "PGS002725": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_stroke_2725",
+      "test_type": "pgs_score"
+    },
+    "PGS002726": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_multiple_2726",
+      "test_type": "pgs_score"
+    },
+    "PGS002735": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_endometrial_2735",
+      "test_type": "pgs_score"
+    },
+    "PGS002740": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_pancreatic_2740",
+      "test_type": "pgs_score"
+    },
+    "PGS002745": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ra_2745",
+      "test_type": "pgs_score"
+    },
+    "PGS002746": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_adhd_2746",
+      "test_type": "pgs_score"
+    },
+    "PGS002748": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002748",
+      "test_type": "pgs_score"
+    },
+    "PGS002787": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_bipolar_2787",
+      "test_type": "pgs_score"
+    },
+    "PGS002790": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_autism_2790",
+      "test_type": "pgs_score"
+    },
+    "PGS002800": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002800",
+      "test_type": "pgs_score"
+    },
+    "PGS002801": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002801",
+      "test_type": "pgs_score"
+    },
+    "PGS002802": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002802",
+      "test_type": "pgs_score"
+    },
+    "PGS002803": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs002803",
+      "test_type": "pgs_score"
+    },
+    "PGS002940": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_parkinsons_2940",
+      "test_type": "pgs_score"
+    },
+    "PGS003332": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_vte_3332",
+      "test_type": "pgs_score"
+    },
+    "PGS003333": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_depression_3333",
+      "test_type": "pgs_score"
+    },
+    "PGS003357": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_smoking_3357",
+      "test_type": "pgs_score"
+    },
+    "PGS003381": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_endometrial_3381",
+      "test_type": "pgs_score"
+    },
+    "PGS003384": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_glioma_3384",
+      "test_type": "pgs_score"
+    },
+    "PGS003385": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ovarian_3385",
+      "test_type": "pgs_score"
+    },
+    "PGS003387": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_esophageal_3387",
+      "test_type": "pgs_score"
+    },
+    "PGS003390": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_educational_3390",
+      "test_type": "pgs_score"
+    },
+    "PGS003392": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_lung_3392",
+      "test_type": "pgs_score"
+    },
+    "PGS003393": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_lung_3393",
+      "test_type": "pgs_score"
+    },
+    "PGS003429": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_aortic_3429",
+      "test_type": "pgs_score"
+    },
+    "PGS003453": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_cll_3453",
+      "test_type": "pgs_score"
+    },
+    "PGS003472": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_schizophrenia_3472",
+      "test_type": "pgs_score"
+    },
+    "PGS003510": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS003510_EUR_GRCh38.json",
+      "mean": -0.2950638187835703,
+      "std": 0.43034227203567066,
+      "n_samples": 633,
+      "test_id": "pgs_intelligence_3510",
+      "test_type": "pgs_score"
+    },
+    "PGS003516": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS003516_EUR_GRCh38.json",
+      "mean": -4.999674554028436e-08,
+      "std": 3.115233807611916e-08,
+      "n_samples": 633,
+      "test_id": "custom_pgs003516",
+      "test_type": "pgs_score"
+    },
+    "PGS003554": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_vitd_3554",
+      "test_type": "pgs_score"
+    },
+    "PGS003559": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "custom_pgs003559",
+      "test_type": "pgs_score"
+    },
+    "PGS003564": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_myopia_3564",
+      "test_type": "pgs_score"
+    },
+    "PGS003565": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_neuroticism_3565",
+      "test_type": "pgs_score"
+    },
+    "PGS003573": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS003573_EUR_GRCh38.json",
+      "mean": -5.188589393364929e-07,
+      "std": 4.6482566026345683e-07,
+      "n_samples": 633,
+      "test_id": "custom_pgs003573",
+      "test_type": "pgs_score"
+    },
+    "PGS003723": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS003723_EUR_GRCh38.json",
+      "mean": 235.71160347551344,
+      "std": 36.1302014618044,
+      "n_samples": 633,
+      "test_id": "pgs_intelligence_3723",
+      "test_type": "pgs_score"
+    },
+    "PGS003724": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS003724_EUR_GRCh38.json",
+      "mean": 753.2466951026857,
+      "std": 76.71326190174226,
+      "n_samples": 633,
+      "test_id": "pgs_atrial_3724",
+      "test_type": "pgs_score"
+    },
+    "PGS003725": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_cad_3725",
+      "test_type": "pgs_score"
+    },
+    "PGS003753": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_adhd_3753",
+      "test_type": "pgs_score"
+    },
+    "PGS003763": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_parkinsons_3763",
+      "test_type": "pgs_score"
+    },
+    "PGS003765": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_prostate_3765",
+      "test_type": "pgs_score"
+    },
+    "PGS003766": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS003766_EUR_GRCh38_n223.json",
+      "mean": 12.01987962085308,
+      "std": 0.5671190542711396,
+      "n_samples": 633,
+      "test_id": "pgs_prostate_3766",
+      "test_type": "pgs_score"
+    },
+    "PGS003788": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ldl_3788",
+      "test_type": "pgs_score"
+    },
+    "PGS003849": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_addiction_3849",
+      "test_type": "pgs_score"
+    },
+    "PGS003850": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_colorectal_3850",
+      "test_type": "pgs_score"
+    },
+    "PGS003852": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS003852_EUR_GRCh38_n544045.json",
+      "mean": -0.2659681604107425,
+      "std": 0.33304365710899575,
+      "n_samples": 633,
+      "test_id": "pgs_colorectal_3852",
+      "test_type": "pgs_score"
+    },
+    "PGS003867": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_type_3867",
+      "test_type": "pgs_score"
+    },
+    "PGS003899": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_bodyfat_3899",
+      "test_type": "pgs_score"
+    },
+    "PGS003972": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_aaa_3972",
+      "test_type": "pgs_score"
+    },
+    "PGS003979": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_colorectal_3979",
+      "test_type": "pgs_score"
+    },
+    "PGS004044": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hba1c_4044",
+      "test_type": "pgs_score"
+    },
+    "PGS004081": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ibd_4081",
+      "test_type": "pgs_score"
+    },
+    "PGS004092": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_alzheimers_4092",
+      "test_type": "pgs_score"
+    },
+    "PGS004102": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_type_4102",
+      "test_type": "pgs_score"
+    },
+    "PGS004151": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ibd_4151",
+      "test_type": "pgs_score"
+    },
+    "PGS004153": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_breast_4153",
+      "test_type": "pgs_score"
+    },
+    "PGS004163": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_rheumatoid_4163",
+      "test_type": "pgs_score"
+    },
+    "PGS004174": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_t1d_4174",
+      "test_type": "pgs_score"
+    },
+    "PGS004192": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_htn_4192",
+      "test_type": "pgs_score"
+    },
+    "PGS004214": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_height_4214",
+      "test_type": "pgs_score"
+    },
+    "PGS004248": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_nonhodgkin_4248",
+      "test_type": "pgs_score"
+    },
+    "PGS004253": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_uc_4253",
+      "test_type": "pgs_score"
+    },
+    "PGS004254": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_crohns_4254",
+      "test_type": "pgs_score"
+    },
+    "PGS004427": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS004427_EUR_GRCh38.json",
+      "mean": -0.14994342576461295,
+      "std": 0.19155035066361567,
+      "n_samples": 633,
+      "test_id": "pgs_iq_4427",
+      "test_type": "pgs_score"
+    },
+    "PGS004451": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_anxiety_4451",
+      "test_type": "pgs_score"
+    },
+    "PGS004493": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_kidney_4493",
+      "test_type": "pgs_score"
+    },
+    "PGS004537": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_asthma_4537",
+      "test_type": "pgs_score"
+    },
+    "PGS004580": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_colorectal_4580",
+      "test_type": "pgs_score"
+    },
+    "PGS004586": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_colorectal_4586",
+      "test_type": "pgs_score"
+    },
+    "PGS004590": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_alzheimer_4590",
+      "test_type": "pgs_score"
+    },
+    "PGS004592": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_basal_4592",
+      "test_type": "pgs_score"
+    },
+    "PGS004603": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_systolic_4603",
+      "test_type": "pgs_score"
+    },
+    "PGS004606": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_amd_4606",
+      "test_type": "pgs_score"
+    },
+    "PGS004631": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hdl_4631",
+      "test_type": "pgs_score"
+    },
+    "PGS004644": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ldl_4644",
+      "test_type": "pgs_score"
+    },
+    "PGS004669": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_total_4669",
+      "test_type": "pgs_score"
+    },
+    "PGS004696": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_coronary_4696",
+      "test_type": "pgs_score"
+    },
+    "PGS004699": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_multiple_4699",
+      "test_type": "pgs_score"
+    },
+    "PGS004700": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ms_4700",
+      "test_type": "pgs_score"
+    },
+    "PGS004723": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_asthma_4723",
+      "test_type": "pgs_score"
+    },
+    "PGS004760": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_major_4760",
+      "test_type": "pgs_score"
+    },
+    "PGS004768": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_gout_4768",
+      "test_type": "pgs_score"
+    },
+    "PGS004775": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hdl_4775",
+      "test_type": "pgs_score"
+    },
+    "PGS004785": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hypertension_4785",
+      "test_type": "pgs_score"
+    },
+    "PGS004798": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_migraine_4798",
+      "test_type": "pgs_score"
+    },
+    "PGS004845": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_triglycerides_4845",
+      "test_type": "pgs_score"
+    },
+    "PGS004854": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_vte_4854",
+      "test_type": "pgs_score"
+    },
+    "PGS004860": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_lung_4860",
+      "test_type": "pgs_score"
+    },
+    "PGS004863": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_alzheimers_4863",
+      "test_type": "pgs_score"
+    },
+    "PGS004873": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_rheumatoid_4873",
+      "test_type": "pgs_score"
+    },
+    "PGS004874": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_type_4874",
+      "test_type": "pgs_score"
+    },
+    "PGS004877": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_asthma_4877",
+      "test_type": "pgs_score"
+    },
+    "PGS004878": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS004878_EUR_GRCh38_n405187.json",
+      "mean": 0.638443,
+      "std": 0.23117147590259188,
+      "n_samples": 633,
+      "test_id": "pgs_atrial_4878",
+      "test_type": "pgs_score"
+    },
+    "PGS004881": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_epilepsy_4881",
+      "test_type": "pgs_score"
+    },
+    "PGS004885": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_major_4885",
+      "test_type": "pgs_score"
+    },
+    "PGS004886": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS004886_EUR_GRCh38_n356725.json",
+      "mean": 0.029644894154818326,
+      "std": 0.10790873299121442,
+      "n_samples": 633,
+      "test_id": "pgs_melanoma_4886",
+      "test_type": "pgs_score"
+    },
+    "PGS004889": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ckd_4889",
+      "test_type": "pgs_score"
+    },
+    "PGS004903": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_atopic_4903",
+      "test_type": "pgs_score"
+    },
+    "PGS004904": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_colorectal_4904",
+      "test_type": "pgs_score"
+    },
+    "PGS004908": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_kidney_4908",
+      "test_type": "pgs_score"
+    },
+    "PGS004917": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_lupus_4917",
+      "test_type": "pgs_score"
+    },
+    "PGS004923": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_type_4923",
+      "test_type": "pgs_score"
+    },
+    "PGS004928": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_metabolic_4928",
+      "test_type": "pgs_score"
+    },
+    "PGS004931": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_gout_4931",
+      "test_type": "pgs_score"
+    },
+    "PGS004935": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hypothyroidism_4935",
+      "test_type": "pgs_score"
+    },
+    "PGS004946": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_dilated_4946",
+      "test_type": "pgs_score"
+    },
+    "PGS004954": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_thyroid_4954",
+      "test_type": "pgs_score"
+    },
+    "PGS005073": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_heart_5073",
+      "test_type": "pgs_score"
+    },
+    "PGS005086": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ovarian_5086",
+      "test_type": "pgs_score"
+    },
+    "PGS005091": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_coronary_5091",
+      "test_type": "pgs_score"
+    },
+    "PGS005097": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_hf_5097",
+      "test_type": "pgs_score"
+    },
+    "PGS005112": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_coronary_5112",
+      "test_type": "pgs_score"
+    },
+    "PGS005161": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_gastric_5161",
+      "test_type": "pgs_score"
+    },
+    "PGS005166": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ovarian_5166",
+      "test_type": "pgs_score"
+    },
+    "PGS005168": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_atrial_5168",
+      "test_type": "pgs_score"
+    },
+    "PGS005169": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_lung_5169",
+      "test_type": "pgs_score"
+    },
+    "PGS005198": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_bmi_5198",
+      "test_type": "pgs_score"
+    },
+    "PGS005202": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_bmi_5202",
+      "test_type": "pgs_score"
+    },
+    "PGS005213": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_alcohol_5213",
+      "test_type": "pgs_score"
+    },
+    "PGS005217": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_pad_5217",
+      "test_type": "pgs_score"
+    },
+    "PGS005241": {
+      "status": "precomputed_ok",
+      "stats_file": "PGS005241_EUR_GRCh38_n981606.json",
+      "mean": -8.094835150078987,
+      "std": 1.2437280781584457,
+      "n_samples": 633,
+      "test_id": "pgs_prostate_5241",
+      "test_type": "pgs_score"
+    },
+    "PGS005252": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_aortic_5252",
+      "test_type": "pgs_score"
+    },
+    "PGS005265": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_graves_5265",
+      "test_type": "pgs_score"
+    },
+    "PGS005285": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_heart_5285",
+      "test_type": "pgs_score"
+    },
+    "PGS005309": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_psoriasis_5309",
+      "test_type": "pgs_score"
+    },
+    "PGS005313": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_atrial_5313",
+      "test_type": "pgs_score"
+    },
+    "PGS005349": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_breast_5349",
+      "test_type": "pgs_score"
+    },
+    "PGS005378": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_breast_5378",
+      "test_type": "pgs_score"
+    },
+    "PGS005382": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_breast_5382",
+      "test_type": "pgs_score"
+    },
+    "PGS005387": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_breast_5387",
+      "test_type": "pgs_score"
+    },
+    "PGS005393": {
+      "status": "missing",
+      "reason": "No stats file found",
+      "test_id": "pgs_ptsd_5393",
+      "test_type": "pgs_score"
+    }
+  }
+}

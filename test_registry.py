@@ -122,6 +122,14 @@ _t('pgs_breast_5387', 'PGS - Cancer', 'Breast cancer (Triple-neg African) (PGS00
    '162 variants. African-specific TNBC. Li B et al., Nat Genet 2026 (AFR)',
    'pgs_score', {'pgs_id': 'PGS005387', 'trait': 'Breast cancer'})
 
+_t('pgs_squamous_72', 'PGS - Cancer', 'Breast cancer (PGS000072)',
+   '15 variants. AUROC 0.77. Graff RE et al., Nat Commun 2021 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000072', 'trait': 'Breast cancer'})
+
+_t('custom_pgs000001', 'PGS - Cancer', 'Breast cancer (PGS000001)',
+   '77 variants. Mavaddat N et al., 2015. J Natl Cancer Inst',
+   'pgs_score', {'pgs_id': 'PGS000001', 'trait': 'Breast cancer'})
+
 _t('pgs_prostate_662', 'PGS - Cancer', 'Prostate cancer (PGS000662)',
    '269 variants. AUROC 0.833, OR 4.17. Conti DV et al., Nat Genet 2021',
    'pgs_score', {'pgs_id': 'PGS000662', 'trait': 'Prostate cancer'})
@@ -146,9 +154,13 @@ _t('pgs_prostate_67', 'PGS - Cancer', 'Prostate cancer (hazard) (PGS000067)',
    '54 variants. HR 2.9 (top 2%). Seibert TM et al., BMJ 2018 (EUR)',
    'pgs_score', {'pgs_id': 'PGS000067', 'trait': 'Prostate cancer'})
 
-_t('pgs_prostate_663', 'PGS - Cancer', 'Pancreatic cancer (aggressive) (PGS000663)',
-   '269 variants. OR 5.54 (top vs bottom decile). Conti DV et al., Nat Genet 2021 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS000663', 'trait': 'Pancreatic cancer'})
+_t('pgs_ovarian_49', 'PGS - Cancer', 'Prostate cancer (serous) (PGS000049)',
+   '30 variants. OR 1.55. Phelan CM et al., Nat Genet 2017 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000049', 'trait': 'Prostate cancer'})
+
+_t('pgs_gallstones_1291', 'PGS - Cancer', 'Prostate cancer (PGS001291)',
+   '5,387 variants. AUROC 0.63. Tanigawa Y et al., PLoS Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS001291', 'trait': 'Prostate cancer'})
 
 _t('pgs_colorectal_3850', 'PGS - Cancer', 'Colorectal cancer (PGS003850)',
    '205 variants. OR 1.62, AUROC 0.61. Fernandez-Rozadilla C et al., Nat Genet 2022',
@@ -178,6 +190,30 @@ _t('pgs_colorectal_55', 'PGS - Cancer', 'Colorectal cancer (early-onset) (PGS000
    '95 variants. OR 2.10 (top vs bottom quintile). Huyghe JR et al., Nat Genet 2019 (EUR)',
    'pgs_score', {'pgs_id': 'PGS000055', 'trait': 'Colorectal cancer'})
 
+_t('pgs_multiple_74', 'PGS - Cancer', 'Colorectal cancer (PGS000074)',
+   '15 variants. AUROC 0.72. Graff RE et al., Nat Commun 2021 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000074', 'trait': 'Colorectal cancer'})
+
+_t('pgs_anorexia_379', 'PGS - Cancer', 'Colon cancer (PGS000379)',
+   '66,177 variants. OR 1.24/SD. Watson HJ et al., Nat Genet 2019 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000379', 'trait': 'Colon cancer'})
+
+_t('pgs_prostate_663', 'PGS - Cancer', 'Pancreatic cancer (aggressive) (PGS000663)',
+   '269 variants. OR 5.54 (top vs bottom decile). Conti DV et al., Nat Genet 2021 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS000663', 'trait': 'Pancreatic cancer'})
+
+_t('pgs_pancreatic_2264', 'PGS - Cancer', 'Pancreatic cancer (PGS002264)',
+   '49 variants. AUROC 0.605. Sharma S et al., Gastroenterology 2022',
+   'pgs_score', {'pgs_id': 'PGS002264', 'trait': 'Pancreatic cancer'})
+
+_t('pgs_pancreatic_2740', 'PGS - Cancer', 'Pancreatic cancer (PGS002740)',
+   '~50 variants. OR 6.91 (top vs bottom, age<=60). Yuan C et al., Ann Oncol 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002740', 'trait': 'Pancreatic cancer'})
+
+_t('pgs_pancreatic_794', 'PGS - Cancer', 'Pancreatic cancer (PGS000794)',
+   '22 variants. AUROC 0.745 (w/covariates). Kachuri L et al., Nat Commun 2020 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000794', 'trait': 'Pancreatic cancer'})
+
 _t('pgs_lung_078', 'PGS - Cancer', 'Lung cancer (PGS000078)',
    '109 variants. AUROC 0.846, HR 1.26. Graff RE et al., Nat Commun 2021',
    'pgs_score', {'pgs_id': 'PGS000078', 'trait': 'Lung cancer'})
@@ -198,13 +234,13 @@ _t('pgs_lung_5169', 'PGS - Cancer', 'Lung cancer (never-smoker EAS) (PGS005169)'
    '~1,000,000 variants. EAS never-smoker specific. Blechter B et al., JAMA Netw Open 2023 (EAS)',
    'pgs_score', {'pgs_id': 'PGS005169', 'trait': 'Lung cancer'})
 
+_t('pgs_esophageal_70', 'PGS - Cancer', 'Lung cancer (PGS000070)',
+   '15 variants. AUROC 0.71. Graff RE et al., Nat Commun 2021 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000070', 'trait': 'Lung cancer'})
+
 _t('pgs_lung_82', 'PGS - Cancer', 'Ovarian cancer (squamous) (PGS000082)',
    '109 variants. AUROC 0.74. Graff RE et al., Nat Commun 2021 (EUR)',
    'pgs_score', {'pgs_id': 'PGS000082', 'trait': 'Ovarian cancer'})
-
-_t('pgs_lung_81', 'PGS - Cancer', 'Oral cavity and pharyngeal cancers (adenocarcinoma) (PGS000081)',
-   '109 variants. AUROC 0.80. Graff RE et al., Nat Commun 2021 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000081', 'trait': 'Oral cavity and pharyngeal cancers'})
 
 _t('pgs_ovarian_5086', 'PGS - Cancer', 'Ovarian cancer (PGS005086)',
    '64,518 variants. AUROC 0.607, OR 1.46. Barnes DR et al., NPJ Genom Med 2025',
@@ -218,21 +254,37 @@ _t('pgs_ovarian_5166', 'PGS - Cancer', 'Ovarian cancer (EAS) (PGS005166)',
    '~64,000 variants. EAS-specific. Zhu M et al., PLoS Med 2025 (EAS)',
    'pgs_score', {'pgs_id': 'PGS005166', 'trait': 'Ovarian cancer'})
 
-_t('pgs_ovarian_49', 'PGS - Cancer', 'Prostate cancer (serous) (PGS000049)',
-   '30 variants. OR 1.55. Phelan CM et al., Nat Genet 2017 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000049', 'trait': 'Prostate cancer'})
+_t('pgs_endometrial_2735', 'PGS - Cancer', 'Endometrial cancer (PGS002735)',
+   '19 variants. AUROC 0.56, OR 1.55. Bafligil C et al., Genet Med 2022',
+   'pgs_score', {'pgs_id': 'PGS002735', 'trait': 'Endometrial cancer'})
 
-_t('pgs_pancreatic_2264', 'PGS - Cancer', 'Pancreatic cancer (PGS002264)',
-   '49 variants. AUROC 0.605. Sharma S et al., Gastroenterology 2022',
-   'pgs_score', {'pgs_id': 'PGS002264', 'trait': 'Pancreatic cancer'})
+_t('pgs_endometrial_3381', 'PGS - Cancer', 'Endometrial cancer (PGS003381)',
+   '529,000 variants. AUROC 0.761. Namba S et al., Cancer Res 2022 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS003381', 'trait': 'Endometrial cancer'})
 
-_t('pgs_pancreatic_2740', 'PGS - Cancer', 'Pancreatic cancer (PGS002740)',
-   '~50 variants. OR 6.91 (top vs bottom, age<=60). Yuan C et al., Ann Oncol 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS002740', 'trait': 'Pancreatic cancer'})
+_t('pgs_cervical_073', 'PGS - Cancer', 'Cervical cancer (PGS000073)',
+   '10 variants. AUROC 0.69. Graff RE et al., Nat Commun 2021',
+   'pgs_score', {'pgs_id': 'PGS000073', 'trait': 'Cervical cancer'})
 
-_t('pgs_pancreatic_794', 'PGS - Cancer', 'Pancreatic cancer (PGS000794)',
-   '22 variants. AUROC 0.745 (w/covariates). Kachuri L et al., Nat Commun 2020 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000794', 'trait': 'Pancreatic cancer'})
+_t('pgs_cervical_1299', 'PGS - Cancer', 'Cervical cancer (PGS001299)',
+   '24 variants. AUROC 0.77-0.92. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS001299', 'trait': 'Cervical cancer'})
+
+_t('pgs_esophageal_3387', 'PGS - Cancer', 'Esophageal cancer (PGS003387)',
+   '601,000 variants. AUROC 0.819 (adenocarcinoma). Namba S et al., Cancer Res 2022 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS003387', 'trait': 'Esophageal cancer'})
+
+_t('pgs_gastric_5161', 'PGS - Cancer', 'Gastric cancer (PGS005161)',
+   '12 variants. HR 1.27/SD. Zhu M et al., PLoS Med 2025',
+   'pgs_score', {'pgs_id': 'PGS005161', 'trait': 'Gastric cancer'})
+
+_t('pgs_lung_81', 'PGS - Cancer', 'Oral cavity and pharyngeal cancers (adenocarcinoma) (PGS000081)',
+   '109 variants. AUROC 0.80. Graff RE et al., Nat Commun 2021 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000081', 'trait': 'Oral cavity and pharyngeal cancers'})
+
+_t('pgs_educational_3390', 'PGS - Cancer', 'Head and neck squamous cell carcinoma (EA4, latest) (PGS003390)',
+   'varies variants. r=0.19 (EUR). Okbay A et al., Nat Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS003390', 'trait': 'Head and neck squamous cell carcinoma'})
 
 _t('pgs_melanoma_743', 'PGS - Cancer', 'Melanoma (PGS000743)',
    '45 variants. AUROC 0.74, OR 5.88 (decile). Cust AE et al., J Invest Dermatol 2018',
@@ -245,6 +297,18 @@ _t('pgs_melanoma_2247', 'PGS - Cancer', 'Melanoma (PGS002247)',
 _t('pgs_melanoma_4886', 'PGS - Cancer', 'Melanoma (PGS004886)',
    '692,000 variants. Genome-wide, multi-trait. Jermy B et al., Nat Commun 2024 (EUR)',
    'pgs_score', {'pgs_id': 'PGS004886', 'trait': 'Melanoma'})
+
+_t('pgs_type_339', 'PGS - Cancer', 'Cutaneous melanoma (GRS2) (PGS000339)',
+   '67 variants. AUROC 0.92 (T1D vs T2D). Sharp SA et al., Diabetes Care 2019 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000339', 'trait': 'Cutaneous melanoma'})
+
+_t('pgs_bcc_119', 'PGS - Cancer', 'Basal cell carcinoma (PGS000119)',
+   '32 variants. OR 1.65, AUROC 0.64. Fritsche LG et al., PLoS Genet 2019',
+   'pgs_score', {'pgs_id': 'PGS000119', 'trait': 'Basal cell carcinoma'})
+
+_t('pgs_basal_4592', 'PGS - Cancer', 'Basal cell carcinoma (PGS004592)',
+   '78 variants. AUROC 0.74. Liyanage UE et al., J Eur Acad Dermatol 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004592', 'trait': 'Basal cell carcinoma'})
 
 _t('pgs_bladder_071', 'PGS - Cancer', 'Bladder cancer (PGS000071)',
    '15 variants. AUROC 0.803. Graff RE et al., Nat Commun 2021',
@@ -278,53 +342,9 @@ _t('pgs_thyroid_4954', 'PGS - Cancer', 'Thyroid cancer (PGS004954)',
    '26 variants. AUROC 0.70, multi-ancestry. Pozdeyev N et al., J Clin Endocrinol Metab 2024 (Multi)',
    'pgs_score', {'pgs_id': 'PGS004954', 'trait': 'Thyroid cancer'})
 
-_t('pgs_bcc_119', 'PGS - Cancer', 'Basal cell carcinoma (PGS000119)',
-   '32 variants. OR 1.65, AUROC 0.64. Fritsche LG et al., PLoS Genet 2019',
-   'pgs_score', {'pgs_id': 'PGS000119', 'trait': 'Basal cell carcinoma'})
-
-_t('pgs_basal_4592', 'PGS - Cancer', 'Basal cell carcinoma (PGS004592)',
-   '78 variants. AUROC 0.74. Liyanage UE et al., J Eur Acad Dermatol 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004592', 'trait': 'Basal cell carcinoma'})
-
-_t('pgs_squamous_72', 'PGS - Cancer', 'Breast cancer (PGS000072)',
-   '15 variants. AUROC 0.77. Graff RE et al., Nat Commun 2021 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000072', 'trait': 'Breast cancer'})
-
-_t('pgs_gastric_5161', 'PGS - Cancer', 'Gastric cancer (PGS005161)',
-   '12 variants. HR 1.27/SD. Zhu M et al., PLoS Med 2025',
-   'pgs_score', {'pgs_id': 'PGS005161', 'trait': 'Gastric cancer'})
-
-_t('pgs_endometrial_2735', 'PGS - Cancer', 'Endometrial cancer (PGS002735)',
-   '19 variants. AUROC 0.56, OR 1.55. Bafligil C et al., Genet Med 2022',
-   'pgs_score', {'pgs_id': 'PGS002735', 'trait': 'Endometrial cancer'})
-
-_t('pgs_endometrial_3381', 'PGS - Cancer', 'Endometrial cancer (PGS003381)',
-   '529,000 variants. AUROC 0.761. Namba S et al., Cancer Res 2022 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS003381', 'trait': 'Endometrial cancer'})
-
-_t('pgs_esophageal_3387', 'PGS - Cancer', 'Esophageal cancer (PGS003387)',
-   '601,000 variants. AUROC 0.819 (adenocarcinoma). Namba S et al., Cancer Res 2022 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS003387', 'trait': 'Esophageal cancer'})
-
-_t('pgs_esophageal_70', 'PGS - Cancer', 'Lung cancer (PGS000070)',
-   '15 variants. AUROC 0.71. Graff RE et al., Nat Commun 2021 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000070', 'trait': 'Lung cancer'})
-
-_t('pgs_cervical_073', 'PGS - Cancer', 'Cervical cancer (PGS000073)',
-   '10 variants. AUROC 0.69. Graff RE et al., Nat Commun 2021',
-   'pgs_score', {'pgs_id': 'PGS000073', 'trait': 'Cervical cancer'})
-
-_t('pgs_cervical_1299', 'PGS - Cancer', 'Cervical cancer (PGS001299)',
-   '24 variants. AUROC 0.77-0.92. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS001299', 'trait': 'Cervical cancer'})
-
-_t('pgs_hepatocellular_872', 'PGS - Cancer', 'Non-alcoholic fatty liver disease (PGS000872)',
-   '5 variants. OR 3.4-11.9 (NAFLD/cirrhosis). Bianco C et al., J Hepatol 2020 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000872', 'trait': 'Non-alcoholic fatty liver disease'})
-
-_t('pgs_hepatocellular_2254', 'PGS - Cancer', 'Physical activity (self-reported) (PGS002254)',
-   '8 variants. HR 1.33. Sarin SK et al., Hepatology 2022 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS002254', 'trait': 'Physical activity (self-reported)'})
+_t('pgs_ankylosing_1289', 'PGS - Cancer', 'Thyroid cancer (PGS001289)',
+   '2,874 variants. AUROC 0.85. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS001289', 'trait': 'Thyroid cancer'})
 
 _t('pgs_glioma_3384', 'PGS - Cancer', 'Glioma / brain cancer (PGS003384)',
    '910 variants. AUROC 0.758. Namba S et al., Cancer Res 2022 (Multi)',
@@ -338,6 +358,10 @@ _t('pgs_nonhodgkin_4248', 'PGS - Cancer', 'Non-Hodgkin lymphoma (PGS004248)',
    '20 variants. Multi-subtype. Kim WJ et al., NPJ Precis Oncol 2023 (EUR)',
    'pgs_score', {'pgs_id': 'PGS004248', 'trait': 'Non-Hodgkin lymphoma'})
 
+_t('pgs_bmi_2303', 'PGS - Cancer', 'Diffuse large B-cell lymphoma (multi-ancestry) (PGS002303)',
+   '1,259,754 variants. R2=0.09. Ge T et al., Genome Med 2022 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS002303', 'trait': 'Diffuse large B-cell lymphoma'})
+
 _t('pgs_cll_077', 'PGS - Cancer', 'CLL (PGS000077)',
    '75 variants. AUROC 0.83. Graff RE et al., Nat Commun 2021',
    'pgs_score', {'pgs_id': 'PGS000077', 'trait': 'CLL (lymphocytic leukemia)'})
@@ -350,13 +374,14 @@ _t('pgs_cll_3453', 'PGS - Cancer', 'CLL (PGS003453)',
    '43 variants. Updated CLL-specific. Berndt SI et al., Leukemia 2022 (EUR)',
    'pgs_score', {'pgs_id': 'PGS003453', 'trait': 'CLL'})
 
+_t('pgs_height_2305', 'PGS - Cancer', 'Chronic lymphoid leukemia (multi-ancestry) (PGS002305)',
+   '1,259,754 variants. R2=0.61. Ge T et al., Genome Med 2022 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS002305', 'trait': 'Chronic lymphoid leukemia'})
+
 _t('pgs_multiple_2281', 'PGS - Cancer', 'Multiple myeloma (PGS002281)',
    '23 variants. AUROC 0.644, OR 3.18 (quintile). Canzian F et al., EJHG 2021 (EUR)',
    'pgs_score', {'pgs_id': 'PGS002281', 'trait': 'Multiple myeloma'})
 
-_t('pgs_multiple_74', 'PGS - Cancer', 'Colorectal cancer (PGS000074)',
-   '15 variants. AUROC 0.72. Graff RE et al., Nat Commun 2021 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000074', 'trait': 'Colorectal cancer'})
 
 # ── PGS - Cardiovascular ────────────────────────────────────────
 _t('pgs_cad_3725', 'PGS - Cardiovascular', 'Coronary artery disease (PGS003725)',
@@ -383,10 +408,6 @@ _t('pgs_coronary_13', 'PGS - Cardiovascular', 'Coronary artery disease (CAD) (GP
    '6,630,150 variants. AUROC 0.81. Khera AV et al., Nat Genet 2018 (EUR)',
    'pgs_score', {'pgs_id': 'PGS000013', 'trait': 'Coronary artery disease (CAD)'})
 
-_t('pgs_coronary_2297', 'PGS - Cardiovascular', 'Lipoprotein A levels (LDpred2) (PGS002297)',
-   '1,259,754 variants. AUROC 0.78. Ge T et al., Genome Med 2022 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS002297', 'trait': 'Lipoprotein A levels'})
-
 _t('pgs_afib_016', 'PGS - Cardiovascular', 'Atrial fibrillation (PGS000016)',
    '6,730,541 variants. AUROC 0.78. Khera AV et al., Nat Genet 2018',
    'pgs_score', {'pgs_id': 'PGS000016', 'trait': 'Atrial fibrillation'})
@@ -402,10 +423,6 @@ _t('pgs_atrial_5313', 'PGS - Cardiovascular', 'Atrial fibrillation (PRS-CSx) (PG
 _t('pgs_atrial_4878', 'PGS - Cardiovascular', 'Atrial fibrillation (INTERVENE) (PGS004878)',
    '785,779 variants. HR 1.56-1.68 (7 biobanks). Jermy B et al., Nat Commun 2024 (EUR)',
    'pgs_score', {'pgs_id': 'PGS004878', 'trait': 'Atrial fibrillation'})
-
-_t('pgs_atrial_3724', 'PGS - Cardiovascular', 'Intelligence quotient (multi-ancestry) (PGS003724)',
-   '1,296,172 variants. HR 1.60. Patel AP et al., Nat Med 2023 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS003724', 'trait': 'Intelligence quotient'})
 
 _t('pgs_atrial_35', 'PGS - Cardiovascular', 'Atrial fibrillation (focused) (PGS000035)',
    '97 variants. AUROC 0.74. Khera AV et al., Circ 2018 (EUR)',
@@ -479,10 +496,6 @@ _t('pgs_aortic_5252', 'PGS - Cardiovascular', 'Aortic stenosis (PGS005252)',
    '1,119,377 variants. HR 1.92, C-index 0.87. Small AM et al., Nat Genet 2025 (EUR)',
    'pgs_score', {'pgs_id': 'PGS005252', 'trait': 'Aortic stenosis'})
 
-_t('pgs_aortic_1285', 'PGS - Cardiovascular', 'Allergic disease (hay fever, rhinitis, or eczema) (diagnosed by doctor) (PGS001285)',
-   '11,285 variants. AUROC 0.63. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS001285', 'trait': 'Allergic disease (hay fever, rhinitis, or eczema) (diagnosed by doctor)'})
-
 _t('pgs_htn_4192', 'PGS - Cardiovascular', 'Hypertension (PGS004192)',
    '9,430 variants. AUROC 0.703. Raben TG et al., Sci Rep 2023',
    'pgs_score', {'pgs_id': 'PGS004192', 'trait': 'Hypertension'})
@@ -490,6 +503,10 @@ _t('pgs_htn_4192', 'PGS - Cardiovascular', 'Hypertension (PGS004192)',
 _t('pgs_hypertension_4785', 'PGS - Cardiovascular', 'Hypertension (PRSmix) (PGS004785)',
    '1,170,615 variants. Incr. R2=0.066. Truong B et al., Cell Genomics 2024 (EUR)',
    'pgs_score', {'pgs_id': 'PGS004785', 'trait': 'Hypertension (PRSmix)'})
+
+_t('pgs_resting_2603', 'PGS - Cardiovascular', 'Hypertension (PGS002603)',
+   '1,060,971 variants. R2=0.041. Weissbrod O et al., Nat Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002603', 'trait': 'Hypertension'})
 
 _t('pgs_sbp_2349', 'PGS - Cardiovascular', 'Systolic BP (PGS002349)',
    '1,109,311 variants. R2=0.108. Weissbrod O et al., Nat Genet 2022',
@@ -503,531 +520,665 @@ _t('pgs_dbp_2322', 'PGS - Cardiovascular', 'Diastolic BP (PGS002322)',
    '1,109,311 variants. R2=0.080. Weissbrod O et al., Nat Genet 2022',
    'pgs_score', {'pgs_id': 'PGS002322', 'trait': 'Diastolic blood pressure'})
 
-_t('pgs_hypertrophic_1284', 'PGS - Cardiovascular', 'Allergic disease (hay fever, allergic rhinitis, or eczema) (PGS001284)',
-   '4,236 variants. AUROC 0.61. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS001284', 'trait': 'Allergic disease (hay fever, allergic rhinitis, or eczema)'})
-
-_t('pgs_resting_2603', 'PGS - Cardiovascular', 'Hypertension (PGS002603)',
-   '1,060,971 variants. R2=0.041. Weissbrod O et al., Nat Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS002603', 'trait': 'Hypertension'})
-
-# ── PGS - Metabolic ─────────────────────────────────────────────
-_t('pgs_t2d_2308', 'PGS - Metabolic', 'Type 2 diabetes (PGS002308)',
-   '1,259,754 variants. AUROC 0.793 (EUR), 0.81 (EAS). Ge T et al., Genome Med 2022',
-   'pgs_score', {'pgs_id': 'PGS002308', 'trait': 'Type 2 diabetes'})
-
-_t('pgs_type_4923', 'PGS - Metabolic', 'Type 2 diabetes (metaGRS) (PGS004923)',
-   '1,349,896 variants. AUROC 0.777 (EUR), 0.725 (AFR). Ritchie SC et al., medRxiv 2024 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS004923', 'trait': 'Type 2 diabetes'})
-
-_t('pgs_type_3867', 'PGS - Metabolic', 'Type 2 diabetes (multi-ancestry) (PGS003867)',
-   '1,068,166 variants. AUROC 0.73 (EUR), 0.776 (HIS). Shim I et al., Nat Commun 2023 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS003867', 'trait': 'Type 2 diabetes'})
-
-_t('pgs_type_14', 'PGS - Metabolic', 'Type 2 diabetes (classic GPS) (PGS000014)',
-   '6,917,436 variants. AUROC 0.73. Khera AV et al., Nat Genet 2018 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000014', 'trait': 'Type 2 diabetes'})
-
-_t('pgs_t1d_4174', 'PGS - Metabolic', 'Type 1 diabetes (PGS004174)',
-   '49 variants. AUROC 0.71. Raben TG et al., Sci Rep 2023',
-   'pgs_score', {'pgs_id': 'PGS004174', 'trait': 'Type 1 diabetes'})
-
-_t('pgs_type_339', 'PGS - Metabolic', 'Cutaneous melanoma (GRS2) (PGS000339)',
-   '67 variants. AUROC 0.92 (T1D vs T2D). Sharp SA et al., Diabetes Care 2019 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000339', 'trait': 'Cutaneous melanoma'})
-
-_t('pgs_type_4102', 'PGS - Metabolic', 'Type 1 diabetes (PRS-CS) (PGS004102)',
-   '61,651 variants. AUROC 0.741, R2=0.095. Monti R et al., AJHG 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004102', 'trait': 'Type 1 diabetes'})
-
-_t('pgs_type_4874', 'PGS - Metabolic', 'Type 1 diabetes (INTERVENE) (PGS004874)',
-   '56,916 variants. HR 2.37, C-index 0.77. Jermy B et al., Nat Commun 2024 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS004874', 'trait': 'Type 1 diabetes'})
-
-_t('pgs_bmi_027', 'PGS - Metabolic', 'BMI / Obesity (PGS000027)',
-   '2,100,302 variants. R2=0.085; top decile 13kg heavier. Khera AV et al., Cell 2019',
-   'pgs_score', {'pgs_id': 'PGS000027', 'trait': 'BMI'})
-
-_t('pgs_bmi_5198', 'PGS - Metabolic', 'BMI / Obesity (GIANT 2025) (PGS005198)',
-   '1,217,710 variants. R2=0.176 (EUR), OR 4.08 top 3%. Smit RAJ et al., Nat Med 2025 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS005198', 'trait': 'BMI / Obesity'})
-
-_t('pgs_bmi_5202', 'PGS - Metabolic', 'BMI / Obesity (EAS-optimized) (PGS005202)',
-   '1,022,487 variants. R2=0.101 (EAS). Smit RAJ et al., Nat Med 2025 (EAS)',
-   'pgs_score', {'pgs_id': 'PGS005202', 'trait': 'BMI / Obesity'})
-
-_t('pgs_bmi_2303', 'PGS - Metabolic', 'Diffuse large B-cell lymphoma (multi-ancestry) (PGS002303)',
-   '1,259,754 variants. R2=0.09. Ge T et al., Genome Med 2022 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS002303', 'trait': 'Diffuse large B-cell lymphoma'})
-
-_t('pgs_ldl_2337', 'PGS - Metabolic', 'LDL Cholesterol (PGS002337)',
-   '1,109,311 variants. R2=0.172. Weissbrod O et al., Nat Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS002337', 'trait': 'LDL Cholesterol'})
-
-_t('pgs_ldl_115', 'PGS - Metabolic', 'LDL (focused) (PGS000115)',
-   '223 variants. R2=0.09. Trinder M et al., JAMA Cardiol 2020 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS000115', 'trait': 'LDL (focused)'})
-
-_t('pgs_ldl_3788', 'PGS - Metabolic', 'LDL (AFR-optimized) (PGS003788)',
-   '1,679,610 variants. R2=0.044 (AFR). Zhang H et al., Nat Genet 2023 (AFR)',
-   'pgs_score', {'pgs_id': 'PGS003788', 'trait': 'LDL (AFR-optimized)'})
-
-_t('pgs_ldl_4644', 'PGS - Metabolic', 'LDL (EAS-tuned) (PGS004644)',
-   '1,354,681 variants. R2=0.067 (EAS). Zhang J et al., Nat Commun 2024 (EAS)',
-   'pgs_score', {'pgs_id': 'PGS004644', 'trait': 'LDL (EAS-tuned)'})
-
-_t('pgs_hdl_4775', 'PGS - Metabolic', 'HDL Cholesterol (PGS004775)',
-   '1,120,830 variants. R2=0.155. Truong B et al., Cell Genomics 2024',
-   'pgs_score', {'pgs_id': 'PGS004775', 'trait': 'HDL Cholesterol'})
-
-_t('pgs_hdl_4631', 'PGS - Metabolic', 'HDL (EAS) (PGS004631)',
-   '1,871,796 variants. R2=0.167 (EAS). Zhang J et al., Nat Commun 2024 (EAS)',
-   'pgs_score', {'pgs_id': 'PGS004631', 'trait': 'HDL (EAS)'})
-
-_t('pgs_tc_2352', 'PGS - Metabolic', 'Total Cholesterol (PGS002352)',
-   '1,109,311 variants. R2=0.155. Weissbrod O et al., Nat Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS002352', 'trait': 'Total Cholesterol'})
-
-_t('pgs_total_4669', 'PGS - Metabolic', 'Total Cholesterol (AFR) (PGS004669)',
-   '1,728,954 variants. R2=0.132 (AFR). Zhang J et al., Nat Commun 2024 (AFR)',
-   'pgs_score', {'pgs_id': 'PGS004669', 'trait': 'Total Cholesterol (AFR)'})
-
-_t('pgs_tg_2353', 'PGS - Metabolic', 'Triglycerides (PGS002353)',
-   '1,109,311 variants. R2=0.115. Weissbrod O et al., Nat Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS002353', 'trait': 'Triglycerides'})
-
-_t('pgs_triglycerides_4845', 'PGS - Metabolic', 'Triglycerides (PRSmix) (PGS004845)',
-   '1,095,976 variants. R2=0.113 (EUR). Truong B et al., Cell Genomics 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004845', 'trait': 'Triglycerides (PRSmix)'})
-
-_t('pgs_uric_700', 'PGS - Metabolic', 'Uric acid (PGS000700)',
-   '20,171 variants. R2=0.421 (EUR), 0.338 (EAS). Sinnott-Armstrong N et al., Nat Genet 2021 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS000700', 'trait': 'Uric acid'})
-
-_t('pgs_celiac_040', 'PGS - Metabolic', 'Celiac disease (PGS000040)',
-   '228 variants. AUROC 0.90. Abraham G et al., PLoS Genet 2014',
-   'pgs_score', {'pgs_id': 'PGS000040', 'trait': 'Celiac disease'})
-
-_t('pgs_gout_4768', 'PGS - Metabolic', 'Gout (PGS004768)',
-   '1,580,311 variants. R2=0.081. Truong B et al., Cell Genomics 2024',
-   'pgs_score', {'pgs_id': 'PGS004768', 'trait': 'Gout'})
-
-_t('pgs_gout_4931', 'PGS - Metabolic', 'Gout (SnpNet) (PGS004931)',
-   '1,138 variants. AUROC 0.73. Moreno-Grau S et al., Hum Genomics 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004931', 'trait': 'Gout (SnpNet)'})
-
-_t('pgs_metabolic_4928', 'PGS - Metabolic', 'Metabolic syndrome (PGS004928)',
-   '916,017 variants. OR 1.24, R2=0.046. Park S et al., Nat Genet 2024 (EUR+EAS)',
-   'pgs_score', {'pgs_id': 'PGS004928', 'trait': 'Metabolic syndrome'})
-
-_t('pgs_hypothyroid_820', 'PGS - Metabolic', 'Hypothyroidism (PGS000820)',
-   '890,908 variants. OR 1.33, AUROC 0.60. Luo J et al., Clin Cancer Res 2021',
-   'pgs_score', {'pgs_id': 'PGS000820', 'trait': 'Hypothyroidism'})
-
-_t('pgs_hypothyroidism_4935', 'PGS - Metabolic', 'Hypothyroidism (PGS004935)',
-   '6,127 variants. AUROC 0.70. Moreno-Grau S et al., Hum Genomics 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004935', 'trait': 'Hypothyroidism'})
-
-_t('pgs_bmd_2632', 'PGS - Metabolic', 'Osteoporosis / BMD (PGS002632)',
-   '432,286 variants. R2=0.250. Weissbrod O et al., Nat Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS002632', 'trait': 'Bone mineral density'})
-
-_t('pgs_hba1c_4044', 'PGS - Metabolic', 'HbA1c (PGS004044)',
-   '907,906 variants. R2=0.039. Monti R et al., AJHG 2024',
-   'pgs_score', {'pgs_id': 'PGS004044', 'trait': 'HbA1c'})
-
-_t('pgs_nafld_2283', 'PGS - Metabolic', 'NAFLD (PGS002283)',
-   '15 variants. beta=0.094. Schnurr TM et al., Hepatol Commun 2022',
-   'pgs_score', {'pgs_id': 'PGS002283', 'trait': 'NAFLD'})
-
-_t('pgs_egfr_2605', 'PGS - Metabolic', 'LDL cholesterol (PGS002605)',
-   '1,103,034 variants. R2=0.048. Weissbrod O et al., Nat Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS002605', 'trait': 'LDL cholesterol'})
-
-_t('pgs_vitd_3554', 'PGS - Metabolic', 'Vitamin D levels (PGS003554)',
-   '979,739 variants. R2=0.035. Ding Y et al., bioRxiv 2022',
-   'pgs_score', {'pgs_id': 'PGS003554', 'trait': 'Vitamin D levels'})
-
-_t('pgs_vitamin_1907', 'PGS - Metabolic', 'RR interval (PGS001907)',
-   '8,505 variants. R2=0.035. Prive F et al., AJHG 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS001907', 'trait': 'RR interval'})
-
-# ── PGS - Autoimmune ────────────────────────────────────────────
-_t('pgs_ibd_4081', 'PGS - Autoimmune', 'IBD (PGS004081)',
-   '1,073,268 variants. AUROC 0.68. Monti R et al., AJHG 2024',
-   'pgs_score', {'pgs_id': 'PGS004081', 'trait': 'Inflammatory bowel disease'})
-
-_t('pgs_ibd_4151', 'PGS - Autoimmune', "IBD / Crohn's / UC (IBD, best) (PGS004151)",
-   '1,102,205 variants. AUROC 0.695, OR 2.06. Monti R et al., AJHG 2024 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS004151', 'trait': "IBD / Crohn's / UC"})
-
-_t('pgs_ibd_20', 'PGS - Autoimmune', "IBD / Crohn's / UC (classic IBD) (PGS000020)",
-   '228 variants. AUROC 0.63. Khera AV et al., Nat Genet 2018 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000020', 'trait': "IBD / Crohn's / UC"})
-
-_t('pgs_crohns_4254', 'PGS - Autoimmune', "Crohn's disease (PGS004254)",
-   '744,682 variants. AUROC 0.72, OR 2.18. Middha P et al., Nat Commun 2024',
-   'pgs_score', {'pgs_id': 'PGS004254', 'trait': "Crohn's disease"})
-
-_t('pgs_uc_4253', 'PGS - Autoimmune', 'Ulcerative colitis (PGS004253)',
-   '744,575 variants. OR 1.84, AUROC 0.66. Middha P et al., Nat Commun 2024',
-   'pgs_score', {'pgs_id': 'PGS004253', 'trait': 'Ulcerative colitis'})
-
-_t('pgs_ms_4700', 'PGS - Autoimmune', 'Multiple sclerosis (PGS004700)',
-   '12 variants. AUROC 0.76 (HLA-GRS). Loginovic P et al., Nat Commun 2024',
-   'pgs_score', {'pgs_id': 'PGS004700', 'trait': 'Multiple sclerosis'})
-
-_t('pgs_multiple_2726', 'PGS - Autoimmune', 'Multiple sclerosis (HLA+genome-wide) (PGS002726)',
-   '476,399 variants. AUROC 0.80, OR 15.0 (top 10%). Shams H et al., Brain 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS002726', 'trait': 'Multiple sclerosis'})
-
-_t('pgs_multiple_4699', 'PGS - Autoimmune', 'Multiple sclerosis (HLA+nonHLA) (PGS004699)',
-   '307 variants. AUROC 0.764. Loginovic P et al., Nat Commun 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004699', 'trait': 'Multiple sclerosis'})
-
-_t('pgs_multiple_2312', 'PGS - Autoimmune', 'Multiple sclerosis (genome-wide) (PGS002312)',
-   '1,109,311 variants. AUROC 0.69. Weissbrod O et al., Nat Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS002312', 'trait': 'Multiple sclerosis'})
-
-_t('pgs_ra_2745', 'PGS - Autoimmune', 'Rheumatoid arthritis (PGS002745)',
-   '2,575 variants. AUROC 0.66. Ishigaki K et al., Nat Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS002745', 'trait': 'Rheumatoid arthritis'})
-
-_t('pgs_rheumatoid_4163', 'PGS - Autoimmune', 'Rheumatoid arthritis (multi-ancestry) (PGS004163)',
-   '778,275 variants. AUROC 0.747, OR 2.46. Monti R et al., AJHG 2024 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS004163', 'trait': 'Rheumatoid arthritis'})
-
-_t('pgs_rheumatoid_4873', 'PGS - Autoimmune', 'Rheumatoid arthritis (INTERVENE) (PGS004873)',
-   '551,074 variants. HR 1.87, C-index 0.65. Jermy B et al., Nat Commun 2024 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS004873', 'trait': 'Rheumatoid arthritis'})
-
-_t('pgs_sle_328', 'PGS - Autoimmune', 'Lupus / SLE (PGS000328)',
-   '57 variants. AUROC 0.83, OR 12.32. Reid S et al., Ann Rheum Dis 2019',
-   'pgs_score', {'pgs_id': 'PGS000328', 'trait': 'Lupus (SLE)'})
-
-_t('pgs_lupus_4917', 'PGS - Autoimmune', 'Lupus (SLE, multi) (PGS004917)',
-   '97 variants. AUROC 0.696, OR 2.01. Cui J et al., Arthritis Rheumatol 2020 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS004917', 'trait': 'Lupus (SLE, multi)'})
-
-_t('pgs_asthma_2311', 'PGS - Autoimmune', 'Asthma (PGS002311)',
-   '1,109,311 variants. R2=0.024. Weissbrod O et al., Nat Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS002311', 'trait': 'Asthma'})
-
-_t('pgs_asthma_4877', 'PGS - Autoimmune', 'Asthma (INTERVENE) (PGS004877)',
-   '870,454 variants. HR 1.42-1.48 (7 biobanks). Jermy B et al., Nat Commun 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004877', 'trait': 'Asthma'})
-
-_t('pgs_asthma_4723', 'PGS - Autoimmune', 'Asthma (PRSmix) (PGS004723)',
-   '985,316 variants. Incr. R2=0.033. Truong B et al., Cell Genomics 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004723', 'trait': 'Asthma'})
-
-_t('pgs_asthma_4537', 'PGS - Autoimmune', 'Asthma (metaPRS) (PGS004537)',
-   '1,059,939 variants. OR 1.40/SD. Jung H et al., Commun Biol 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004537', 'trait': 'Asthma'})
-
-_t('pgs_psoriasis_1312', 'PGS - Autoimmune', 'Psoriasis (PGS001312)',
-   '204 variants. AUROC 0.70. Tanigawa Y et al., PLoS Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS001312', 'trait': 'Psoriasis'})
-
-_t('pgs_psoriasis_5309', 'PGS - Autoimmune', 'Psoriasis (PGS005309)',
-   '513,461 variants. OR 1.49. Saklatvala JR et al., Genome Med 2025 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS005309', 'trait': 'Psoriasis'})
-
-_t('pgs_psoriasis_1288', 'PGS - Autoimmune', 'Inflammatory bowel disease (PGS001288)',
-   '7,534 variants. AUROC 0.70. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS001288', 'trait': 'Inflammatory bowel disease'})
-
-_t('pgs_psoriatic_1287', 'PGS - Autoimmune', 'Psoriatic arthropathy (PGS001287)',
-   '36 variants. AUROC 0.73. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS001287', 'trait': 'Psoriatic arthropathy'})
-
-_t('pgs_ankspon_1267', 'PGS - Autoimmune', 'Ankylosing spondylitis (PGS001267)',
-   '10 variants. AUROC 0.85. Tanigawa Y et al., PLoS Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS001267', 'trait': 'Ankylosing spondylitis'})
-
-_t('pgs_ankylosing_1289', 'PGS - Autoimmune', 'Thyroid cancer (PGS001289)',
-   '2,874 variants. AUROC 0.85. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS001289', 'trait': 'Thyroid cancer'})
-
-_t('pgs_graves_5265', 'PGS - Autoimmune', "Graves' disease (PGS005265)",
-   '1,085,173 variants. AUROC 0.665, OR 1.63. White SL et al., medRxiv 2025 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS005265', 'trait': "Graves' disease"})
-
-_t('pgs_sjogrens_1308', 'PGS - Autoimmune', "Sjogren's syndrome (PGS001308)",
-   '7 variants. AUROC 0.80 (SAS), 0.77 (EUR). Tanigawa Y et al., PLoS Genet 2022 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS001308', 'trait': "Sjogren's syndrome"})
-
-_t('pgs_atopic_4903', 'PGS - Autoimmune', 'Atopic dermatitis (PGS004903)',
-   '38 variants. Significant in EUR. Al-Janabi A et al., JACI 2023 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004903', 'trait': 'Atopic dermatitis'})
-
-_t('pgs_vitiligo_1290', 'PGS - Autoimmune', 'Osteoarthritis (PGS001290)',
-   '3,672 variants. AUROC 0.72. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS001290', 'trait': 'Osteoarthritis'})
-
-# ── PGS - Neurological ──────────────────────────────────────────
-_t('pgs_alzheimer_4590', 'PGS - Neurological', "Alzheimer's disease (PGS004590)",
-   '363 variants. AUROC 0.68 (excl APOE). Lake J et al., Mol Psychiatry 2023',
-   'pgs_score', {'pgs_id': 'PGS004590', 'trait': "Alzheimer's disease"})
-
-_t('pgs_alzheimers_2280', 'PGS - Neurological', "Alzheimer's disease (Bellenguez) (PGS002280)",
-   '83 variants. HR 1.93 (top vs bottom decile). Bellenguez C et al., Nat Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS002280', 'trait': "Alzheimer's disease"})
-
-_t('pgs_alzheimers_4092', 'PGS - Neurological', "Alzheimer's disease (genome-wide) (PGS004092)",
-   '1,109,233 variants. AUROC 0.665, OR 1.78/SD. Monti R et al., AJHG 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004092', 'trait': "Alzheimer's disease"})
-
-_t('pgs_alzheimers_4863', 'PGS - Neurological', "Alzheimer's disease (multi-ancestry) (PGS004863)",
-   '74 variants. AUROC 0.746 (EUR), 0.751 (EAS). Sleiman PM et al., Alzheimers Dement 2023 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS004863', 'trait': "Alzheimer's disease"})
-
-_t('pgs_alzheimers_334', 'PGS - Neurological', "Alzheimer's disease (incl APOE) (PGS000334)",
-   '21 variants. AUROC 0.83. Desikan RS et al., PLoS Med 2017 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000334', 'trait': "Alzheimer's disease"})
-
-_t('pgs_alzheimers_25', 'PGS - Neurological', "Alzheimer's disease (GPS) (PGS000025)",
-   '6,630,150 variants. AUROC 0.75. Khera AV et al., Nat Genet 2018 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000025', 'trait': "Alzheimer's disease"})
-
-_t('pgs_parkinson_903', 'PGS - Neurological', "Parkinson's disease (PGS000903)",
-   '1,805 variants. AUROC 0.692, OR 6.25. Nalls MA et al., Lancet Neurol 2019',
-   'pgs_score', {'pgs_id': 'PGS000903', 'trait': "Parkinson's disease"})
-
-_t('pgs_parkinsons_3763', 'PGS - Neurological', "Parkinson's disease (JAMA Neurol) (PGS003763)",
-   '44 variants. HR 1.72, HR 3.22 (w/ frailty). Zheng Z et al., JAMA Neurol 2023 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS003763', 'trait': "Parkinson's disease"})
-
-_t('pgs_parkinsons_2940', 'PGS - Neurological', "Parkinson's disease (genome-wide) (PGS002940)",
-   '1,805 variants. AUROC 0.72. Kim JJ et al., Genome Med 2023 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS002940', 'trait': "Parkinson's disease"})
-
-_t('pgs_schiz_135', 'PGS - Neurological', 'Schizophrenia (PGS000135)',
-   '972,439 variants. AUROC 0.74. Zheutlin AB et al., Am J Psychiatry 2019',
-   'pgs_score', {'pgs_id': 'PGS000135', 'trait': 'Schizophrenia'})
-
-_t('pgs_schizophrenia_3472', 'PGS - Neurological', 'Heart rate (PGC3) (PGS003472)',
+_t('pgs_coronary_2297', 'PGS - Cardiovascular', 'Lipoprotein A levels (LDpred2) (PGS002297)',
+   '1,259,754 variants. AUROC 0.78. Ge T et al., Genome Med 2022 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS002297', 'trait': 'Lipoprotein A levels'})
+
+_t('pgs_schizophrenia_3472', 'PGS - Cardiovascular', 'Heart rate (PGC3) (PGS003472)',
    'varies variants. AUROC 0.76. Trubetskoy V et al., Nature 2022 (Multi)',
    'pgs_score', {'pgs_id': 'PGS003472', 'trait': 'Heart rate'})
 
-_t('pgs_depression_3333', 'PGS - Neurological', 'Major depression (PGS003333)',
-   '1,088,415 variants. R2=0.022. Fang Y et al., Biol Psychiatry 2022',
-   'pgs_score', {'pgs_id': 'PGS003333', 'trait': 'Major depression'})
+_t('pgs_vitamin_1907', 'PGS - Cardiovascular', 'RR interval (PGS001907)',
+   '8,505 variants. R2=0.035. Prive F et al., AJHG 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS001907', 'trait': 'RR interval'})
 
-_t('pgs_major_4760', 'PGS - Neurological', 'Major depression (PRSmixPlus) (PGS004760)',
-   '2,141,267 variants. Incr. R2=0.024. Truong B et al., Cell Genomics 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004760', 'trait': 'Major depression'})
 
-_t('pgs_major_4885', 'PGS - Neurological', 'Major depression (INTERVENE) (PGS004885)',
-   '801,544 variants. HR 1.24/SD, C-index 0.58. Jermy B et al., Nat Commun 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004885', 'trait': 'Major depression'})
+# ── PGS - Metabolic / Endocrine ─────────────────────────────────
+_t('pgs_t2d_2308', 'PGS - Metabolic / Endocrine', 'Type 2 diabetes (PGS002308)',
+   '1,259,754 variants. AUROC 0.793 (EUR), 0.81 (EAS). Ge T et al., Genome Med 2022',
+   'pgs_score', {'pgs_id': 'PGS002308', 'trait': 'Type 2 diabetes'})
 
-_t('pgs_bipolar_2787', 'PGS - Neurological', 'Bipolar disorder (PGS002787)',
-   '937,511 variants. Gui Y et al., Transl Psychiatry 2022',
-   'pgs_score', {'pgs_id': 'PGS002787', 'trait': 'Bipolar disorder'})
+_t('pgs_type_4923', 'PGS - Metabolic / Endocrine', 'Type 2 diabetes (metaGRS) (PGS004923)',
+   '1,349,896 variants. AUROC 0.777 (EUR), 0.725 (AFR). Ritchie SC et al., medRxiv 2024 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS004923', 'trait': 'Type 2 diabetes'})
 
-_t('pgs_adhd_2746', 'PGS - Neurological', 'ADHD (PGS002746)',
-   '513,659 variants. beta=0.11. Lahey BB et al., J Psychiatr Res 2022',
-   'pgs_score', {'pgs_id': 'PGS002746', 'trait': 'ADHD'})
+_t('pgs_type_3867', 'PGS - Metabolic / Endocrine', 'Type 2 diabetes (multi-ancestry) (PGS003867)',
+   '1,068,166 variants. AUROC 0.73 (EUR), 0.776 (HIS). Shim I et al., Nat Commun 2023 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS003867', 'trait': 'Type 2 diabetes'})
 
-_t('pgs_adhd_3753', 'PGS - Neurological', 'ADHD (Latin Am eval) (PGS003753)',
-   '35,445 variants. Validated in Brazilian. Sato JR et al., Genes Brain Behav 2023 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS003753', 'trait': 'ADHD (Latin Am eval)'})
+_t('pgs_type_14', 'PGS - Metabolic / Endocrine', 'Type 2 diabetes (classic GPS) (PGS000014)',
+   '6,917,436 variants. AUROC 0.73. Khera AV et al., Nat Genet 2018 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000014', 'trait': 'Type 2 diabetes'})
 
-_t('pgs_autism_327', 'PGS - Neurological', 'Autism spectrum (PGS000327)',
-   '35,087 variants. OR 1.33, R2=0.025. Grove J et al., Nat Genet 2019',
-   'pgs_score', {'pgs_id': 'PGS000327', 'trait': 'Autism spectrum'})
+_t('pgs_t1d_4174', 'PGS - Metabolic / Endocrine', 'Type 1 diabetes (PGS004174)',
+   '49 variants. AUROC 0.71. Raben TG et al., Sci Rep 2023',
+   'pgs_score', {'pgs_id': 'PGS004174', 'trait': 'Type 1 diabetes'})
 
-_t('pgs_autism_2790', 'PGS - Neurological', 'Autism spectrum (PGS002790)',
-   '916,713 variants. R2=0.005. Gui Y et al., Transl Psychiatry 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS002790', 'trait': 'Autism spectrum'})
+_t('pgs_type_4102', 'PGS - Metabolic / Endocrine', 'Type 1 diabetes (PRS-CS) (PGS004102)',
+   '61,651 variants. AUROC 0.741, R2=0.095. Monti R et al., AJHG 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004102', 'trait': 'Type 1 diabetes'})
 
-_t('pgs_epilepsy_4881', 'PGS - Neurological', 'Epilepsy (PGS004881)',
-   '605,432 variants. HR 1.12/SD. Jermy B et al., Nat Commun 2024',
-   'pgs_score', {'pgs_id': 'PGS004881', 'trait': 'Epilepsy'})
+_t('pgs_type_4874', 'PGS - Metabolic / Endocrine', 'Type 1 diabetes (INTERVENE) (PGS004874)',
+   '56,916 variants. HR 2.37, C-index 0.77. Jermy B et al., Nat Commun 2024 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS004874', 'trait': 'Type 1 diabetes'})
 
-_t('pgs_addiction_3849', 'PGS - Neurological', 'Addiction risk (multi-substance) (PGS003849)',
-   '584,753 variants. OR 1.73 (opioid), 1.57 (alcohol). Hatoum AS et al., Nat Ment Health 2023 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS003849', 'trait': 'Addiction risk (multi-substance)'})
-
-_t('pgs_anxiety_4451', 'PGS - Neurological', 'Anxiety (PGS004451)',
-   '1,059,939 variants. OR 1.19/SD. Jung H et al., Commun Biol 2024 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004451', 'trait': 'Anxiety'})
-
-_t('pgs_ptsd_5393', 'PGS - Neurological', 'PTSD (PGS005393)',
-   '53,705 variants. R2=0.087. Bugiga AVG et al., Braz J Psychiatry 2024 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS005393', 'trait': 'PTSD'})
-
-_t('pgs_anorexia_379', 'PGS - Neurological', 'Colon cancer (PGS000379)',
-   '66,177 variants. OR 1.24/SD. Watson HJ et al., Nat Genet 2019 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS000379', 'trait': 'Colon cancer'})
-
-_t('pgs_migraine_4798', 'PGS - Neurological', 'Migraine (PGS004798)',
-   '3,984,158 variants. R2=0.004. Truong B et al., Cell Genomics 2024 (SAS)',
-   'pgs_score', {'pgs_id': 'PGS004798', 'trait': 'Migraine'})
-
-# ── PGS - Traits ────────────────────────────────────────────────
-_t('pgs_height_1229', 'PGS - Traits', 'Height (PGS001229)',
-   '51,209 variants. R2=0.717. Tanigawa Y et al., PLoS Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS001229', 'trait': 'Height'})
-
-_t('pgs_height_4214', 'PGS - Traits', 'Height (LASSO) (PGS004214)',
-   '23,686 variants. R2=0.712 (sibling-validated). Raben TG et al., Sci Rep 2023 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS004214', 'trait': 'Height'})
-
-_t('pgs_height_2596', 'PGS - Traits', 'Glucose (genome-wide) (PGS002596)',
-   '1,103,034 variants. R2=0.654. Weissbrod O et al., Nat Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS002596', 'trait': 'Glucose'})
-
-_t('pgs_height_2305', 'PGS - Traits', 'Chronic lymphoid leukemia (multi-ancestry) (PGS002305)',
-   '1,259,754 variants. R2=0.61. Ge T et al., Genome Med 2022 (Multi)',
-   'pgs_score', {'pgs_id': 'PGS002305', 'trait': 'Chronic lymphoid leukemia'})
-
-_t('pgs_iq_4427', 'PGS - Traits', 'Fluid intelligence (PGS004427)',
-   '1,059,939 variants. R2=0.223 (EUR). Jung H et al., Commun Biol 2024',
-   'pgs_score', {'pgs_id': 'PGS004427', 'trait': 'Fluid intelligence'})
-
-_t('pgs_intelligence_3724', 'PGS - Traits', 'Intelligence / Cognitive Ability (IQ) (PGS003724)',
-   '6,680,000 variants. R2=0.12. Hatoum AS et al., Nat Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS003724', 'trait': 'Intelligence / Cognitive Ability'})
-
-_t('pgs_intelligence_3723', 'PGS - Traits', 'Intelligence / Cognitive Ability (cognitive performance / cEF) (PGS003723)',
-   '6,680,000 variants. R2=0.11. Hatoum AS et al., Nat Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS003723', 'trait': 'Intelligence / Cognitive Ability'})
-
-_t('pgs_intelligence_3510', 'PGS - Traits', 'Intelligence / Cognitive Ability (verbal-numerical reasoning) (PGS003510)',
-   '979,739 variants. R2=0.15. Ding Y et al., bioRxiv 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS003510', 'trait': 'Intelligence / Cognitive Ability'})
-
-_t('pgs_edu_2012', 'PGS - Traits', 'Educational attainment (PGS002012)',
-   '50,413 variants. r=0.175. Prive F et al., AJHG 2022',
-   'pgs_score', {'pgs_id': 'PGS002012', 'trait': 'Educational attainment'})
-
-_t('pgs_educational_3390', 'PGS - Traits', 'Head and neck squamous cell carcinoma (EA4, latest) (PGS003390)',
-   'varies variants. r=0.19 (EUR). Okbay A et al., Nat Genet 2022 (EUR)',
-   'pgs_score', {'pgs_id': 'PGS003390', 'trait': 'Head and neck squamous cell carcinoma'})
-
-_t('pgs_hair_2598', 'PGS - Traits', 'Hair color (PGS002598)',
-   '8,312 variants. R2=0.182. Weissbrod O et al., Nat Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS002598', 'trait': 'Hair color'})
-
-_t('pgs_skin_1897', 'PGS - Traits', 'Skin pigmentation (PGS001897)',
-   '15,817 variants. r=0.387. Prive F et al., AJHG 2022',
-   'pgs_score', {'pgs_id': 'PGS001897', 'trait': 'Skin pigmentation'})
-
-_t('pgs_baldness_2314', 'PGS - Traits', 'Male pattern baldness (PGS002314)',
-   '1,109,311 variants. R2=0.143. Weissbrod O et al., Nat Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS002314', 'trait': 'Male pattern baldness'})
-
-_t('pgs_bodyfat_3899', 'PGS - Traits', 'Body fat % (PGS003899)',
-   '34,374 variants. R2=0.056. Tanigawa Y et al., AJHG 2023',
-   'pgs_score', {'pgs_id': 'PGS003899', 'trait': 'Body fat %'})
-
-_t('pgs_neuroticism_3565', 'PGS - Traits', 'Neuroticism (PGS003565)',
-   '979,739 variants. R2=0.05. Ding Y et al., bioRxiv 2022',
-   'pgs_score', {'pgs_id': 'PGS003565', 'trait': 'Neuroticism'})
-
-_t('pgs_chronotype_2318', 'PGS - Traits', 'Chronotype (morn/eve) (PGS002318)',
-   '1,109,311 variants. Incr. R2=0.036 (EUR). Weissbrod O et al., Nat Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS002318', 'trait': 'Chronotype (morn/eve)'})
-
-_t('pgs_hearing_762', 'PGS - Traits', 'Hearing difficulty (PGS000762)',
-   '100,325 variants. R2=0.091. Cherny SS et al., EJHG 2020',
-   'pgs_score', {'pgs_id': 'PGS000762', 'trait': 'Hearing difficulty'})
-
-_t('pgs_grip_1162', 'PGS - Traits', 'Hip circumference (PGS001162)',
-   '10,872 variants. R2=0.033. Tanigawa Y et al., PLoS Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS001162', 'trait': 'Hip circumference'})
-
-_t('pgs_age_1183', 'PGS - Traits', 'Age at menarche (PGS001183)',
-   '25,172 variants. R2=0.10. Tanigawa Y et al., PLoS Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS001183', 'trait': 'Age at menarche'})
-
-_t('pgs_risk_205', 'PGS - Traits', 'Risk tolerance (PGS000205)',
-   '1,110,737 variants. dR2=0.016. Barr PB et al., Transl Psychiatry 2020',
-   'pgs_score', {'pgs_id': 'PGS000205', 'trait': 'Risk tolerance'})
-
-# ── PGS - Lifestyle ─────────────────────────────────────────────
-_t('pgs_coffee_1123', 'PGS - Lifestyle', 'Coffee consumption (PGS001123)',
-   '48 variants. AUROC 0.617. Tanigawa Y et al., PLoS Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS001123', 'trait': 'Coffee consumption'})
-
-_t('pgs_alcohol_5213', 'PGS - Lifestyle', 'Alcohol use disorder (PGS005213)',
-   '336,813 variants. R2=0.05. Deng WQ et al., Alcohol Alcoholism 2024',
-   'pgs_score', {'pgs_id': 'PGS005213', 'trait': 'Alcohol use disorder'})
-
-_t('pgs_smoking_3357', 'PGS - Lifestyle', 'Smoking initiation (PGS003357)',
-   '1,194,472 variants. dAUC=0.015. Saunders GRB et al., Nature 2022',
-   'pgs_score', {'pgs_id': 'PGS003357', 'trait': 'Smoking initiation'})
-
-_t('pgs_insomnia_908', 'PGS - Lifestyle', 'Insomnia (PGS000908)',
-   '2,746,982 variants. OR 1.12-1.28. Campos AI et al., Commun Med 2021',
-   'pgs_score', {'pgs_id': 'PGS000908', 'trait': 'Insomnia'})
-
-_t('pgs_longevity_906', 'PGS - Lifestyle', 'Longevity (PGS000906)',
-   '330 variants. HR 0.89/SD. Testi N et al., J Gerontol 2021',
-   'pgs_score', {'pgs_id': 'PGS000906', 'trait': 'Longevity'})
-
-_t('pgs_ckd_4889', 'PGS - Lifestyle', 'CKD (PGS004889)',
-   '1,117,375 variants. HR 1.33, C-index 0.727. Mandla R et al., Genome Med 2024',
-   'pgs_score', {'pgs_id': 'PGS004889', 'trait': 'Chronic kidney disease'})
-
-_t('pgs_amd_4606', 'PGS - Lifestyle', 'AMD (PGS004606)',
-   '1,000,946 variants. OR 1.76, AUROC 0.71. Gorman BR et al., Nat Genet 2024',
-   'pgs_score', {'pgs_id': 'PGS004606', 'trait': 'Age-related macular degeneration'})
-
-_t('pgs_glaucoma_1797', 'PGS - Lifestyle', 'Glaucoma (PGS001797)',
-   '885,417 variants. AUROC 0.749. Wang Y et al., Cell Genomics 2023',
-   'pgs_score', {'pgs_id': 'PGS001797', 'trait': 'Glaucoma'})
-
-_t('pgs_myopia_3564', 'PGS - Lifestyle', 'Myopia (PGS003564)',
-   '979,739 variants. R2=0.06. Ding Y et al., bioRxiv 2022',
-   'pgs_score', {'pgs_id': 'PGS003564', 'trait': 'Myopia'})
-
-_t('pgs_telomere_2616', 'PGS - Lifestyle', 'Smoking status (PGS002616)',
-   '1,103,034 variants. R2=0.024. Weissbrod O et al., Nat Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS002616', 'trait': 'Smoking status'})
-
-_t('pgs_kidney_4493', 'PGS - Lifestyle', 'Kidney stones (PGS004493)',
-   '1,059,939 variants. OR 1.23/SD. Jung H et al., Commun Biol 2024',
-   'pgs_score', {'pgs_id': 'PGS004493', 'trait': 'Kidney stones'})
-
-_t('pgs_gallstones_1291', 'PGS - Lifestyle', 'Prostate cancer (PGS001291)',
-   '5,387 variants. AUROC 0.63. Tanigawa Y et al., PLoS Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS001291', 'trait': 'Prostate cancer'})
-
-_t('pgs_osteoarthritis_1296', 'PGS - Lifestyle', 'Insulin-dependent diabetes mellitus (time-to-event) (PGS001296)',
+_t('pgs_osteoarthritis_1296', 'PGS - Metabolic / Endocrine', 'Insulin-dependent diabetes mellitus (time-to-event) (PGS001296)',
    '6,234 variants. AUROC 0.58. Tanigawa Y et al., PLoS Genet 2022',
    'pgs_score', {'pgs_id': 'PGS001296', 'trait': 'Insulin-dependent diabetes mellitus (time-to-event)'})
 
-# ── PGS - Custom ────────────────────────────────────────────────
-_t('custom_pgs000001', 'PGS - Custom', 'Breast cancer (PGS000001)',
-   '77 variants. Mavaddat N et al., 2015. J Natl Cancer Inst',
-   'pgs_score', {'pgs_id': 'PGS000001', 'trait': 'Breast cancer'})
+_t('pgs_bmi_027', 'PGS - Metabolic / Endocrine', 'BMI / Obesity (PGS000027)',
+   '2,100,302 variants. R2=0.085; top decile 13kg heavier. Khera AV et al., Cell 2019',
+   'pgs_score', {'pgs_id': 'PGS000027', 'trait': 'BMI'})
 
-_t('custom_pgs000323', 'PGS - Custom', 'Serum testosterone levels in males (PGS000323)',
+_t('pgs_bmi_5198', 'PGS - Metabolic / Endocrine', 'BMI / Obesity (GIANT 2025) (PGS005198)',
+   '1,217,710 variants. R2=0.176 (EUR), OR 4.08 top 3%. Smit RAJ et al., Nat Med 2025 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS005198', 'trait': 'BMI / Obesity'})
+
+_t('pgs_bmi_5202', 'PGS - Metabolic / Endocrine', 'BMI / Obesity (EAS-optimized) (PGS005202)',
+   '1,022,487 variants. R2=0.101 (EAS). Smit RAJ et al., Nat Med 2025 (EAS)',
+   'pgs_score', {'pgs_id': 'PGS005202', 'trait': 'BMI / Obesity'})
+
+_t('pgs_ldl_2337', 'PGS - Metabolic / Endocrine', 'LDL Cholesterol (PGS002337)',
+   '1,109,311 variants. R2=0.172. Weissbrod O et al., Nat Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS002337', 'trait': 'LDL Cholesterol'})
+
+_t('pgs_ldl_115', 'PGS - Metabolic / Endocrine', 'LDL (focused) (PGS000115)',
+   '223 variants. R2=0.09. Trinder M et al., JAMA Cardiol 2020 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS000115', 'trait': 'LDL (focused)'})
+
+_t('pgs_ldl_3788', 'PGS - Metabolic / Endocrine', 'LDL (AFR-optimized) (PGS003788)',
+   '1,679,610 variants. R2=0.044 (AFR). Zhang H et al., Nat Genet 2023 (AFR)',
+   'pgs_score', {'pgs_id': 'PGS003788', 'trait': 'LDL (AFR-optimized)'})
+
+_t('pgs_ldl_4644', 'PGS - Metabolic / Endocrine', 'LDL (EAS-tuned) (PGS004644)',
+   '1,354,681 variants. R2=0.067 (EAS). Zhang J et al., Nat Commun 2024 (EAS)',
+   'pgs_score', {'pgs_id': 'PGS004644', 'trait': 'LDL (EAS-tuned)'})
+
+_t('pgs_egfr_2605', 'PGS - Metabolic / Endocrine', 'LDL cholesterol (PGS002605)',
+   '1,103,034 variants. R2=0.048. Weissbrod O et al., Nat Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002605', 'trait': 'LDL cholesterol'})
+
+_t('pgs_hdl_4775', 'PGS - Metabolic / Endocrine', 'HDL Cholesterol (PGS004775)',
+   '1,120,830 variants. R2=0.155. Truong B et al., Cell Genomics 2024',
+   'pgs_score', {'pgs_id': 'PGS004775', 'trait': 'HDL Cholesterol'})
+
+_t('pgs_hdl_4631', 'PGS - Metabolic / Endocrine', 'HDL (EAS) (PGS004631)',
+   '1,871,796 variants. R2=0.167 (EAS). Zhang J et al., Nat Commun 2024 (EAS)',
+   'pgs_score', {'pgs_id': 'PGS004631', 'trait': 'HDL (EAS)'})
+
+_t('pgs_tc_2352', 'PGS - Metabolic / Endocrine', 'Total Cholesterol (PGS002352)',
+   '1,109,311 variants. R2=0.155. Weissbrod O et al., Nat Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS002352', 'trait': 'Total Cholesterol'})
+
+_t('pgs_total_4669', 'PGS - Metabolic / Endocrine', 'Total Cholesterol (AFR) (PGS004669)',
+   '1,728,954 variants. R2=0.132 (AFR). Zhang J et al., Nat Commun 2024 (AFR)',
+   'pgs_score', {'pgs_id': 'PGS004669', 'trait': 'Total Cholesterol (AFR)'})
+
+_t('pgs_tg_2353', 'PGS - Metabolic / Endocrine', 'Triglycerides (PGS002353)',
+   '1,109,311 variants. R2=0.115. Weissbrod O et al., Nat Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS002353', 'trait': 'Triglycerides'})
+
+_t('pgs_triglycerides_4845', 'PGS - Metabolic / Endocrine', 'Triglycerides (PRSmix) (PGS004845)',
+   '1,095,976 variants. R2=0.113 (EUR). Truong B et al., Cell Genomics 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004845', 'trait': 'Triglycerides (PRSmix)'})
+
+_t('pgs_uric_700', 'PGS - Metabolic / Endocrine', 'Uric acid (PGS000700)',
+   '20,171 variants. R2=0.421 (EUR), 0.338 (EAS). Sinnott-Armstrong N et al., Nat Genet 2021 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS000700', 'trait': 'Uric acid'})
+
+_t('pgs_gout_4768', 'PGS - Metabolic / Endocrine', 'Gout (PGS004768)',
+   '1,580,311 variants. R2=0.081. Truong B et al., Cell Genomics 2024',
+   'pgs_score', {'pgs_id': 'PGS004768', 'trait': 'Gout'})
+
+_t('pgs_gout_4931', 'PGS - Metabolic / Endocrine', 'Gout (SnpNet) (PGS004931)',
+   '1,138 variants. AUROC 0.73. Moreno-Grau S et al., Hum Genomics 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004931', 'trait': 'Gout (SnpNet)'})
+
+_t('pgs_celiac_040', 'PGS - Metabolic / Endocrine', 'Celiac disease (PGS000040)',
+   '228 variants. AUROC 0.90. Abraham G et al., PLoS Genet 2014',
+   'pgs_score', {'pgs_id': 'PGS000040', 'trait': 'Celiac disease'})
+
+_t('pgs_metabolic_4928', 'PGS - Metabolic / Endocrine', 'Metabolic syndrome (PGS004928)',
+   '916,017 variants. OR 1.24, R2=0.046. Park S et al., Nat Genet 2024 (EUR+EAS)',
+   'pgs_score', {'pgs_id': 'PGS004928', 'trait': 'Metabolic syndrome'})
+
+_t('pgs_hypothyroid_820', 'PGS - Metabolic / Endocrine', 'Hypothyroidism (PGS000820)',
+   '890,908 variants. OR 1.33, AUROC 0.60. Luo J et al., Clin Cancer Res 2021',
+   'pgs_score', {'pgs_id': 'PGS000820', 'trait': 'Hypothyroidism'})
+
+_t('pgs_hypothyroidism_4935', 'PGS - Metabolic / Endocrine', 'Hypothyroidism (PGS004935)',
+   '6,127 variants. AUROC 0.70. Moreno-Grau S et al., Hum Genomics 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004935', 'trait': 'Hypothyroidism'})
+
+_t('pgs_bmd_2632', 'PGS - Metabolic / Endocrine', 'Osteoporosis / BMD (PGS002632)',
+   '432,286 variants. R2=0.250. Weissbrod O et al., Nat Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS002632', 'trait': 'Bone mineral density'})
+
+_t('pgs_hba1c_4044', 'PGS - Metabolic / Endocrine', 'HbA1c (PGS004044)',
+   '907,906 variants. R2=0.039. Monti R et al., AJHG 2024',
+   'pgs_score', {'pgs_id': 'PGS004044', 'trait': 'HbA1c'})
+
+_t('pgs_nafld_2283', 'PGS - Metabolic / Endocrine', 'NAFLD (PGS002283)',
+   '15 variants. beta=0.094. Schnurr TM et al., Hepatol Commun 2022',
+   'pgs_score', {'pgs_id': 'PGS002283', 'trait': 'NAFLD'})
+
+_t('pgs_hepatocellular_872', 'PGS - Metabolic / Endocrine', 'Non-alcoholic fatty liver disease (PGS000872)',
+   '5 variants. OR 3.4-11.9 (NAFLD/cirrhosis). Bianco C et al., J Hepatol 2020 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000872', 'trait': 'Non-alcoholic fatty liver disease'})
+
+_t('pgs_vitd_3554', 'PGS - Metabolic / Endocrine', 'Vitamin D levels (PGS003554)',
+   '979,739 variants. R2=0.035. Ding Y et al., bioRxiv 2022',
+   'pgs_score', {'pgs_id': 'PGS003554', 'trait': 'Vitamin D levels'})
+
+_t('pgs_height_2596', 'PGS - Metabolic / Endocrine', 'Glucose (genome-wide) (PGS002596)',
+   '1,103,034 variants. R2=0.654. Weissbrod O et al., Nat Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002596', 'trait': 'Glucose'})
+
+_t('custom_pgs000323', 'PGS - Metabolic / Endocrine', 'Serum testosterone levels in males (PGS000323)',
    '8,235 variants. Flynn E et al., 2020. Eur J Hum Genet',
    'pgs_score', {'pgs_id': 'PGS000323', 'trait': 'Serum testosterone levels in males'})
 
-_t('custom_pgs000321', 'PGS - Custom', 'Serum testosterone levels (PGS000321)',
+_t('custom_pgs000321', 'PGS - Metabolic / Endocrine', 'Serum testosterone levels (PGS000321)',
    '7,319 variants. Flynn E et al., 2020. Eur J Hum Genet',
    'pgs_score', {'pgs_id': 'PGS000321', 'trait': 'Serum testosterone levels'})
 
-_t('custom_pgs000696', 'PGS - Custom', 'Testosterone [nmol/L] (PGS000696)',
+_t('custom_pgs000696', 'PGS - Metabolic / Endocrine', 'Testosterone [nmol/L] (PGS000696)',
    '8,223 variants. Sinnott-Armstrong N et al., 2021. Nat Genet',
    'pgs_score', {'pgs_id': 'PGS000696', 'trait': 'Testosterone [nmol/L]'})
 
-_t('custom_pgs001988', 'PGS - Custom', 'Testosterone (male only) (PGS001988)',
+_t('custom_pgs001988', 'PGS - Metabolic / Endocrine', 'Testosterone (male only) (PGS001988)',
    '3,985 variants. Privé F et al., 2022. Am J Hum Genet',
    'pgs_score', {'pgs_id': 'PGS001988', 'trait': 'Testosterone (male only)'})
 
-_t('custom_pgs002205', 'PGS - Custom', 'Testosterone (male only) (PGS002205)',
+_t('custom_pgs002205', 'PGS - Metabolic / Endocrine', 'Testosterone (male only) (PGS002205)',
    '584,991 variants. Privé F et al., 2022. Am J Hum Genet',
    'pgs_score', {'pgs_id': 'PGS002205', 'trait': 'Testosterone (male only)'})
 
-_t('custom_pgs003559', 'PGS - Custom', 'Testosterone (male only) (PGS003559)',
+_t('custom_pgs003559', 'PGS - Metabolic / Endocrine', 'Testosterone (male only) (PGS003559)',
    '979,739 variants. Ding Y et al., 2022. bioRxiv',
    'pgs_score', {'pgs_id': 'PGS003559', 'trait': 'Testosterone (male only)'})
+
+
+# ── PGS - Autoimmune / Inflammatory ─────────────────────────────
+_t('pgs_ibd_4081', 'PGS - Autoimmune / Inflammatory', 'IBD (PGS004081)',
+   '1,073,268 variants. AUROC 0.68. Monti R et al., AJHG 2024',
+   'pgs_score', {'pgs_id': 'PGS004081', 'trait': 'Inflammatory bowel disease'})
+
+_t('pgs_ibd_4151', 'PGS - Autoimmune / Inflammatory', 'IBD / Crohn\'s / UC (IBD, best) (PGS004151)',
+   '1,102,205 variants. AUROC 0.695, OR 2.06. Monti R et al., AJHG 2024 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS004151', 'trait': 'IBD / Crohn\'s / UC'})
+
+_t('pgs_ibd_20', 'PGS - Autoimmune / Inflammatory', 'IBD / Crohn\'s / UC (classic IBD) (PGS000020)',
+   '228 variants. AUROC 0.63. Khera AV et al., Nat Genet 2018 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000020', 'trait': 'IBD / Crohn\'s / UC'})
+
+_t('pgs_psoriasis_1288', 'PGS - Autoimmune / Inflammatory', 'Inflammatory bowel disease (PGS001288)',
+   '7,534 variants. AUROC 0.70. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS001288', 'trait': 'Inflammatory bowel disease'})
+
+_t('pgs_crohns_4254', 'PGS - Autoimmune / Inflammatory', 'Crohn\'s disease (PGS004254)',
+   '744,682 variants. AUROC 0.72, OR 2.18. Middha P et al., Nat Commun 2024',
+   'pgs_score', {'pgs_id': 'PGS004254', 'trait': 'Crohn\'s disease'})
+
+_t('pgs_uc_4253', 'PGS - Autoimmune / Inflammatory', 'Ulcerative colitis (PGS004253)',
+   '744,575 variants. OR 1.84, AUROC 0.66. Middha P et al., Nat Commun 2024',
+   'pgs_score', {'pgs_id': 'PGS004253', 'trait': 'Ulcerative colitis'})
+
+_t('pgs_ms_4700', 'PGS - Autoimmune / Inflammatory', 'Multiple sclerosis (PGS004700)',
+   '12 variants. AUROC 0.76 (HLA-GRS). Loginovic P et al., Nat Commun 2024',
+   'pgs_score', {'pgs_id': 'PGS004700', 'trait': 'Multiple sclerosis'})
+
+_t('pgs_multiple_2726', 'PGS - Autoimmune / Inflammatory', 'Multiple sclerosis (HLA+genome-wide) (PGS002726)',
+   '476,399 variants. AUROC 0.80, OR 15.0 (top 10%). Shams H et al., Brain 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002726', 'trait': 'Multiple sclerosis'})
+
+_t('pgs_multiple_4699', 'PGS - Autoimmune / Inflammatory', 'Multiple sclerosis (HLA+nonHLA) (PGS004699)',
+   '307 variants. AUROC 0.764. Loginovic P et al., Nat Commun 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004699', 'trait': 'Multiple sclerosis'})
+
+_t('pgs_multiple_2312', 'PGS - Autoimmune / Inflammatory', 'Multiple sclerosis (genome-wide) (PGS002312)',
+   '1,109,311 variants. AUROC 0.69. Weissbrod O et al., Nat Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002312', 'trait': 'Multiple sclerosis'})
+
+_t('pgs_ra_2745', 'PGS - Autoimmune / Inflammatory', 'Rheumatoid arthritis (PGS002745)',
+   '2,575 variants. AUROC 0.66. Ishigaki K et al., Nat Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS002745', 'trait': 'Rheumatoid arthritis'})
+
+_t('pgs_rheumatoid_4163', 'PGS - Autoimmune / Inflammatory', 'Rheumatoid arthritis (multi-ancestry) (PGS004163)',
+   '778,275 variants. AUROC 0.747, OR 2.46. Monti R et al., AJHG 2024 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS004163', 'trait': 'Rheumatoid arthritis'})
+
+_t('pgs_rheumatoid_4873', 'PGS - Autoimmune / Inflammatory', 'Rheumatoid arthritis (INTERVENE) (PGS004873)',
+   '551,074 variants. HR 1.87, C-index 0.65. Jermy B et al., Nat Commun 2024 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS004873', 'trait': 'Rheumatoid arthritis'})
+
+_t('pgs_sle_328', 'PGS - Autoimmune / Inflammatory', 'Lupus / SLE (PGS000328)',
+   '57 variants. AUROC 0.83, OR 12.32. Reid S et al., Ann Rheum Dis 2019',
+   'pgs_score', {'pgs_id': 'PGS000328', 'trait': 'Lupus (SLE)'})
+
+_t('pgs_lupus_4917', 'PGS - Autoimmune / Inflammatory', 'Lupus (SLE, multi) (PGS004917)',
+   '97 variants. AUROC 0.696, OR 2.01. Cui J et al., Arthritis Rheumatol 2020 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS004917', 'trait': 'Lupus (SLE, multi)'})
+
+_t('pgs_asthma_2311', 'PGS - Autoimmune / Inflammatory', 'Asthma (PGS002311)',
+   '1,109,311 variants. R2=0.024. Weissbrod O et al., Nat Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS002311', 'trait': 'Asthma'})
+
+_t('pgs_asthma_4877', 'PGS - Autoimmune / Inflammatory', 'Asthma (INTERVENE) (PGS004877)',
+   '870,454 variants. HR 1.42-1.48 (7 biobanks). Jermy B et al., Nat Commun 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004877', 'trait': 'Asthma'})
+
+_t('pgs_asthma_4723', 'PGS - Autoimmune / Inflammatory', 'Asthma (PRSmix) (PGS004723)',
+   '985,316 variants. Incr. R2=0.033. Truong B et al., Cell Genomics 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004723', 'trait': 'Asthma'})
+
+_t('pgs_asthma_4537', 'PGS - Autoimmune / Inflammatory', 'Asthma (metaPRS) (PGS004537)',
+   '1,059,939 variants. OR 1.40/SD. Jung H et al., Commun Biol 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004537', 'trait': 'Asthma'})
+
+_t('pgs_psoriasis_1312', 'PGS - Autoimmune / Inflammatory', 'Psoriasis (PGS001312)',
+   '204 variants. AUROC 0.70. Tanigawa Y et al., PLoS Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS001312', 'trait': 'Psoriasis'})
+
+_t('pgs_psoriasis_5309', 'PGS - Autoimmune / Inflammatory', 'Psoriasis (PGS005309)',
+   '513,461 variants. OR 1.49. Saklatvala JR et al., Genome Med 2025 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS005309', 'trait': 'Psoriasis'})
+
+_t('pgs_psoriatic_1287', 'PGS - Autoimmune / Inflammatory', 'Psoriatic arthropathy (PGS001287)',
+   '36 variants. AUROC 0.73. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS001287', 'trait': 'Psoriatic arthropathy'})
+
+_t('pgs_ankspon_1267', 'PGS - Autoimmune / Inflammatory', 'Ankylosing spondylitis (PGS001267)',
+   '10 variants. AUROC 0.85. Tanigawa Y et al., PLoS Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS001267', 'trait': 'Ankylosing spondylitis'})
+
+_t('pgs_graves_5265', 'PGS - Autoimmune / Inflammatory', 'Graves\' disease (PGS005265)',
+   '1,085,173 variants. AUROC 0.665, OR 1.63. White SL et al., medRxiv 2025 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS005265', 'trait': 'Graves\' disease'})
+
+_t('pgs_sjogrens_1308', 'PGS - Autoimmune / Inflammatory', 'Sjogren\'s syndrome (PGS001308)',
+   '7 variants. AUROC 0.80 (SAS), 0.77 (EUR). Tanigawa Y et al., PLoS Genet 2022 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS001308', 'trait': 'Sjogren\'s syndrome'})
+
+_t('pgs_atopic_4903', 'PGS - Autoimmune / Inflammatory', 'Atopic dermatitis (PGS004903)',
+   '38 variants. Significant in EUR. Al-Janabi A et al., JACI 2023 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004903', 'trait': 'Atopic dermatitis'})
+
+_t('pgs_aortic_1285', 'PGS - Autoimmune / Inflammatory', 'Allergic disease (hay fever, rhinitis, or eczema) (diagnosed by doctor) (PGS001285)',
+   '11,285 variants. AUROC 0.63. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS001285', 'trait': 'Allergic disease (hay fever, rhinitis, or eczema) (diagnosed by doctor)'})
+
+_t('pgs_hypertrophic_1284', 'PGS - Autoimmune / Inflammatory', 'Allergic disease (hay fever, allergic rhinitis, or eczema) (PGS001284)',
+   '4,236 variants. AUROC 0.61. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS001284', 'trait': 'Allergic disease (hay fever, allergic rhinitis, or eczema)'})
+
+_t('pgs_vitiligo_1290', 'PGS - Autoimmune / Inflammatory', 'Osteoarthritis (PGS001290)',
+   '3,672 variants. AUROC 0.72. Tanigawa Y et al., PLoS Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS001290', 'trait': 'Osteoarthritis'})
+
+
+# ── PGS - Neurological / Mental Health ──────────────────────────
+_t('pgs_alzheimer_4590', 'PGS - Neurological / Mental Health', 'Alzheimer\'s disease (PGS004590)',
+   '363 variants. AUROC 0.68 (excl APOE). Lake J et al., Mol Psychiatry 2023',
+   'pgs_score', {'pgs_id': 'PGS004590', 'trait': 'Alzheimer\'s disease'})
+
+_t('pgs_alzheimers_2280', 'PGS - Neurological / Mental Health', 'Alzheimer\'s disease (Bellenguez) (PGS002280)',
+   '83 variants. HR 1.93 (top vs bottom decile). Bellenguez C et al., Nat Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002280', 'trait': 'Alzheimer\'s disease'})
+
+_t('pgs_alzheimers_4092', 'PGS - Neurological / Mental Health', 'Alzheimer\'s disease (genome-wide) (PGS004092)',
+   '1,109,233 variants. AUROC 0.665, OR 1.78/SD. Monti R et al., AJHG 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004092', 'trait': 'Alzheimer\'s disease'})
+
+_t('pgs_alzheimers_4863', 'PGS - Neurological / Mental Health', 'Alzheimer\'s disease (multi-ancestry) (PGS004863)',
+   '74 variants. AUROC 0.746 (EUR), 0.751 (EAS). Sleiman PM et al., Alzheimers Dement 2023 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS004863', 'trait': 'Alzheimer\'s disease'})
+
+_t('pgs_alzheimers_334', 'PGS - Neurological / Mental Health', 'Alzheimer\'s disease (incl APOE) (PGS000334)',
+   '21 variants. AUROC 0.83. Desikan RS et al., PLoS Med 2017 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000334', 'trait': 'Alzheimer\'s disease'})
+
+_t('pgs_alzheimers_25', 'PGS - Neurological / Mental Health', 'Alzheimer\'s disease (GPS) (PGS000025)',
+   '6,630,150 variants. AUROC 0.75. Khera AV et al., Nat Genet 2018 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000025', 'trait': 'Alzheimer\'s disease'})
+
+_t('pgs_parkinson_903', 'PGS - Neurological / Mental Health', 'Parkinson\'s disease (PGS000903)',
+   '1,805 variants. AUROC 0.692, OR 6.25. Nalls MA et al., Lancet Neurol 2019',
+   'pgs_score', {'pgs_id': 'PGS000903', 'trait': 'Parkinson\'s disease'})
+
+_t('pgs_parkinsons_3763', 'PGS - Neurological / Mental Health', 'Parkinson\'s disease (JAMA Neurol) (PGS003763)',
+   '44 variants. HR 1.72, HR 3.22 (w/ frailty). Zheng Z et al., JAMA Neurol 2023 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS003763', 'trait': 'Parkinson\'s disease'})
+
+_t('pgs_parkinsons_2940', 'PGS - Neurological / Mental Health', 'Parkinson\'s disease (genome-wide) (PGS002940)',
+   '1,805 variants. AUROC 0.72. Kim JJ et al., Genome Med 2023 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002940', 'trait': 'Parkinson\'s disease'})
+
+_t('pgs_schiz_135', 'PGS - Neurological / Mental Health', 'Schizophrenia (PGS000135)',
+   '972,439 variants. AUROC 0.74. Zheutlin AB et al., Am J Psychiatry 2019',
+   'pgs_score', {'pgs_id': 'PGS000135', 'trait': 'Schizophrenia'})
+
+_t('pgs_depression_3333', 'PGS - Neurological / Mental Health', 'Major depression (PGS003333)',
+   '1,088,415 variants. R2=0.022. Fang Y et al., Biol Psychiatry 2022',
+   'pgs_score', {'pgs_id': 'PGS003333', 'trait': 'Major depression'})
+
+_t('pgs_major_4760', 'PGS - Neurological / Mental Health', 'Major depression (PRSmixPlus) (PGS004760)',
+   '2,141,267 variants. Incr. R2=0.024. Truong B et al., Cell Genomics 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004760', 'trait': 'Major depression'})
+
+_t('pgs_major_4885', 'PGS - Neurological / Mental Health', 'Major depression (INTERVENE) (PGS004885)',
+   '801,544 variants. HR 1.24/SD, C-index 0.58. Jermy B et al., Nat Commun 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004885', 'trait': 'Major depression'})
+
+_t('pgs_bipolar_2787', 'PGS - Neurological / Mental Health', 'Bipolar disorder (PGS002787)',
+   '937,511 variants. Gui Y et al., Transl Psychiatry 2022',
+   'pgs_score', {'pgs_id': 'PGS002787', 'trait': 'Bipolar disorder'})
+
+_t('pgs_adhd_2746', 'PGS - Neurological / Mental Health', 'ADHD (PGS002746)',
+   '513,659 variants. beta=0.11. Lahey BB et al., J Psychiatr Res 2022',
+   'pgs_score', {'pgs_id': 'PGS002746', 'trait': 'ADHD'})
+
+_t('pgs_adhd_3753', 'PGS - Neurological / Mental Health', 'ADHD (Latin Am eval) (PGS003753)',
+   '35,445 variants. Validated in Brazilian. Sato JR et al., Genes Brain Behav 2023 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS003753', 'trait': 'ADHD (Latin Am eval)'})
+
+_t('pgs_autism_327', 'PGS - Neurological / Mental Health', 'Autism spectrum (PGS000327)',
+   '35,087 variants. OR 1.33, R2=0.025. Grove J et al., Nat Genet 2019',
+   'pgs_score', {'pgs_id': 'PGS000327', 'trait': 'Autism spectrum'})
+
+_t('pgs_autism_2790', 'PGS - Neurological / Mental Health', 'Autism spectrum (PGS002790)',
+   '916,713 variants. R2=0.005. Gui Y et al., Transl Psychiatry 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002790', 'trait': 'Autism spectrum'})
+
+_t('pgs_epilepsy_4881', 'PGS - Neurological / Mental Health', 'Epilepsy (PGS004881)',
+   '605,432 variants. HR 1.12/SD. Jermy B et al., Nat Commun 2024',
+   'pgs_score', {'pgs_id': 'PGS004881', 'trait': 'Epilepsy'})
+
+_t('pgs_addiction_3849', 'PGS - Neurological / Mental Health', 'Addiction risk (multi-substance) (PGS003849)',
+   '584,753 variants. OR 1.73 (opioid), 1.57 (alcohol). Hatoum AS et al., Nat Ment Health 2023 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS003849', 'trait': 'Addiction risk (multi-substance)'})
+
+_t('pgs_anxiety_4451', 'PGS - Neurological / Mental Health', 'Anxiety (PGS004451)',
+   '1,059,939 variants. OR 1.19/SD. Jung H et al., Commun Biol 2024 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004451', 'trait': 'Anxiety'})
+
+_t('pgs_ptsd_5393', 'PGS - Neurological / Mental Health', 'PTSD (PGS005393)',
+   '53,705 variants. R2=0.087. Bugiga AVG et al., Braz J Psychiatry 2024 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS005393', 'trait': 'PTSD'})
+
+_t('pgs_migraine_4798', 'PGS - Neurological / Mental Health', 'Migraine (PGS004798)',
+   '3,984,158 variants. R2=0.004. Truong B et al., Cell Genomics 2024 (SAS)',
+   'pgs_score', {'pgs_id': 'PGS004798', 'trait': 'Migraine'})
+
+_t('pgs_neuroticism_3565', 'PGS - Neurological / Mental Health', 'Neuroticism (PGS003565)',
+   '979,739 variants. R2=0.05. Ding Y et al., bioRxiv 2022',
+   'pgs_score', {'pgs_id': 'PGS003565', 'trait': 'Neuroticism'})
+
+
+# ── PGS - Renal / Urinary ───────────────────────────────────────
+_t('pgs_ckd_4889', 'PGS - Renal / Urinary', 'CKD (PGS004889)',
+   '1,117,375 variants. HR 1.33, C-index 0.727. Mandla R et al., Genome Med 2024',
+   'pgs_score', {'pgs_id': 'PGS004889', 'trait': 'Chronic kidney disease'})
+
+_t('pgs_kidney_4493', 'PGS - Renal / Urinary', 'Kidney stones (PGS004493)',
+   '1,059,939 variants. OR 1.23/SD. Jung H et al., Commun Biol 2024',
+   'pgs_score', {'pgs_id': 'PGS004493', 'trait': 'Kidney stones'})
+
+
+# ── PGS - Eye / Vision ──────────────────────────────────────────
+_t('pgs_amd_4606', 'PGS - Eye / Vision', 'AMD (PGS004606)',
+   '1,000,946 variants. OR 1.76, AUROC 0.71. Gorman BR et al., Nat Genet 2024',
+   'pgs_score', {'pgs_id': 'PGS004606', 'trait': 'Age-related macular degeneration'})
+
+_t('pgs_glaucoma_1797', 'PGS - Eye / Vision', 'Glaucoma (PGS001797)',
+   '885,417 variants. AUROC 0.749. Wang Y et al., Cell Genomics 2023',
+   'pgs_score', {'pgs_id': 'PGS001797', 'trait': 'Glaucoma'})
+
+_t('pgs_myopia_3564', 'PGS - Eye / Vision', 'Myopia (PGS003564)',
+   '979,739 variants. R2=0.06. Ding Y et al., bioRxiv 2022',
+   'pgs_score', {'pgs_id': 'PGS003564', 'trait': 'Myopia'})
+
+
+# ── PGS - Cognitive & Educational ───────────────────────────────
+_t('pgs_atrial_3724', 'PGS - Cognitive & Educational', 'Intelligence quotient (multi-ancestry) (PGS003724)',
+   '1,296,172 variants. HR 1.60. Patel AP et al., Nat Med 2023 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS003724', 'trait': 'Intelligence quotient'})
+
+_t('pgs_intelligence_3724', 'PGS - Cognitive & Educational', 'Intelligence / Cognitive Ability (IQ) (PGS003724)',
+   '6,680,000 variants. R2=0.12. Hatoum AS et al., Nat Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS003724', 'trait': 'Intelligence / Cognitive Ability'})
+
+_t('pgs_intelligence_3723', 'PGS - Cognitive & Educational', 'Intelligence / Cognitive Ability (cognitive performance / cEF) (PGS003723)',
+   '6,680,000 variants. R2=0.11. Hatoum AS et al., Nat Genet 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS003723', 'trait': 'Intelligence / Cognitive Ability'})
+
+_t('pgs_intelligence_3510', 'PGS - Cognitive & Educational', 'Intelligence / Cognitive Ability (verbal-numerical reasoning) (PGS003510)',
+   '979,739 variants. R2=0.15. Ding Y et al., bioRxiv 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS003510', 'trait': 'Intelligence / Cognitive Ability'})
+
+_t('pgs_iq_4427', 'PGS - Cognitive & Educational', 'Fluid intelligence (PGS004427)',
+   '1,059,939 variants. R2=0.223 (EUR). Jung H et al., Commun Biol 2024',
+   'pgs_score', {'pgs_id': 'PGS004427', 'trait': 'Fluid intelligence'})
+
+_t('custom_pgs001232', 'PGS - Cognitive & Educational', 'Fluid intelligence score (PGS001232)',
+   '10,055 variants. Tanigawa Y et al., 2022. PLoS Genet',
+   'pgs_score', {'pgs_id': 'PGS001232', 'trait': 'Fluid intelligence score'})
+
+_t('custom_pgs001919', 'PGS - Cognitive & Educational', 'Fluid intelligence score (PGS001919)',
+   '26,145 variants. Privé F et al., 2022. Am J Hum Genet',
+   'pgs_score', {'pgs_id': 'PGS001919', 'trait': 'Fluid intelligence score'})
+
+_t('custom_pgs002135', 'PGS - Cognitive & Educational', 'Fluid intelligence score (PGS002135)',
+   '903,259 variants. Privé F et al., 2022. Am J Hum Genet',
+   'pgs_score', {'pgs_id': 'PGS002135', 'trait': 'Fluid intelligence score'})
+
+_t('pgs_edu_2012', 'PGS - Cognitive & Educational', 'Educational attainment (PGS002012)',
+   '50,413 variants. r=0.175. Prive F et al., AJHG 2022',
+   'pgs_score', {'pgs_id': 'PGS002012', 'trait': 'Educational attainment'})
+
+_t('custom_pgs002231', 'PGS - Cognitive & Educational', 'Qualifications (years of education) (PGS002231)',
+   '950,845 variants. Privé F et al., 2022. Am J Hum Genet',
+   'pgs_score', {'pgs_id': 'PGS002231', 'trait': 'Qualifications (years of education)'})
+
+_t('custom_pgs003573', 'PGS - Cognitive & Educational', 'Qualifications (years of education) (PGS003573)',
+   '979,739 variants. Ding Y et al., 2022. bioRxiv',
+   'pgs_score', {'pgs_id': 'PGS003573', 'trait': 'Qualifications (years of education)'})
+
+_t('custom_pgs002319', 'PGS - Cognitive & Educational', 'College education (PGS002319)',
+   '1,109,311 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002319', 'trait': 'College education'})
+
+_t('custom_pgs002391', 'PGS - Cognitive & Educational', 'College education (PGS002391)',
+   '6,535 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002391', 'trait': 'College education'})
+
+_t('custom_pgs002440', 'PGS - Cognitive & Educational', 'College education (PGS002440)',
+   '24,405 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002440', 'trait': 'College education'})
+
+_t('custom_pgs002489', 'PGS - Cognitive & Educational', 'College education (PGS002489)',
+   '126,911 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002489', 'trait': 'College education'})
+
+_t('custom_pgs002538', 'PGS - Cognitive & Educational', 'College education (PGS002538)',
+   '1,136 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002538', 'trait': 'College education'})
+
+_t('custom_pgs002587', 'PGS - Cognitive & Educational', 'College education (PGS002587)',
+   '514 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002587', 'trait': 'College education'})
+
+_t('custom_pgs002636', 'PGS - Cognitive & Educational', 'College education (PGS002636)',
+   '577,448 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002636', 'trait': 'College education'})
+
+_t('custom_pgs002685', 'PGS - Cognitive & Educational', 'College education (PGS002685)',
+   '980,529 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002685', 'trait': 'College education'})
+
+_t('custom_pgs001931', 'PGS - Cognitive & Educational', 'Average total household income before tax (PGS001931)',
+   '41,836 variants. Privé F et al., 2022. Am J Hum Genet',
+   'pgs_score', {'pgs_id': 'PGS001931', 'trait': 'Average total household income before tax'})
+
+_t('custom_pgs002148', 'PGS - Cognitive & Educational', 'Average total household income before tax (PGS002148)',
+   '932,197 variants. Privé F et al., 2022. Am J Hum Genet',
+   'pgs_score', {'pgs_id': 'PGS002148', 'trait': 'Average total household income before tax'})
+
+_t('custom_pgs003516', 'PGS - Cognitive & Educational', 'Average total household income before tax (PGS003516)',
+   '979,739 variants. Ding Y et al., 2022. bioRxiv',
+   'pgs_score', {'pgs_id': 'PGS003516', 'trait': 'Average total household income before tax'})
+
+
+# ── PGS - Physical Traits ───────────────────────────────────────
+_t('pgs_height_1229', 'PGS - Physical Traits', 'Height (PGS001229)',
+   '51,209 variants. R2=0.717. Tanigawa Y et al., PLoS Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS001229', 'trait': 'Height'})
+
+_t('pgs_height_4214', 'PGS - Physical Traits', 'Height (LASSO) (PGS004214)',
+   '23,686 variants. R2=0.712 (sibling-validated). Raben TG et al., Sci Rep 2023 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS004214', 'trait': 'Height'})
+
+_t('custom_pgs000297', 'PGS - Physical Traits', 'Height (PGS000297)',
+   '3,290 variants. Xie T et al., 2020. Circ Genom Precis Med',
+   'pgs_score', {'pgs_id': 'PGS000297', 'trait': 'Height'})
+
+_t('custom_pgs000758', 'PGS - Physical Traits', 'Adult standing height (PGS000758)',
+   '33,938 variants. Lu T et al., 2021. J Clin Endocrinol Metab',
+   'pgs_score', {'pgs_id': 'PGS000758', 'trait': 'Adult standing height'})
+
+_t('custom_pgs001405', 'PGS - Physical Traits', 'Height (PGS001405)',
+   '3,166 variants. Tanigawa Y et al., 2022. PLoS Genet',
+   'pgs_score', {'pgs_id': 'PGS001405', 'trait': 'Height'})
+
+_t('custom_pgs001929', 'PGS - Physical Traits', 'Standing height (PGS001929)',
+   '156,514 variants. Privé F et al., 2022. Am J Hum Genet',
+   'pgs_score', {'pgs_id': 'PGS001929', 'trait': 'Standing height'})
+
+_t('custom_pgs002146', 'PGS - Physical Traits', 'Standing height (PGS002146)',
+   '922,538 variants. Privé F et al., 2022. Am J Hum Genet',
+   'pgs_score', {'pgs_id': 'PGS002146', 'trait': 'Standing height'})
+
+_t('custom_pgs002332', 'PGS - Physical Traits', 'Height (PGS002332)',
+   '1,109,311 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002332', 'trait': 'Height'})
+
+_t('custom_pgs002368', 'PGS - Physical Traits', 'Height (PGS002368)',
+   '920,927 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002368', 'trait': 'Height'})
+
+_t('custom_pgs002404', 'PGS - Physical Traits', 'Height (PGS002404)',
+   '56,984 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002404', 'trait': 'Height'})
+
+_t('custom_pgs002453', 'PGS - Physical Traits', 'Height (PGS002453)',
+   '103,911 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002453', 'trait': 'Height'})
+
+_t('custom_pgs002600', 'PGS - Physical Traits', 'Height (PGS002600)',
+   '18,937 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002600', 'trait': 'Height'})
+
+_t('custom_pgs002502', 'PGS - Physical Traits', 'Height (PGS002502)',
+   '262,080 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002502', 'trait': 'Height'})
+
+_t('custom_pgs002551', 'PGS - Physical Traits', 'Height (PGS002551)',
+   '27,070 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002551', 'trait': 'Height'})
+
+_t('custom_pgs002649', 'PGS - Physical Traits', 'Height (PGS002649)',
+   '478,839 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002649', 'trait': 'Height'})
+
+_t('custom_pgs002698', 'PGS - Physical Traits', 'Height (PGS002698)',
+   '986,966 variants. Weissbrod O et al., 2022. Nat Genet',
+   'pgs_score', {'pgs_id': 'PGS002698', 'trait': 'Height'})
+
+_t('custom_pgs002748', 'PGS - Physical Traits', 'Height (PGS002748)',
+   '251 variants. Chiou JS et al., 2022. BMC Med',
+   'pgs_score', {'pgs_id': 'PGS002748', 'trait': 'Height'})
+
+_t('custom_pgs002800', 'PGS - Physical Traits', 'Height (PGS002800)',
+   '1,156,741 variants. Yengo L et al., 2022. Nature',
+   'pgs_score', {'pgs_id': 'PGS002800', 'trait': 'Height'})
+
+_t('custom_pgs002802', 'PGS - Physical Traits', 'Height (PGS002802)',
+   '1,103,042 variants. Yengo L et al., 2022. Nature',
+   'pgs_score', {'pgs_id': 'PGS002802', 'trait': 'Height'})
+
+_t('custom_pgs002801', 'PGS - Physical Traits', 'Height (PGS002801)',
+   '975,455 variants. Yengo L et al., 2022. Nature',
+   'pgs_score', {'pgs_id': 'PGS002801', 'trait': 'Height'})
+
+_t('custom_pgs002803', 'PGS - Physical Traits', 'Height (PGS002803)',
+   '990,792 variants. Yengo L et al., 2022. Nature',
+   'pgs_score', {'pgs_id': 'PGS002803', 'trait': 'Height'})
+
+_t('pgs_hair_2598', 'PGS - Physical Traits', 'Hair color (PGS002598)',
+   '8,312 variants. R2=0.182. Weissbrod O et al., Nat Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS002598', 'trait': 'Hair color'})
+
+_t('pgs_skin_1897', 'PGS - Physical Traits', 'Skin pigmentation (PGS001897)',
+   '15,817 variants. r=0.387. Prive F et al., AJHG 2022',
+   'pgs_score', {'pgs_id': 'PGS001897', 'trait': 'Skin pigmentation'})
+
+_t('pgs_baldness_2314', 'PGS - Physical Traits', 'Male pattern baldness (PGS002314)',
+   '1,109,311 variants. R2=0.143. Weissbrod O et al., Nat Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS002314', 'trait': 'Male pattern baldness'})
+
+_t('pgs_bodyfat_3899', 'PGS - Physical Traits', 'Body fat % (PGS003899)',
+   '34,374 variants. R2=0.056. Tanigawa Y et al., AJHG 2023',
+   'pgs_score', {'pgs_id': 'PGS003899', 'trait': 'Body fat %'})
+
+_t('pgs_grip_1162', 'PGS - Physical Traits', 'Hip circumference (PGS001162)',
+   '10,872 variants. R2=0.033. Tanigawa Y et al., PLoS Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS001162', 'trait': 'Hip circumference'})
+
+_t('pgs_age_1183', 'PGS - Physical Traits', 'Age at menarche (PGS001183)',
+   '25,172 variants. R2=0.10. Tanigawa Y et al., PLoS Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS001183', 'trait': 'Age at menarche'})
+
+_t('pgs_hearing_762', 'PGS - Physical Traits', 'Hearing difficulty (PGS000762)',
+   '100,325 variants. R2=0.091. Cherny SS et al., EJHG 2020',
+   'pgs_score', {'pgs_id': 'PGS000762', 'trait': 'Hearing difficulty'})
+
+
+# ── PGS - Lifestyle / Behavioral ────────────────────────────────
+_t('pgs_coffee_1123', 'PGS - Lifestyle / Behavioral', 'Coffee consumption (PGS001123)',
+   '48 variants. AUROC 0.617. Tanigawa Y et al., PLoS Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS001123', 'trait': 'Coffee consumption'})
+
+_t('pgs_alcohol_5213', 'PGS - Lifestyle / Behavioral', 'Alcohol use disorder (PGS005213)',
+   '336,813 variants. R2=0.05. Deng WQ et al., Alcohol Alcoholism 2024',
+   'pgs_score', {'pgs_id': 'PGS005213', 'trait': 'Alcohol use disorder'})
+
+_t('pgs_smoking_3357', 'PGS - Lifestyle / Behavioral', 'Smoking initiation (PGS003357)',
+   '1,194,472 variants. dAUC=0.015. Saunders GRB et al., Nature 2022',
+   'pgs_score', {'pgs_id': 'PGS003357', 'trait': 'Smoking initiation'})
+
+_t('pgs_telomere_2616', 'PGS - Lifestyle / Behavioral', 'Smoking status (PGS002616)',
+   '1,103,034 variants. R2=0.024. Weissbrod O et al., Nat Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS002616', 'trait': 'Smoking status'})
+
+_t('pgs_insomnia_908', 'PGS - Lifestyle / Behavioral', 'Insomnia (PGS000908)',
+   '2,746,982 variants. OR 1.12-1.28. Campos AI et al., Commun Med 2021',
+   'pgs_score', {'pgs_id': 'PGS000908', 'trait': 'Insomnia'})
+
+_t('pgs_chronotype_2318', 'PGS - Lifestyle / Behavioral', 'Chronotype (morn/eve) (PGS002318)',
+   '1,109,311 variants. Incr. R2=0.036 (EUR). Weissbrod O et al., Nat Genet 2022',
+   'pgs_score', {'pgs_id': 'PGS002318', 'trait': 'Chronotype (morn/eve)'})
+
+_t('pgs_risk_205', 'PGS - Lifestyle / Behavioral', 'Risk tolerance (PGS000205)',
+   '1,110,737 variants. dR2=0.016. Barr PB et al., Transl Psychiatry 2020',
+   'pgs_score', {'pgs_id': 'PGS000205', 'trait': 'Risk tolerance'})
+
+_t('pgs_hepatocellular_2254', 'PGS - Lifestyle / Behavioral', 'Physical activity (self-reported) (PGS002254)',
+   '8 variants. HR 1.33. Sarin SK et al., Hepatology 2022 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS002254', 'trait': 'Physical activity (self-reported)'})
+
+_t('pgs_longevity_906', 'PGS - Lifestyle / Behavioral', 'Longevity (PGS000906)',
+   '330 variants. HR 0.89/SD. Testi N et al., J Gerontol 2021',
+   'pgs_score', {'pgs_id': 'PGS000906', 'trait': 'Longevity'})
 
 # ── Monogenic ───────────────────────────────────────────────────
 _t('mono_cancer', 'Monogenic', 'Cancer predisposition genes (ACMG SF v3.3)',
@@ -1388,3 +1539,32 @@ for t in TESTS:
     if t["category"] not in _seen:
         CATEGORIES.append(t["category"])
         _seen.add(t["category"])
+
+# ── Curated Short List ──────────────────────────────────────────
+# Hand-picked subset of high-value tests shown in a dedicated tab.
+CURATED_IDS = {
+    # Cancer
+    'pgs_breast_4153', 'pgs_prostate_662', 'pgs_colorectal_3979',
+    'pgs_lung_078', 'pgs_pancreatic_794', 'pgs_melanoma_743',
+    # Cardiovascular
+    'pgs_coronary_5091', 'pgs_atrial_5168', 'pgs_hf_5097',
+    'pgs_stroke_2724', 'pgs_vte_043', 'pgs_aortic_3429', 'pgs_coronary_2297',
+    # Metabolic / Endocrine
+    'pgs_t2d_2308', 'pgs_type_4874', 'pgs_ldl_2337',
+    'pgs_bmi_5198', 'pgs_celiac_040', 'pgs_bmd_2632',
+    # Autoimmune / Inflammatory
+    'pgs_ibd_4151', 'pgs_multiple_2726', 'pgs_rheumatoid_4163', 'pgs_asthma_4877',
+    # Neurological / Mental Health
+    'pgs_alzheimers_334', 'pgs_parkinsons_2940', 'pgs_schiz_135',
+    'pgs_depression_3333', 'pgs_adhd_2746', 'pgs_autism_327', 'pgs_addiction_3849',
+    # Renal / Urinary
+    'pgs_ckd_4889',
+    # Eye / Vision
+    'pgs_glaucoma_1797', 'pgs_amd_4606',
+    # Cognitive & Educational
+    'pgs_edu_2012', 'pgs_intelligence_3723',
+    # Lifestyle / Behavioral
+    'pgs_longevity_906',
+    # Validation (one each)
+    'sex_xy_ratio', 'ancestry_pca',
+}

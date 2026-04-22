@@ -35,7 +35,7 @@ from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException, Dep
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse, RedirectResponse
 import uvicorn
 
-from test_registry import TESTS, TESTS_BY_ID, CATEGORIES
+from test_registry import TESTS, TESTS_BY_ID, CATEGORIES, CURATED_IDS
 from runners import run_test
 
 from google import genai
@@ -224,6 +224,10 @@ except Exception as _ge:
 
 # Rate-limit concurrent Gemini calls to avoid 429 RESOURCE_EXHAUSTED
 _gemini_semaphore = Semaphore(2)  # max 2 concurrent LLM calls
+
+# Pipeline E+ (BAM/CRAM pileup) uses ~23 parallel processes per test.
+# Limit to 1 concurrent BAM/CRAM test to avoid crashing the system.
+_bam_cram_semaphore = Semaphore(1)
 
 # Fallback Anthropic API key for when Gemini hits rate limits
 _FALLBACK_ANTHROPIC_KEY = os.getenv("FALLBACK_ANTHROPIC_KEY", "")
@@ -652,6 +656,328 @@ def _register_file(username, path, source, name=None, select=True):
 
 
 
+
+
+# ── Profile system ────────────────────────────────────────────────
+# Profiles group multiple files (VCF, gVCF, BAM, CRAM) belonging to
+# the same person. Auto-selection picks the best file per pipeline.
+
+# Category-level file preference (keys = test category, lowercase).
+# For PGS: gVCF first — reference-confidence blocks yield 85-95% match
+# vs 60-80% for filtered VCFs.
+# For sex/carrier/pharma/monogenic: BAM first — needs read-level or
+# complex variant calling that BAM/CRAM handles better.
+FILE_PREFERENCE_BY_CATEGORY = {
+    # PGS categories — gVCF preferred for higher match rates
+    "pgs":              ["gvcf", "vcf", "bam", "cram"],
+    # Variant-based categories — gVCF/VCF preferred
+    "single variants":  ["gvcf", "vcf", "bam", "cram"],
+    "sample qc":        ["gvcf", "vcf", "bam", "cram"],
+    "fun traits":       ["gvcf", "vcf", "bam", "cram"],
+    "nutrigenomics":    ["gvcf", "vcf", "bam", "cram"],
+    "sleep & circadian":["gvcf", "vcf", "bam", "cram"],
+    "sports & fitness": ["gvcf", "vcf", "bam", "cram"],
+    # BAM-preferred categories — need read-level analysis
+    "sex check":        ["bam", "cram", "gvcf", "vcf"],
+    "carrier status":   ["bam", "cram", "gvcf", "vcf"],
+    "pharmacogenomics": ["bam", "cram", "gvcf", "vcf"],
+    "monogenic":        ["bam", "cram", "gvcf", "vcf"],
+    "ancestry":         ["bam", "cram", "gvcf", "vcf"],
+}
+# Runner-level overrides for tests that ONLY work with BAM/CRAM
+FILE_PREFERENCE_BY_RUNNER = {
+    "expansion_hunter": ["bam", "cram"],
+    "str_analysis":     ["bam", "cram"],
+    "cyp2d6":           ["bam", "cram"],
+    "t1k_hla":          ["bam", "cram"],
+    "coverage":         ["bam", "cram"],
+    "ancestry_mt_haplo":["bam", "cram"],
+    "ancestry_y_haplo": ["bam", "cram"],
+    "ancestry_hla":     ["bam", "cram"],
+    "sex_y_reads":      ["bam", "cram"],
+    "sex_sry":          ["bam", "cram"],
+}
+FILE_PREFERENCE_DEFAULT = ["gvcf", "vcf", "bam", "cram"]
+MATCH_RATE_FALLBACK_THRESHOLD = 60
+MATCH_RATE_WARNING_THRESHOLD = 85
+
+
+def _normalize_file_type(path_or_name):
+    """Return canonical file type: 'gvcf', 'vcf', 'bam', 'cram' or ''."""
+    p = (path_or_name or "").lower()
+    if p.endswith(('.g.vcf.gz', '.gvcf.gz', '.gvcf')):
+        return "gvcf"
+    elif p.endswith(('.vcf.gz', '.vcf', '.bcf')):
+        return "vcf"
+    elif p.endswith('.bam'):
+        return "bam"
+    elif p.endswith('.cram'):
+        return "cram"
+    return ""
+
+
+def _profiles_path(username):
+    return user_dir(username) / "profiles.json"
+
+
+def _load_profiles(username):
+    """Load profile data for a user, returning default structure if none."""
+    pp = _profiles_path(username)
+    if pp.exists():
+        try:
+            return json.loads(pp.read_text())
+        except Exception as e:
+            logger.error(f"Failed to load profiles for {username}: {e}")
+    return {"profiles": {}, "file_to_profile": {}, "ungrouped_files": []}
+
+
+def _save_profiles(username, data):
+    """Atomically save profile data."""
+    pp = _profiles_path(username)
+    tmp = pp.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2))
+        tmp.replace(pp)
+    except Exception as e:
+        logger.error(f"Failed to save profiles for {username}: {e}")
+
+
+def _create_profile(username, name, file_ids=None):
+    """Create a new profile and optionally assign files to it."""
+    data = _load_profiles(username)
+    prof_id = f"prof_{uuid.uuid4().hex[:10]}"
+    profile = {
+        "id": prof_id,
+        "name": name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "file_ids": [],
+        "preferred_file": {"vcf": None, "bam": None, "gvcf": None, "cram": None},
+        "notes": "",
+    }
+    data["profiles"][prof_id] = profile
+    if file_ids:
+        for fid in file_ids:
+            _assign_file_to_profile(data, prof_id, fid, username)
+    _save_profiles(username, data)
+    return profile
+
+
+def _assign_file_to_profile(profiles_data, prof_id, file_id, username):
+    """Add a file to a profile. Auto-sets preferred if first of its type."""
+    prof = profiles_data["profiles"].get(prof_id)
+    if not prof:
+        return
+    if file_id in prof["file_ids"]:
+        return
+    # Remove from old profile / ungrouped
+    old_prof_id = profiles_data["file_to_profile"].get(file_id)
+    if old_prof_id and old_prof_id in profiles_data["profiles"]:
+        old_prof = profiles_data["profiles"][old_prof_id]
+        if file_id in old_prof["file_ids"]:
+            old_prof["file_ids"].remove(file_id)
+        # Clear preferred if it pointed to this file
+        for ft, fid in list(old_prof["preferred_file"].items()):
+            if fid == file_id:
+                old_prof["preferred_file"][ft] = None
+    if file_id in profiles_data.get("ungrouped_files", []):
+        profiles_data["ungrouped_files"].remove(file_id)
+
+    prof["file_ids"].append(file_id)
+    profiles_data["file_to_profile"][file_id] = prof_id
+
+    # Auto-set preferred if first of type
+    ctx = get_user_state(username)
+    with ctx.lock:
+        fentry = ctx.files_state["files"].get(file_id)
+    if fentry:
+        ft = _normalize_file_type(fentry.get("path", ""))
+        if ft and not prof["preferred_file"].get(ft):
+            prof["preferred_file"][ft] = file_id
+
+
+def _unassign_file_from_profile(profiles_data, file_id):
+    """Remove a file from its profile back to ungrouped."""
+    prof_id = profiles_data["file_to_profile"].get(file_id)
+    if prof_id and prof_id in profiles_data["profiles"]:
+        prof = profiles_data["profiles"][prof_id]
+        if file_id in prof["file_ids"]:
+            prof["file_ids"].remove(file_id)
+        for ft, fid in list(prof["preferred_file"].items()):
+            if fid == file_id:
+                prof["preferred_file"][ft] = None
+    profiles_data["file_to_profile"].pop(file_id, None)
+    if file_id not in profiles_data.get("ungrouped_files", []):
+        profiles_data["ungrouped_files"].append(file_id)
+
+
+def _auto_assign_profile(username, file_id, file_entry):
+    """On upload, match by sample_name to existing profiles. Returns profile_id or None."""
+    sample = file_entry.get("sample_name") or ""
+    if not sample:
+        # Try to extract from filename
+        name = file_entry.get("name", "")
+        sample = _extract_sample_from_filename(name)
+    if not sample:
+        return None
+
+    data = _load_profiles(username)
+    sample_lower = sample.lower().strip()
+    for prof_id, prof in data["profiles"].items():
+        if prof["name"].lower().strip() == sample_lower:
+            _assign_file_to_profile(data, prof_id, file_id, username)
+            _save_profiles(username, data)
+            return prof_id
+    return None
+
+
+def _extract_sample_from_filename(name):
+    """Strip extensions to get sample name: 'Nimo.g.vcf.gz' -> 'Nimo'."""
+    if not name:
+        return ""
+    s = name
+    # Strip compound extensions
+    for ext in ['.g.vcf.gz', '.gvcf.gz', '.vcf.gz', '.g.vcf', '.gvcf',
+                '.vcf', '.bcf', '.bam', '.cram', '.gz']:
+        if s.lower().endswith(ext):
+            s = s[:len(s) - len(ext)]
+            break
+    return s.strip()
+
+
+def _migrate_to_profiles(username):
+    """Lazy migration: group existing files by sample_name into profiles."""
+    data = _load_profiles(username)
+    if data["profiles"] or data["ungrouped_files"]:
+        return data  # Already migrated
+
+    ctx = get_user_state(username)
+    with ctx.lock:
+        all_files = dict(ctx.files_state["files"])
+    if not all_files:
+        return data
+
+    # Group by sample name
+    groups = {}  # sample_name -> [file_id]
+    no_name = []
+    for fid, fentry in all_files.items():
+        sample = fentry.get("sample_name") or ""
+        if not sample:
+            sample = _extract_sample_from_filename(fentry.get("name", ""))
+        if sample:
+            groups.setdefault(sample, []).append(fid)
+        else:
+            no_name.append(fid)
+
+    # Create profiles for each sample group
+    for sample_name, fids in groups.items():
+        prof_id = f"prof_{uuid.uuid4().hex[:10]}"
+        profile = {
+            "id": prof_id,
+            "name": sample_name,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "file_ids": [],
+            "preferred_file": {"vcf": None, "bam": None, "gvcf": None, "cram": None},
+            "notes": "",
+        }
+        data["profiles"][prof_id] = profile
+        for fid in fids:
+            _assign_file_to_profile(data, prof_id, fid, username)
+
+    data["ungrouped_files"] = no_name
+    _save_profiles(username, data)
+    logger.info(f"Migrated {username}: {len(data['profiles'])} profiles, {len(no_name)} ungrouped")
+    return data
+
+
+def _select_best_file(username, profile_id, test_key, test_cfg=None, exclude_file_ids=None):
+    """Auto-select the best file from a profile for a given test.
+    Returns (file_id, file_path, file_type, selection_reason) or (None, None, None, reason).
+    """
+    data = _load_profiles(username)
+    prof = data["profiles"].get(profile_id)
+    if not prof:
+        return (None, None, None, "Profile not found")
+
+    ctx = get_user_state(username)
+    exclude = set(exclude_file_ids or [])
+
+    # Determine file preference order:
+    # 1. Check runner-level overrides (BAM-only tools like expansion_hunter)
+    # 2. Check category-level preference
+    # 3. Fall back to default (gvcf first)
+    runner = test_key
+    category = ""
+    if test_cfg:
+        runner = test_cfg.get("runner", test_key)
+        category = (test_cfg.get("category", "") or "").lower()
+
+    pref_order = None
+    # Runner-level override (highest priority)
+    if runner in FILE_PREFERENCE_BY_RUNNER:
+        pref_order = FILE_PREFERENCE_BY_RUNNER[runner]
+    else:
+        # Category-level lookup — check exact match, then prefix match for PGS
+        if category in FILE_PREFERENCE_BY_CATEGORY:
+            pref_order = FILE_PREFERENCE_BY_CATEGORY[category]
+        elif category.startswith("pgs"):
+            pref_order = FILE_PREFERENCE_BY_CATEGORY["pgs"]
+    if not pref_order:
+        pref_order = FILE_PREFERENCE_DEFAULT
+
+    # Build map of file_type -> [(file_id, file_path)]
+    type_map = {}  # e.g. "gvcf" -> [(fid, path), ...]
+    with ctx.lock:
+        for fid in prof["file_ids"]:
+            if fid in exclude:
+                continue
+            fentry = ctx.files_state["files"].get(fid)
+            if not fentry:
+                continue
+            ft = _normalize_file_type(fentry.get("path", ""))
+            if ft:
+                type_map.setdefault(ft, []).append((fid, fentry["path"]))
+
+    # Walk preference order
+    for ft in pref_order:
+        candidates = type_map.get(ft, [])
+        if not candidates:
+            continue
+        # Use preferred_file if set and available
+        pref_fid = prof["preferred_file"].get(ft)
+        if pref_fid and pref_fid not in exclude:
+            for fid, fpath in candidates:
+                if fid == pref_fid:
+                    return (fid, fpath, ft, f"Preferred {ft.upper()} file")
+        # Otherwise first candidate
+        fid, fpath = candidates[0]
+        return (fid, fpath, ft, f"Auto-selected {ft.upper()} (first available)")
+
+    return (None, None, None, f"No compatible files in profile for {test_type}")
+
+
+def _load_reports_for_profile(username, profile_id):
+    """Aggregate reports across all files in a profile.
+    Returns {test_id: [report_summary, ...]} — one entry per file that has a result.
+    The list is sorted: best result first (highest match rate, then most recent)."""
+    data = _load_profiles(username)
+    prof = data["profiles"].get(profile_id)
+    if not prof:
+        return {}
+
+    all_results = {}  # test_id -> [report_summary, ...]
+    for fid in prof["file_ids"]:
+        file_reports = _load_reports_for_file(username, fid)
+        for test_id, entry in file_reports.items():
+            all_results.setdefault(test_id, []).append(entry)
+
+    # Sort each list: best first (highest match_rate_value, then most recent)
+    for test_id in all_results:
+        # Sort: highest match_rate first, then most recent first (stable two-pass)
+        all_results[test_id].sort(key=lambda e: e.get("completed_at") or "", reverse=True)
+        all_results[test_id].sort(key=lambda e: -(e.get("match_rate_value") or 0))
+    return all_results
+
+
 # ── Pgen readiness ────────────────────────────────────────────────
 # A file is "pgen-ready" when its per-file pgen cache is built (needed
 # for PGS scoring and PCA). Non-gVCF files build instantly; gVCFs take
@@ -1006,6 +1332,96 @@ def _interpret_fallback_claude(prompt: str, test_def: dict) -> tuple:
 
 
 # ── Queue Worker ──────────────────────────────────────────────────
+
+# ── Retry logic for profile-based auto-selection ──────────────────
+
+# Infrastructure errors that should NOT trigger a retry with a different
+# file — the problem is the tool, not the file.
+_INFRA_ERROR_PATTERNS = [
+    "not found", "not installed", "command not found", "No such file",
+    "permission denied", "java", "OutOfMemoryError", "oom",
+    "timeout", "timed out",
+]
+
+
+def _should_retry(task, result):
+    """Decide if a completed task should be retried with a different file.
+    Returns (should_retry: bool, reason: str).
+    Only applies to profile-based runs."""
+    profile_id = task.get("profile_id")
+    if not profile_id:
+        return False, ""
+
+    attempt = task.get("attempt", 1)
+    if attempt >= 3:
+        return False, "Max attempts reached"
+
+    status = (result or {}).get("status", "passed")
+    error_msg = (result or {}).get("error", "") or ""
+
+    # Check for infrastructure errors — don't retry these
+    error_lower = error_msg.lower()
+    for pat in _INFRA_ERROR_PATTERNS:
+        if pat.lower() in error_lower:
+            return False, f"Infrastructure error: {error_msg[:80]}"
+
+    # Hard failure — retry with different file type
+    if status in ("failed", "error"):
+        return True, f"Test failed: {error_msg[:80]}"
+
+    # Low PGS match rate — retry with potentially better file
+    match_rate = (result or {}).get("match_rate_value")
+    if match_rate is not None and match_rate < MATCH_RATE_FALLBACK_THRESHOLD:
+        return True, f"Low match rate ({match_rate}% < {MATCH_RATE_FALLBACK_THRESHOLD}%)"
+
+    return False, ""
+
+
+def _handle_retry(task, result, retry_reason):
+    """Re-queue a task with a different file. Returns new task_id or None."""
+    username = task.get("username")
+    profile_id = task.get("profile_id")
+    test_id = task.get("test_id")
+    test_def = TESTS_BY_ID.get(test_id)
+    if not test_def or not username or not profile_id:
+        return None
+
+    attempt = task.get("attempt", 1) + 1
+    # Build exclude set: current file + any previously excluded
+    exclude = set(task.get("exclude_file_ids") or [])
+    exclude.add(task.get("file_id", ""))
+
+    logger.info(f"Retry #{attempt} for {test_id} [{username}] profile={profile_id}: {retry_reason}")
+
+    new_task_id = _queue_task(
+        username, test_def, None,
+        profile_id=profile_id,
+        attempt=attempt,
+        exclude_file_ids=exclude,
+    )
+
+    # Log retry in original report's file
+    if new_task_id:
+        try:
+            file_id = task.get("file_id", "")
+            report_path = _user_report_dir(username, file_id) / f"{task['id']}.json"
+            if report_path.exists():
+                with open(report_path) as f:
+                    rep = json.load(f)
+                rep.setdefault("retry_history", []).append({
+                    "attempt": attempt,
+                    "reason": retry_reason,
+                    "new_task_id": new_task_id,
+                    "retried_at": datetime.now(timezone.utc).isoformat(),
+                })
+                with open(report_path, "w") as f:
+                    json.dump(rep, f, indent=2, default=str)
+        except Exception:
+            pass
+
+    return new_task_id
+
+
 def queue_worker(worker_id):
     """Background thread that pulls tasks off the shared global queue
     and runs them. Multiple workers run in parallel; per-user isolation
@@ -1050,7 +1466,19 @@ def queue_worker(worker_id):
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
 
+        _ft = task.get("file_type", "")
+        _needs_bam_gate = _ft in ("bam", "cram")
         try:
+            # BAM/CRAM tests use Pipeline E+ (~23 parallel processes).
+            # Gate them through a semaphore to prevent system overload.
+            if _needs_bam_gate:
+                task_results[task_id]["status"] = "waiting_for_resources"
+                task_results[task_id]["headline"] = "Waiting for BAM/CRAM slot..."
+                logger.info(f"[{task_id}] Waiting for BAM/CRAM semaphore ({test_def['name']})")
+                _bam_cram_semaphore.acquire()
+                logger.info(f"[{task_id}] Acquired BAM/CRAM semaphore")
+                task_results[task_id]["status"] = "running"
+
             logger.info(f"Running [{username}]: {test_def['name']} ({test_id})")
             start = time.time()
 
@@ -1098,6 +1526,10 @@ def queue_worker(worker_id):
                 "interpretation_error": interp_error,
                 "elapsed_seconds": round(elapsed, 1),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
+                "profile_id": task.get("profile_id", ""),
+                "file_type": task.get("file_type", ""),
+                "attempt": task.get("attempt", 1),
+                "selection_reason": task.get("selection_reason", ""),
             }
 
             # Persist genome build to file entry if detected
@@ -1116,6 +1548,10 @@ def queue_worker(worker_id):
             report_path = _user_report_dir(username, file_id) / f"{task_id}.json"
             with open(report_path, 'w') as f:
                 json.dump(report, f, indent=2, default=str)
+            try:
+                _update_claude_md_index(username)
+            except Exception:
+                pass
 
             task_results[task_id] = {
                 "status": task_outcome,
@@ -1130,8 +1566,26 @@ def queue_worker(worker_id):
                 "elapsed": round(elapsed, 1),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "report_path": str(report_path),
+                # Forward PGS quality fields so the UI can render sliders/chips
+                # without waiting for a disk-based report reload.
+                "match_rate": result.get("match_rate"),
+                "match_rate_value": result.get("match_rate_value"),
+                "percentile": result.get("percentile"),
+                "no_report": result.get("no_report", False),
+                "file_type": task.get("file_type", ""),
+                "profile_id": task.get("profile_id", ""),
+                "selection_reason": task.get("selection_reason", ""),
             }
             logger.info(f"{task_outcome.upper()} [{username}]: {test_def['name']} — {headline} ({elapsed:.1f}s)")
+
+            # Retry logic for profile-based runs
+            if task.get("profile_id"):
+                should_retry, retry_reason = _should_retry(task, result)
+                if should_retry:
+                    new_tid = _handle_retry(task, result, retry_reason)
+                    if new_tid:
+                        task_results[task_id]["retried_as"] = new_tid
+                        task_results[task_id]["retry_reason"] = retry_reason
 
         except Exception as e:
             logger.error(f"Test {test_id} crashed: {e}", exc_info=True)
@@ -1149,6 +1603,9 @@ def queue_worker(worker_id):
             }
             log_error(username, task_id, test_id, test_def["name"], err)
         finally:
+            if _needs_bam_gate:
+                _bam_cram_semaphore.release()
+                logger.info(f"[{task_id}] Released BAM/CRAM semaphore")
             with queue_lock:
                 running_tasks.discard(task_id)
 
@@ -1623,6 +2080,124 @@ async def list_files(username: str = Depends(current_user)):
     return {"files": files, "active_file_id": active_id}
 
 
+
+
+# ── Profile API endpoints ─────────────────────────────────────────
+
+@app.get("/api/profiles")
+async def list_profiles(username: str = Depends(current_user)):
+    """List profiles + ungrouped files. Triggers lazy migration on first call."""
+    data = _migrate_to_profiles(username)
+    ctx = get_user_state(username)
+    # Enrich profiles with file details
+    profiles_out = []
+    with ctx.lock:
+        all_files = dict(ctx.files_state["files"])
+    for prof_id, prof in data["profiles"].items():
+        file_details = []
+        for fid in prof["file_ids"]:
+            fentry = all_files.get(fid)
+            if fentry:
+                file_details.append({
+                    "id": fid,
+                    "name": fentry.get("name", ""),
+                    "path": fentry.get("path", ""),
+                    "file_type": _normalize_file_type(fentry.get("path", "")),
+                    "size": fentry.get("size", 0),
+                    "genome_build": fentry.get("genome_build", ""),
+                    "sample_name": fentry.get("sample_name", ""),
+                })
+        profiles_out.append({
+            **prof,
+            "file_details": file_details,
+            "file_count": len(file_details),
+        })
+    ungrouped_details = []
+    for fid in data.get("ungrouped_files", []):
+        fentry = all_files.get(fid)
+        if fentry:
+            ungrouped_details.append({
+                "id": fid,
+                "name": fentry.get("name", ""),
+                "path": fentry.get("path", ""),
+                "file_type": _normalize_file_type(fentry.get("path", "")),
+                "size": fentry.get("size", 0),
+            })
+    return {
+        "profiles": profiles_out,
+        "ungrouped_files": ungrouped_details,
+    }
+
+
+@app.post("/api/profiles")
+async def create_profile(request: Request, username: str = Depends(current_user)):
+    """Create a new profile. Body: {name, file_ids?}"""
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "Profile name required"}, status_code=400)
+    file_ids = body.get("file_ids") or []
+    prof = _create_profile(username, name, file_ids)
+    return {"ok": True, "profile": prof}
+
+
+@app.put("/api/profiles/{prof_id}")
+async def update_profile(prof_id: str, request: Request, username: str = Depends(current_user)):
+    """Update profile: name, add/remove files, set preferred files."""
+    body = await request.json()
+    data = _load_profiles(username)
+    prof = data["profiles"].get(prof_id)
+    if not prof:
+        return JSONResponse({"ok": False, "error": "Profile not found"}, status_code=404)
+
+    if "name" in body:
+        prof["name"] = (body["name"] or "").strip() or prof["name"]
+    if "notes" in body:
+        prof["notes"] = body["notes"] or ""
+    if "add_files" in body:
+        for fid in body["add_files"]:
+            _assign_file_to_profile(data, prof_id, fid, username)
+    if "remove_files" in body:
+        for fid in body["remove_files"]:
+            if fid in prof["file_ids"]:
+                _unassign_file_from_profile(data, fid)
+    if "preferred_file" in body:
+        pf = body["preferred_file"]
+        for ft in ("vcf", "gvcf", "bam", "cram"):
+            if ft in pf:
+                fid = pf[ft]
+                if fid is None or fid in prof["file_ids"]:
+                    prof["preferred_file"][ft] = fid
+
+    _save_profiles(username, data)
+    return {"ok": True, "profile": prof}
+
+
+@app.delete("/api/profiles/{prof_id}")
+async def delete_profile(prof_id: str, username: str = Depends(current_user)):
+    """Delete a profile. Files are ungrouped, not deleted."""
+    data = _load_profiles(username)
+    prof = data["profiles"].get(prof_id)
+    if not prof:
+        return JSONResponse({"ok": False, "error": "Profile not found"}, status_code=404)
+    # Ungroup all files
+    for fid in list(prof["file_ids"]):
+        _unassign_file_from_profile(data, fid)
+    del data["profiles"][prof_id]
+    _save_profiles(username, data)
+    return {"ok": True}
+
+
+@app.get("/api/profiles/{prof_id}/reports")
+async def get_profile_reports(prof_id: str, username: str = Depends(current_user)):
+    """Get aggregated best reports across all files in a profile."""
+    data = _load_profiles(username)
+    if prof_id not in data["profiles"]:
+        return JSONResponse({"ok": False, "error": "Profile not found"}, status_code=404)
+    reports = _load_reports_for_profile(username, prof_id)
+    return {"ok": True, "reports": reports, "profile_id": prof_id}
+
+
 @app.post("/api/files/upload")
 async def upload_file(
     file: UploadFile = File(...),
@@ -1641,6 +2216,14 @@ async def upload_file(
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
     entry = _register_file(username, dest, source="upload", name=filename)
+    # Try to auto-assign to profile by sample name
+    try:
+        meta = _probe_file_metadata(str(dest))
+        if meta.get("sample_name"):
+            entry["sample_name"] = meta["sample_name"]
+        _auto_assign_profile(username, entry["id"], entry)
+    except Exception:
+        pass
     return {"ok": True, "file": entry}
 
 
@@ -1829,16 +2412,18 @@ async def get_tests(username: str = Depends(current_user)):
 
 # ── Tab definitions ───────────────────────────────────────────────
 TAB_DEFS = {
-    "general": {
-        "label": "General",
+    "validations": {
+        "label": "Validations",
         "categories": ["Sex Check", "Sample QC", "Ancestry"],
     },
     "polygenic": {
         "label": "Polygenic Scores",
         "categories": [
-            "PGS - Cancer", "PGS - Cardiovascular", "PGS - Metabolic",
-            "PGS - Autoimmune", "PGS - Neurological", "PGS - Traits",
-            "PGS - Lifestyle", "PGS - Custom", "PGS - rsID Lists",
+            "PGS - Cancer", "PGS - Cardiovascular", "PGS - Metabolic / Endocrine",
+            "PGS - Autoimmune / Inflammatory", "PGS - Neurological / Mental Health",
+            "PGS - Renal / Urinary", "PGS - Eye / Vision",
+            "PGS - Cognitive & Educational", "PGS - Physical Traits",
+            "PGS - Lifestyle / Behavioral", "PGS - rsID Lists",
         ],
     },
     "monogenic": {
@@ -1853,8 +2438,12 @@ TAB_DEFS = {
         "label": "Pharmacogenomics",
         "categories": ["Pharmacogenomics"],
     },
+    "curated": {
+        "label": "Curated Short List",
+        "categories": [],  # uses CURATED_IDS instead of categories
+    },
 }
-TAB_ORDER = ["general", "polygenic", "monogenic", "pharmacogenomics"]
+TAB_ORDER = ["curated", "polygenic", "monogenic", "pharmacogenomics", "validations"]
 
 def _tab_for_category(cat):
     """Return tab key for a category name."""
@@ -1874,7 +2463,10 @@ def _tests_to_markdown(tab=None):
     for t in TESTS:
         if t["test_type"] == "rsid_pgs_score":
             continue
-        if tab and _tab_for_category(t["category"]) != tab:
+        if tab == "curated":
+            if t["id"] not in CURATED_IDS:
+                continue
+        elif tab and _tab_for_category(t["category"]) != tab:
             continue
         if t["category"] != current_cat:
             current_cat = t["category"]
@@ -2071,7 +2663,10 @@ async def get_tests_tabs(username: str = Depends(current_user)):
     result = []
     for tk in TAB_ORDER:
         td = TAB_DEFS[tk]
-        count = sum(1 for t in TESTS if _tab_for_category(t["category"]) == tk)
+        if tk == "curated":
+            count = sum(1 for t in TESTS if t["id"] in CURATED_IDS)
+        else:
+            count = sum(1 for t in TESTS if _tab_for_category(t["category"]) == tk)
         result.append({"key": tk, "label": td["label"], "count": count})
     return {"ok": True, "tabs": result}
 
@@ -2082,8 +2677,11 @@ async def get_tests_markdown(tab: str = "", username: str = Depends(current_user
     _eager_inject_custom_pgs_for_user(username)
     t = tab if tab in TAB_DEFS else None
     md = _tests_to_markdown(tab=t)
-    count = sum(1 for tt in TESTS if (not t or _tab_for_category(tt["category"]) == t)
-                and tt["test_type"] != "rsid_pgs_score")
+    if t == "curated":
+        count = sum(1 for tt in TESTS if tt["id"] in CURATED_IDS and tt["test_type"] != "rsid_pgs_score")
+    else:
+        count = sum(1 for tt in TESTS if (not t or _tab_for_category(tt["category"]) == t)
+                    and tt["test_type"] != "rsid_pgs_score")
     return {"ok": True, "markdown": md, "test_count": count, "tab": t or "all"}
 
 
@@ -2101,7 +2699,10 @@ async def put_tests_markdown(request: Request, tab: str = "", username: str = De
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
 
     t = tab if tab in TAB_DEFS else None
-    if t:
+    if t == "curated":
+        # Curated tab is read-only (tests belong to other tabs)
+        return JSONResponse({"ok": False, "error": "Curated tab cannot be edited directly. Edit tests in their original tabs."}, status_code=400)
+    elif t:
         kept = [tt for tt in TESTS if _tab_for_category(tt["category"]) != t
                 and tt["test_type"] != "rsid_pgs_score"]
         new_tests = kept + edited_tests
@@ -2118,10 +2719,45 @@ async def put_tests_markdown(request: Request, tab: str = "", username: str = De
     return {"ok": True, "test_count": len(TESTS), "categories": len(CATEGORIES)}
 
 
-def _queue_task(username, test_def, active):
+def _queue_task(username, test_def, active, profile_id=None,
+                override_file_id=None, attempt=1, exclude_file_ids=None):
     """Build + enqueue a task. Each task carries `username` so the worker
-    routes the resulting report to the right per-user dir on disk."""
+    routes the resulting report to the right per-user dir on disk.
+
+    If `profile_id` is given and no explicit file, auto-selects the best
+    file for this test from the profile's files.
+    """
     test_id = test_def["id"]
+
+    # Auto-select file from profile if needed
+    selection_reason = ""
+    file_type = ""
+    if profile_id and not override_file_id and not active:
+        fid, fpath, ft, reason = _select_best_file(
+            username, profile_id, test_id, test_def,
+            exclude_file_ids=exclude_file_ids)
+        if not fid:
+            logger.warning(f"No file for {test_id} in profile {profile_id}: {reason}")
+            return None
+        active = {"id": fid, "path": fpath}
+        selection_reason = reason
+        file_type = ft or ""
+    elif override_file_id:
+        ctx = get_user_state(username)
+        with ctx.lock:
+            fentry = ctx.files_state["files"].get(override_file_id)
+        if not fentry:
+            return None
+        active = {"id": override_file_id, "path": fentry["path"]}
+        selection_reason = "Manual override"
+        file_type = _normalize_file_type(fentry.get("path", ""))
+
+    if not active:
+        return None
+
+    if not file_type:
+        file_type = _normalize_file_type(active.get("path", ""))
+
     task_id = f"{test_id}_{uuid.uuid4().hex[:8]}"
     task = {
         "id": task_id,
@@ -2130,6 +2766,11 @@ def _queue_task(username, test_def, active):
         "file_id": active["id"],
         "username": _norm_username(username),
         "queued_at": datetime.now(timezone.utc).isoformat(),
+        "profile_id": profile_id or "",
+        "file_type": file_type,
+        "attempt": attempt,
+        "exclude_file_ids": list(exclude_file_ids or []),
+        "selection_reason": selection_reason,
     }
     with queue_lock:
         task_queue.append(task)
@@ -2140,6 +2781,9 @@ def _queue_task(username, test_def, active):
         "file_id": active["id"],
         "username": _norm_username(username),
         "queued_at": task["queued_at"],
+        "profile_id": profile_id or "",
+        "file_type": file_type,
+        "selection_reason": selection_reason,
     }
     return task_id
 
@@ -2158,15 +2802,41 @@ def _resolve_target_file(username, file_id):
 @app.post("/api/run/{test_id}")
 async def run_single_test(
     test_id: str,
+    request: Request,
     file_id: str = "",
     username: str = Depends(current_user),
 ):
+    # Accept profile_id and override_file_id from query or JSON body
+    profile_id = ""
+    override_file_id = ""
+    try:
+        body = await request.json()
+        profile_id = body.get("profile_id", "")
+        override_file_id = body.get("override_file_id", "")
+    except Exception:
+        pass
+    if not profile_id:
+        from urllib.parse import parse_qs
+        qs = parse_qs(str(request.url.query))
+        profile_id = (qs.get("profile_id") or [""])[0]
+        override_file_id = override_file_id or (qs.get("override_file_id") or [""])[0]
+
+    if test_id not in TESTS_BY_ID:
+        return JSONResponse({"ok": False, "error": f"Unknown test: {test_id}"}, status_code=404)
+
+    test_def = TESTS_BY_ID[test_id]
+
+    if profile_id:
+        task_id = _queue_task(username, test_def, None, profile_id=profile_id,
+                              override_file_id=override_file_id or None)
+        if not task_id:
+            return JSONResponse({"ok": False, "error": "No compatible file in profile for this test."}, status_code=400)
+        return {"ok": True, "task_id": task_id, "profile_id": profile_id}
+
     target = _resolve_target_file(username, file_id)
     if not target:
         return JSONResponse({"ok": False, "error": "No file selected. Upload or add a file first."}, status_code=400)
-    if test_id not in TESTS_BY_ID:
-        return JSONResponse({"ok": False, "error": f"Unknown test: {test_id}"}, status_code=404)
-    task_id = _queue_task(username, TESTS_BY_ID[test_id], target)
+    task_id = _queue_task(username, test_def, target)
     return {"ok": True, "task_id": task_id, "file_id": target["id"]}
 
 
@@ -2174,8 +2844,18 @@ async def run_single_test(
 async def run_category(
     category: str,
     file_id: str = "",
+    profile_id: str = "",
     username: str = Depends(current_user),
 ):
+    if profile_id:
+        task_ids = []
+        for test in TESTS:
+            if test["category"] == category:
+                tid = _queue_task(username, test, None, profile_id=profile_id)
+                if tid:
+                    task_ids.append(tid)
+        return {"ok": True, "task_ids": task_ids, "count": len(task_ids), "profile_id": profile_id}
+
     target = _resolve_target_file(username, file_id)
     if not target:
         return JSONResponse({"ok": False, "error": "No file selected."}, status_code=400)
@@ -2188,7 +2868,13 @@ async def run_category(
 
 
 @app.post("/api/run-all")
-async def run_all_tests(file_id: str = "", username: str = Depends(current_user)):
+async def run_all_tests(file_id: str = "", profile_id: str = "",
+                        username: str = Depends(current_user)):
+    if profile_id:
+        task_ids = [tid for test in TESTS
+                    if (tid := _queue_task(username, test, None, profile_id=profile_id))]
+        return {"ok": True, "task_ids": task_ids, "count": len(task_ids), "profile_id": profile_id}
+
     target = _resolve_target_file(username, file_id)
     if not target:
         return JSONResponse({"ok": False, "error": "No file selected."}, status_code=400)
@@ -2232,12 +2918,17 @@ def _load_reports_for_file(username, file_id):
             "match_rate_value": result.get("match_rate_value"),
             "percentile": result.get("percentile"),
             "no_report": result.get("no_report", False),
+            # Profile/file-selection fields
+            "file_type": rep.get("file_type", ""),
+            "profile_id": rep.get("profile_id", ""),
+            "selection_reason": rep.get("selection_reason", ""),
+            "retried_as": rep.get("retried_as", ""),
         })
     return {tid: entry for tid, (_, entry) in latest.items()}
 
 
 @app.get("/api/status")
-def get_status(username: str = Depends(current_user)):
+def get_status(request: Request, username: str = Depends(current_user)):
     """Queue status + task results scoped to the calling user's active file.
 
     Filters the global queue and task_results by username so users see
@@ -2247,22 +2938,55 @@ def get_status(username: str = Depends(current_user)):
     active = _get_active_file(username)
     active_id = active["id"] if active else None
 
-    with queue_lock:
-        queued = [
-            {"id": t["id"], "test_id": t["test_id"], "file_id": t.get("file_id")}
-            for t in task_queue
-            if t.get("username") == user_lc and t.get("file_id") == active_id
-        ]
+    # Check if request includes profile_id (from query string)
+    _profile_id = ""
+    try:
+        from urllib.parse import parse_qs
+        _qs = parse_qs(str(request.url.query)) if hasattr(request, 'url') else {}
+        _profile_id = (_qs.get("profile_id") or [""])[0]
+    except Exception:
+        pass
 
-    results = {}
-    if active_id:
-        latest_per_test = _load_reports_for_file(username, active_id)
-        for entry in latest_per_test.values():
-            results[entry["task_id"]] = entry
+    if _profile_id:
+        # Profile mode: aggregate reports across all profile files
+        _prof_data = _load_profiles(username)
+        _prof = _prof_data["profiles"].get(_profile_id)
+        _prof_file_ids = set(_prof["file_ids"]) if _prof else set()
 
-    for task_id, res in task_results.items():
-        if res.get("username") == user_lc and res.get("file_id") == active_id:
-            results[task_id] = res
+        with queue_lock:
+            queued = [
+                {"id": t["id"], "test_id": t["test_id"], "file_id": t.get("file_id")}
+                for t in task_queue
+                if t.get("username") == user_lc and t.get("file_id") in _prof_file_ids
+            ]
+
+        results = {}
+        profile_reports = _load_reports_for_profile(username, _profile_id)
+        # profile_reports is {test_id: [entries...]}  — flatten into results
+        for test_id, entries in profile_reports.items():
+            for entry in entries:
+                results[entry["task_id"]] = entry
+
+        for task_id, res in task_results.items():
+            if res.get("username") == user_lc and res.get("file_id") in _prof_file_ids:
+                results[task_id] = res
+    else:
+        with queue_lock:
+            queued = [
+                {"id": t["id"], "test_id": t["test_id"], "file_id": t.get("file_id")}
+                for t in task_queue
+                if t.get("username") == user_lc and t.get("file_id") == active_id
+            ]
+
+        results = {}
+        if active_id:
+            latest_per_test = _load_reports_for_file(username, active_id)
+            for entry in latest_per_test.values():
+                results[entry["task_id"]] = entry
+
+        for task_id, res in task_results.items():
+            if res.get("username") == user_lc and res.get("file_id") == active_id:
+                results[task_id] = res
 
     with queue_lock:
         running_snapshot = [
@@ -2397,6 +3121,363 @@ async def delete_report(task_id: str, username: str = Depends(current_user)):
         del task_results[task_id]
         removed = True
     return {"ok": True, "removed": removed}
+
+
+# ── Master Summary ────────────────────────────────────────────────
+
+_master_summary_generating: set = set()  # "username" or "username:profile_id" keys
+
+
+def _ms_gen_key(username, profile_id=None):
+    """Build a unique key for tracking in-progress generation."""
+    return f"{username}:{profile_id}" if profile_id else username
+
+
+def _master_summary_paths(username, profile_id=None):
+    """Return (summary_json_path, meta_json_path) for a user, optionally per-profile."""
+    d = user_dir(username)
+    suffix = f"_{profile_id}" if profile_id else ""
+    return d / f"master_summary{suffix}.json", d / f"master_summary{suffix}_meta.json"
+
+
+def _profile_file_ids(username, profile_id):
+    """Return the list of file_ids belonging to a profile, or None if profile not found."""
+    data = _load_profiles(username)
+    prof = data["profiles"].get(profile_id)
+    if not prof:
+        return None
+    return prof.get("file_ids", [])
+
+
+def _collect_all_reports(username, file_ids=None):
+    """Collect all report JSON dicts for a user, excluding failed/no_report ones.
+    If file_ids is provided, only collect from those file_id subdirectories."""
+    reports = []
+    user_root = user_reports_root(username)
+    if not user_root.exists():
+        return reports
+    for fdir in user_root.iterdir():
+        if not fdir.is_dir():
+            continue
+        # Filter by file_ids if specified
+        if file_ids is not None and fdir.name not in file_ids:
+            continue
+        for p in fdir.glob("*.json"):
+            try:
+                data = json.loads(p.read_text())
+            except Exception:
+                continue
+            result = data.get("result") or {}
+            # Skip failed tests and ones with no report
+            if result.get("no_report"):
+                continue
+            reports.append(data)
+    return reports
+
+
+def _count_user_reports(username, file_ids=None):
+    """Count report JSON files for a user, optionally filtered by file_ids."""
+    count = 0
+    user_root = user_reports_root(username)
+    if not user_root.exists():
+        return 0
+    for fdir in user_root.iterdir():
+        if not fdir.is_dir():
+            continue
+        if file_ids is not None and fdir.name not in file_ids:
+            continue
+        count += sum(1 for _ in fdir.glob("*.json"))
+    return count
+
+
+def _call_claude_for_summary(prompt, max_tokens=4096):
+    """Call the Claude API for master summary. Returns text or None."""
+    api_key = _FALLBACK_ANTHROPIC_KEY
+    if not api_key:
+        logger.warning("Master summary: no FALLBACK_ANTHROPIC_KEY set")
+        return None
+    import urllib.request as urllib_req
+    try:
+        payload = json.dumps({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode()
+        req = urllib_req.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib_req.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+            return data["content"][0]["text"].strip()
+    except Exception as exc:
+        logger.error(f"Master summary Claude call failed: {exc}")
+        return None
+
+
+def _build_report_text_block(report):
+    """Convert a report JSON dict into a concise text block for Claude."""
+    result = report.get("result") or {}
+    parts = [f"**{report.get('test_name', '?')}** ({report.get('category', '?')})"]
+    if result.get("headline"):
+        parts.append(f"  Headline: {result['headline']}")
+    if result.get("percentile") is not None:
+        parts.append(f"  Percentile: {result['percentile']}")
+    if result.get("match_rate"):
+        parts.append(f"  Match rate: {result['match_rate']}")
+    if result.get("status"):
+        parts.append(f"  Status: {result['status']}")
+    interp = report.get("interpretation")
+    if interp:
+        # Truncate long interpretations
+        if len(interp) > 500:
+            interp = interp[:500] + "..."
+        parts.append(f"  Interpretation: {interp}")
+    elif result.get("output"):
+        out = str(result["output"])[:300]
+        parts.append(f"  Output: {out}")
+    # PGS-specific fields
+    if result.get("pgs_id"):
+        parts.append(f"  PGS ID: {result['pgs_id']}, Trait: {result.get('trait', '?')}")
+    if result.get("matched_variants"):
+        parts.append(f"  Variants: {result['matched_variants']}/{result.get('total_variants', '?')}")
+    # Variant results
+    variants = result.get("variants")
+    if variants and isinstance(variants, list):
+        for v in variants[:5]:  # cap at 5 variants per report
+            gt = v.get("genotype", "?")
+            name = v.get("name") or v.get("variant", "?")
+            parts.append(f"  Variant: {name} → {gt}")
+        if len(variants) > 5:
+            parts.append(f"  ... and {len(variants) - 5} more variants")
+    return "\n".join(parts)
+
+
+MASTER_SUMMARY_PROMPT = """You are a clinical genomics expert creating a comprehensive master summary for a patient based on all their genomic test results.
+
+## Instructions
+Compile the most informative, actionable summary you can from all the reports provided.
+
+Structure your response as follows:
+
+### Executive Overview
+2-3 paragraphs with the most important findings across ALL reports. Lead with actionable insights.
+
+### Key Risk Factors
+List the most significant genetic risk factors found (high-risk PGS scores, notable variants, carrier status). Include percentiles and risk levels where available.
+
+### Health Insights by Category
+Group findings into categories (cardiovascular, cancer, neurological, metabolic, pharmacogenomics, etc.). Only include categories with actual findings.
+
+### Sample Quality & Reliability
+Brief assessment of data quality, match rates, and any caveats about interpretation.
+
+### Actionable Recommendations
+Top 5-10 specific, prioritized recommendations based on all combined findings. Be specific (e.g., "discuss statin therapy with cardiologist" not just "see a doctor").
+
+### Data Coverage
+Note what was analyzed (number of tests, types of analyses run) and any significant gaps.
+
+Write in professional but accessible language. Focus on the MOST informative and actionable information — don't just list everything."""
+
+
+def _run_master_summary_generation(username, profile_id=None, profile_name=None):
+    """Generate master summary in background thread."""
+    gen_key = _ms_gen_key(username, profile_id)
+    file_ids = None
+    if profile_id:
+        file_ids = _profile_file_ids(username, profile_id)
+        if file_ids is None:
+            logger.warning(f"Master summary: profile {profile_id} not found for {username}")
+            _master_summary_generating.discard(gen_key)
+            return
+        file_ids = set(file_ids)
+
+    try:
+        reports = _collect_all_reports(username, file_ids)
+        if not reports:
+            logger.warning(f"Master summary: no reports for {username} (profile={profile_id})")
+            return
+
+        # Build text blocks
+        blocks = [_build_report_text_block(r) for r in reports]
+        total_text = "\n\n---\n\n".join(blocks)
+
+        # ~4 chars/token, reserve overhead. 150k tokens ~ 600k chars
+        MAX_CHARS = 600_000
+
+        scope = f"profile '{profile_name or profile_id}'" if profile_id else "all profiles"
+        logger.info(f"Master summary: {len(reports)} reports, {len(total_text)} chars for {username} ({scope})")
+
+        # Add profile context to prompt
+        person_context = ""
+        if profile_name:
+            person_context = f"\n\n**Patient/Sample: {profile_name}**\n"
+
+        if len(total_text) <= MAX_CHARS:
+            # Single call
+            prompt = f"{MASTER_SUMMARY_PROMPT}{person_context}\n\n## Reports ({len(reports)} total)\n\n{total_text}"
+            summary_text = _call_claude_for_summary(prompt)
+        else:
+            # Split into chunks with intermediate summaries
+            chunks = []
+            current_chunk = []
+            current_size = 0
+            for i, block in enumerate(blocks):
+                blen = len(block)
+                if current_size + blen > MAX_CHARS and current_chunk:
+                    chunks.append(current_chunk)
+                    current_chunk = []
+                    current_size = 0
+                current_chunk.append(block)
+                current_size += blen
+            if current_chunk:
+                chunks.append(current_chunk)
+
+            logger.info(f"Master summary: splitting into {len(chunks)} chunks")
+
+            intermediate = []
+            for ci, chunk in enumerate(chunks):
+                combined = "\n\n---\n\n".join(chunk)
+                chunk_prompt = f"""You are a clinical genomics expert. Summarize the key findings from these genomic reports.
+Extract ALL significant findings: risk scores, percentiles, notable variants, quality metrics, and actionable insights.
+Be thorough — this intermediate summary will be used to compile a final master summary.
+{person_context}
+## Reports (chunk {ci+1}/{len(chunks)}, {len(chunk)} reports)
+
+{combined}"""
+                text = _call_claude_for_summary(chunk_prompt, max_tokens=3000)
+                if text:
+                    intermediate.append(text)
+
+            # Final synthesis
+            all_summaries = "\n\n---\n\n".join(
+                f"### Batch {i+1} Summary\n{s}" for i, s in enumerate(intermediate)
+            )
+            final_prompt = f"""{MASTER_SUMMARY_PROMPT}{person_context}
+
+## Intermediate Summaries from {len(reports)} Reports (compiled in {len(chunks)} batches)
+
+{all_summaries}"""
+            summary_text = _call_claude_for_summary(final_prompt)
+
+        if not summary_text:
+            logger.error(f"Master summary: AI returned nothing for {username} (profile={profile_id})")
+            return
+
+        # Save
+        now = datetime.now(timezone.utc).isoformat()
+        summary_path, meta_path = _master_summary_paths(username, profile_id)
+
+        total_on_disk = _count_user_reports(username, file_ids)
+        summary_path.write_text(json.dumps({
+            "content": summary_text,
+            "generated_at": now,
+            "report_count": len(reports),
+            "total_report_count": total_on_disk,
+            "profile_id": profile_id,
+            "profile_name": profile_name,
+        }), encoding="utf-8")
+
+        meta_path.write_text(json.dumps({
+            "generated_at": now,
+            "report_count": len(reports),
+            "total_report_count": total_on_disk,
+            "profile_id": profile_id,
+            "profile_name": profile_name,
+            "report_names": [r.get("test_name", "?") for r in reports],
+        }), encoding="utf-8")
+
+        logger.info(f"Master summary: saved for {username} profile={profile_id} ({len(reports)} reports)")
+
+    except Exception:
+        logger.exception(f"Master summary generation failed for {username} profile={profile_id}")
+    finally:
+        _master_summary_generating.discard(gen_key)
+
+
+@app.get("/api/master-summary")
+async def get_master_summary(profile_id: str = "", username: str = Depends(current_user)):
+    """Get the current master summary + metadata, optionally scoped to a profile."""
+    pid = profile_id or None
+    file_ids = None
+    if pid:
+        file_ids_list = _profile_file_ids(username, pid)
+        if file_ids_list is None:
+            return JSONResponse({"error": "Profile not found"}, status_code=404)
+        file_ids = set(file_ids_list)
+
+    summary_path, meta_path = _master_summary_paths(username, pid)
+    current_count = _count_user_reports(username, file_ids)
+    gen_key = _ms_gen_key(username, pid)
+    generating = gen_key in _master_summary_generating
+
+    result = {
+        "exists": False,
+        "content": None,
+        "generated_at": None,
+        "report_count_at_generation": 0,
+        "current_report_count": current_count,
+        "generating": generating,
+        "recommend_rerun": False,
+        "profile_id": pid,
+    }
+
+    if summary_path.exists():
+        try:
+            data = json.loads(summary_path.read_text())
+            result["exists"] = True
+            result["content"] = data.get("content")
+            result["generated_at"] = data.get("generated_at")
+            result["report_count_at_generation"] = data.get("report_count", 0)
+            result["_total_at_gen"] = data.get("total_report_count", data.get("report_count", 0))
+        except Exception:
+            pass
+
+    # Recommend rerun if 3+ new reports since last generation
+    old_total = result.pop("_total_at_gen", 0)
+    if current_count - old_total >= 3:
+        result["recommend_rerun"] = True
+
+    return result
+
+
+@app.post("/api/master-summary/generate")
+async def generate_master_summary(request: Request, username: str = Depends(current_user)):
+    """Trigger (re)generation of the master summary, optionally scoped to a profile."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    pid = body.get("profile_id") or None
+    profile_name = None
+    file_ids = None
+
+    if pid:
+        data = _load_profiles(username)
+        prof = data["profiles"].get(pid)
+        if not prof:
+            return JSONResponse({"error": "Profile not found"}, status_code=404)
+        profile_name = prof.get("name", pid)
+        file_ids = set(prof.get("file_ids", []))
+
+    gen_key = _ms_gen_key(username, pid)
+    if gen_key in _master_summary_generating:
+        return {"ok": True, "status": "already_running"}
+
+    report_count = _count_user_reports(username, file_ids)
+    if report_count == 0:
+        return JSONResponse({"error": "No reports available to summarize"}, status_code=400)
+
+    _master_summary_generating.add(gen_key)
+    t = Thread(target=_run_master_summary_generation, args=(username, pid, profile_name), daemon=True)
+    t.start()
+    return {"ok": True, "status": "started", "report_count": report_count}
 
 
 # ── System stats (status bar) ─────────────────────────────────────
@@ -2941,6 +4022,7 @@ async def set_api_key(request: Request):
             status_code=400,
         )
     _set_user_api_key(username, key)
+    _set_provider_key(username, "claude", key)
     # Kill existing tmux session so it restarts with the new key
     from chat import _session_name, _session_exists, _run_tmux
     session = _session_name(username)
@@ -2972,6 +4054,7 @@ async def delete_api_key(request: Request):
     if not username:
         raise HTTPException(status_code=401, detail="Not authenticated")
     _remove_user_api_key(username)
+    _remove_provider_key(username, "claude")
     from chat import _session_name, _session_exists, _run_tmux
     session = _session_name(username)
     if _session_exists(session):
@@ -3006,6 +4089,7 @@ async def get_settings(request: Request):
             },
             "gemini": {"has_key": True, "masked": "server-credential"},
         },
+        "system": _gather_system_stats(),
     }
 
 @app.post("/api/settings/interp-model")
@@ -3057,6 +4141,406 @@ async def delete_provider_key_endpoint(request: Request, provider: str):
     return {"ok": True}
 
 
+
+
+# ── Dependency checking ───────────────────────────────────────────
+_install_jobs = {}
+_install_jobs_lock = Lock()
+
+def _check_dep_version(binary_path, flag="--version"):
+    """Run binary --version and return first line, or None."""
+    try:
+        r = subprocess.run([binary_path, flag], capture_output=True, text=True, timeout=10)
+        out = (r.stdout or r.stderr or "").strip().split("\n")[0]
+        # Extract version-like string
+        m = re.search(r'(\d+\.\d+[\w.-]*)', out)
+        return m.group(1) if m else out[:60]
+    except Exception:
+        return None
+
+def _check_java_version():
+    try:
+        r = subprocess.run(["java", "-version"], capture_output=True, text=True, timeout=10)
+        out = (r.stderr or r.stdout or "").strip().split("\n")[0]
+        m = re.search(r'version \"?([\d._]+)', out)
+        return m.group(1) if m else out[:60]
+    except Exception:
+        return None
+
+def _file_size_human(path):
+    try:
+        s = os.path.getsize(path)
+        if s > 1_000_000_000:
+            return f"{s / 1_000_000_000:.1f} GB"
+        elif s > 1_000_000:
+            return f"{s / 1_000_000:.0f} MB"
+        elif s > 1_000:
+            return f"{s / 1_000:.0f} KB"
+        return f"{s} B"
+    except Exception:
+        return None
+
+def _count_files_in(dirpath):
+    try:
+        return len(os.listdir(dirpath))
+    except Exception:
+        return 0
+
+def _gather_deps():
+    from runners import (
+        BCFTOOLS, SAMTOOLS, PLINK, PLINK2, REF_FASTA,
+        HAPLOGREP3_BIN, T1K_BIN, T1K_HLA_REF,
+        _find_cyrius, _EH_BIN,
+    )
+    GENOMICS_BIN = "/home/nimo/miniconda3/envs/genomics/bin"
+    deps = []
+
+    # --- Tools ---
+    tool_checks = [
+        ("bcftools", "bcftools", BCFTOOLS, False, None),
+        ("samtools", "samtools", SAMTOOLS, False, None),
+        ("plink2", "plink2", PLINK2, False, None),
+        ("plink", "plink 1.9", PLINK, False, None),
+        ("java", "Java JRE", shutil.which("java") or "/usr/bin/java", True, "--prereqs"),
+        ("expansion_hunter", "ExpansionHunter", _EH_BIN, True, "--eh"),
+        ("haplogrep3", "HaploGrep3", HAPLOGREP3_BIN, True, "--haplogrep3"),
+        ("liftover", "liftOver", os.path.join(os.path.dirname(os.path.abspath(__file__)), "liftover", "liftOver"), True, "--liftover"),
+        ("t1k", "T1K", os.path.join(GENOMICS_BIN, "run-t1k"), True, "--t1k"),
+    ]
+
+    for key, name, path, installable, flag in tool_checks:
+        installed = os.path.exists(path) if path else False
+        version = None
+        if installed and key == "java":
+            version = _check_java_version()
+        elif installed:
+            version = _check_dep_version(path)
+        d = {"key": key, "category": "tool", "name": name,
+              "installed": installed, "version": version,
+              "path": path if installed else None,
+              "installable": installable}
+        if flag:
+            d["install_flag"] = flag
+        deps.append(d)
+
+    # Cyrius (special detection)
+    cyrius_path = _find_cyrius()
+    deps.append({
+        "key": "cyrius", "category": "tool", "name": "Cyrius",
+        "installed": bool(cyrius_path),
+        "version": None,
+        "path": cyrius_path or None,
+        "installable": True,
+        "install_flag": "--cyrius",
+    })
+
+    # --- Data ---
+    data_checks = [
+        ("clinvar", "ClinVar VCF (GRCh38)", "/data/clinvar/clinvar.vcf.gz", True, "--clinvar"),
+        ("clinvar_chr", "ClinVar VCF (chr-prefixed)", "/data/clinvar/clinvar_chr.vcf.gz", True, "--clinvar"),
+        ("haplogroup_mt", "Haplogroup mtDNA SNPs", "/data/haplogroup_data/mtdna_snps.json", True, "--haplogroups"),
+        ("haplogroup_ne", "Neanderthal SNPs (GRCh38)", "/data/haplogroup_data/neanderthal_snps_grch38.json", True, "--haplogroups"),
+        ("ref_fasta", "Reference FASTA (GRCh38)", str(REF_FASTA), False, None),
+        ("ref_panel", "1000G Reference Panel", "/data/pgs2/ref_panel/GRCh38_1000G_ALL.pgen", False, None),
+        ("ref_panel_stats", "Ref Panel Stats", "/data/pgs2/ref_panel_stats/", False, None),
+        ("t1k_hla_ref", "T1K HLA Reference", str(T1K_HLA_REF), True, "--t1k"),
+        ("eh_catalog", "ExpansionHunter Catalog", "/opt/expansion-hunter/variant_catalog/", True, "--eh"),
+    ]
+
+    for key, name, path, installable, flag in data_checks:
+        if key == "ref_panel_stats":
+            installed = _count_files_in(path) > 0
+            size = f"{_count_files_in(path)} files"
+        elif path.endswith("/"):
+            installed = os.path.isdir(path)
+            size = None
+        else:
+            installed = os.path.exists(path)
+            size = _file_size_human(path) if installed else None
+        d = {"key": key, "category": "data", "name": name,
+              "installed": installed, "path": path if installed else None,
+              "installable": installable}
+        if size:
+            d["size"] = size
+        if flag:
+            d["install_flag"] = flag
+        deps.append(d)
+
+    return deps
+
+
+@app.get("/api/settings/deps")
+async def get_deps(request: Request):
+    sid = request.cookies.get(SESSION_COOKIE)
+    username = _resolve_session(sid)
+    if not username:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"deps": _gather_deps()}
+
+
+@app.post("/api/settings/install-dep")
+async def install_dep(request: Request):
+    sid = request.cookies.get(SESSION_COOKIE)
+    username = _resolve_session(sid)
+    if not username:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    data = await request.json()
+    flag = (data.get("flag") or "").strip()
+    allowed = ["--eh", "--clinvar", "--haplogroups", "--haplogrep3", "--cyrius", "--liftover", "--t1k", "--prereqs"]
+    if flag not in allowed:
+        return JSONResponse({"ok": False, "error": f"Invalid flag: {flag}"}, status_code=400)
+
+    with _install_jobs_lock:
+        # Only allow one install at a time
+        for jid, job in _install_jobs.items():
+            if job.get("running"):
+                return JSONResponse({"ok": False, "error": "Another install is already running", "job_id": jid}, status_code=409)
+
+    job_id = str(uuid.uuid4())[:8]
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "setup_data.sh")
+
+    def _run_install():
+        try:
+            proc = subprocess.Popen(
+                ["bash", script, flag],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+            )
+            with _install_jobs_lock:
+                _install_jobs[job_id]["pid"] = proc.pid
+            output_lines = []
+            for line in proc.stdout:
+                output_lines.append(line)
+                with _install_jobs_lock:
+                    _install_jobs[job_id]["output"] = "".join(output_lines)
+            proc.wait()
+            with _install_jobs_lock:
+                _install_jobs[job_id]["running"] = False
+                _install_jobs[job_id]["exit_code"] = proc.returncode
+        except Exception as e:
+            with _install_jobs_lock:
+                _install_jobs[job_id]["running"] = False
+                _install_jobs[job_id]["error"] = str(e)
+
+    with _install_jobs_lock:
+        _install_jobs[job_id] = {"flag": flag, "running": True, "output": "", "pid": None, "exit_code": None, "error": None}
+
+    t = Thread(target=_run_install, daemon=True)
+    t.start()
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/api/settings/install-dep/{job_id}")
+async def get_install_status(request: Request, job_id: str):
+    sid = request.cookies.get(SESSION_COOKIE)
+    username = _resolve_session(sid)
+    if not username:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    with _install_jobs_lock:
+        job = _install_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "job_id": job_id,
+        "running": job["running"],
+        "output": job["output"],
+        "exit_code": job["exit_code"],
+        "error": job["error"],
+    }
+
+
+
+
+# ── Claude.md management ─────────────────────────────────────────
+def _claude_md_path(username):
+    return user_dir(username) / "claude.md"
+
+_CLAUDE_MD_DEFAULT = """# 23andClaude — Genomic Analysis Dashboard
+
+## Project
+Single-page genomic analysis dashboard. Upload BAM/VCF/gVCF files and run 100+ genetic tests including carrier screening, pharmacogenomics, PGS risk scores, ancestry, and more.
+
+## Server
+- FastAPI backend at /home/nimrod_rotem/simple-genomics/
+- Port 8800, supervisor process simple-genomics
+- Reference genome: GRCh38
+
+## Report Index
+<!-- AUTO-UPDATED — do not edit below this line -->
+(No reports generated yet)
+"""
+
+_CLAUDE_MD_MARKER = "<!-- AUTO-UPDATED — do not edit below this line -->"
+
+def _build_report_index(username):
+    """Scan all reports for a user and build a markdown index grouped by file > category > test."""
+    try:
+        files_path = user_dir(username) / "files.json"
+        if not files_path.exists():
+            return "(No reports generated yet)"
+        with open(files_path) as f:
+            files_data = json.load(f)
+        file_entries = files_data.get("files", {})
+        if not file_entries:
+            return "(No reports generated yet)"
+
+        index_parts = []
+        for file_id, fentry in file_entries.items():
+            fname = fentry.get("name", file_id)
+            reports = _load_reports_for_file(username, file_id)
+            if not reports:
+                continue
+            index_parts.append(f"### {fname}")
+            # Group by category
+            by_cat = {}
+            for tid, rep in reports.items():
+                test_def = TESTS_BY_ID.get(tid)
+                cat = test_def["category"] if test_def else "other"
+                by_cat.setdefault(cat, []).append(rep)
+            for cat, reps in sorted(by_cat.items()):
+                index_parts.append(f"**{cat}**")
+                for rep in sorted(reps, key=lambda r: r.get("test_name", "")):
+                    status_icon = "+" if rep.get("status") == "passed" else "-"
+                    headline = rep.get("headline", "")
+                    name = rep.get("test_name", rep.get("test_id", "?"))
+                    index_parts.append(f"  {status_icon} {name}: {headline}")
+            index_parts.append("")
+        return "\n".join(index_parts) if index_parts else "(No reports generated yet)"
+    except Exception as e:
+        logger.warning(f"Failed to build report index: {e}")
+        return "(Error building index)"
+
+def _update_claude_md_index(username):
+    """Rebuild the auto-updated report index in the user's claude.md."""
+    try:
+        path = _claude_md_path(username)
+        if path.exists():
+            content = path.read_text()
+        else:
+            content = _CLAUDE_MD_DEFAULT
+
+        marker = _CLAUDE_MD_MARKER
+        if marker in content:
+            user_part = content.split(marker)[0]
+        else:
+            user_part = content + "\n\n"
+
+        index = _build_report_index(username)
+        new_content = user_part + marker + "\n" + index + "\n"
+        path.write_text(new_content)
+    except Exception as e:
+        logger.warning(f"Failed to update claude.md index: {e}")
+
+
+@app.get("/api/claude-md")
+async def get_claude_md(request: Request):
+    sid = request.cookies.get(SESSION_COOKIE)
+    username = _resolve_session(sid)
+    if not username:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    path = _claude_md_path(username)
+    if path.exists():
+        content = path.read_text()
+    else:
+        # First access — build the index from existing reports
+        content = _CLAUDE_MD_DEFAULT
+        path.write_text(content)
+        _update_claude_md_index(username)
+        content = path.read_text()
+    return {"content": content}
+
+
+@app.put("/api/claude-md")
+
+@app.post("/api/claude-md/rebuild")
+async def rebuild_claude_md(request: Request):
+    sid = request.cookies.get(SESSION_COOKIE)
+    username = _resolve_session(sid)
+    if not username:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    _update_claude_md_index(username)
+    path = _claude_md_path(username)
+    content = path.read_text() if path.exists() else _CLAUDE_MD_DEFAULT
+    return {"ok": True, "content": content}
+
+
+async def put_claude_md(request: Request):
+    sid = request.cookies.get(SESSION_COOKIE)
+    username = _resolve_session(sid)
+    if not username:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    data = await request.json()
+    user_content = data.get("content", "")
+    # Strip any existing auto-updated section from user input
+    marker = _CLAUDE_MD_MARKER
+    if marker in user_content:
+        user_content = user_content.split(marker)[0]
+    # Ensure marker is present at end
+    if not user_content.endswith("\n"):
+        user_content += "\n"
+    # Build fresh index
+    index = _build_report_index(username)
+    full = user_content + marker + "\n" + index + "\n"
+    _claude_md_path(username).write_text(full)
+    return {"ok": True, "content": full}
+
+
+
+# ── OAuth start for Claude Max ────────────────────────────────────
+@app.post("/api/chat/oauth-start")
+async def chat_oauth_start(request: Request):
+    """Start Claude Code in the user's tmux session for OAuth login.
+    Kills any running Claude, unsets API key, and starts fresh."""
+    sid = request.cookies.get(SESSION_COOKIE)
+    username = _resolve_session(sid)
+    if not username:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        from chat import _session_name, _session_exists, _run_tmux, _detect_activity, CLAUDE_CMD, WORK_DIR, EXTRA_PATH
+        import time as _time
+        session = _session_name(username)
+
+        if not _session_exists(session):
+            # Create new session
+            import os as _os
+            _os.makedirs(WORK_DIR, exist_ok=True)
+            _run_tmux(["new-session", "-d", "-s", session, "-c", WORK_DIR], timeout=10)
+            _time.sleep(0.5)
+            if EXTRA_PATH:
+                _run_tmux(["send-keys", "-t", session, "-l", f"export PATH={EXTRA_PATH}:$PATH"])
+                _run_tmux(["send-keys", "-t", session, "Enter"])
+                _time.sleep(0.3)
+        else:
+            # Kill any running Claude process first
+            activity = _detect_activity(username, session)
+            if activity.get("command") in ("claude", "node"):
+                # Send Ctrl+C twice + 'exit' to kill Claude
+                _run_tmux(["send-keys", "-t", session, "C-c"])
+                _time.sleep(0.3)
+                _run_tmux(["send-keys", "-t", session, "C-c"])
+                _time.sleep(0.5)
+                # If claude is still running, send exit
+                _run_tmux(["send-keys", "-t", session, "-l", "exit"])
+                _run_tmux(["send-keys", "-t", session, "Enter"])
+                _time.sleep(1.0)
+
+        # Unset any existing API key in the session
+        _run_tmux(["send-keys", "-t", session, "-l", "unset ANTHROPIC_API_KEY"])
+        _run_tmux(["send-keys", "-t", session, "Enter"])
+        _time.sleep(0.3)
+
+        # Start Claude fresh — without API key it will show OAuth URL
+        _run_tmux([
+            "send-keys", "-t", session, "-l",
+            f"{CLAUDE_CMD} --dangerously-skip-permissions --name {session}",
+        ])
+        _run_tmux(["send-keys", "-t", session, "Enter"])
+        return {"ok": True, "message": "Claude started for OAuth. Check Terminal tab for login URL."}
+    except Exception as e:
+        logger.exception("Failed to start OAuth flow")
+        return JSONResponse({"ok": False, "error": "Failed to start Claude session"}, status_code=500)
 
 
 # ── Frontend ──────────────────────────────────────────────────────
@@ -3244,125 +4728,6 @@ async function submitForm(e) {
 }
 
 
-// ─── Settings view ──────────────────────────────────────────────
-async function loadSettingsView() {
-  try {
-    const r = await fetch(BASE + '/api/settings');
-    if (!r.ok) return;
-    const data = await r.json();
-
-    // Model selector
-    const sel = document.getElementById('settingsInterpModel');
-    if (sel) sel.value = data.interp_model || 'gemini';
-
-    // Key status for each provider
-    for (const provider of ['openai', 'claude']) {
-      const info = (data.keys || {})[provider] || {};
-      const dot = document.getElementById(provider + 'KeyDot');
-      const label = document.getElementById(provider + 'KeyLabel');
-      const masked = document.getElementById(provider + 'KeyMasked');
-      const removeBtn = document.getElementById(provider + 'RemoveBtn');
-      if (info.has_key) {
-        if (dot) dot.classList.add('set');
-        if (label) label.textContent = 'Active:';
-        if (masked) masked.textContent = info.masked || 'set';
-        if (removeBtn) removeBtn.style.display = '';
-      } else {
-        if (dot) dot.classList.remove('set');
-        if (label) label.textContent = 'No key set';
-        if (masked) masked.textContent = '';
-        if (removeBtn) removeBtn.style.display = 'none';
-      }
-    }
-
-    updateModelNote();
-  } catch (e) {
-    console.error('Failed to load settings:', e);
-  }
-}
-
-function updateModelNote() {
-  const sel = document.getElementById('settingsInterpModel');
-  const note = document.getElementById('settingsModelNote');
-  if (!sel || !note) return;
-  const v = sel.value;
-  if (v === 'gemini') {
-    note.textContent = 'Uses the server Vertex AI credential. No API key needed from you.';
-  } else if (v === 'openai') {
-    note.textContent = 'Requires your OpenAI API key below. Uses GPT-4o-mini (~$0.001/interpretation).';
-  } else if (v === 'claude') {
-    note.textContent = 'Requires your Anthropic API key below. Uses Claude Sonnet (~$0.002/interpretation).';
-  }
-}
-
-async function saveInterpModel(model) {
-  updateModelNote();
-  try {
-    await fetch(BASE + '/api/settings/interp-model', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model }),
-    });
-  } catch (e) {
-    console.error('Failed to save model:', e);
-  }
-}
-
-async function saveProviderKey(provider) {
-  const input = document.getElementById(provider + 'KeyInput');
-  const errEl = document.getElementById(provider + 'KeyError');
-  const successEl = document.getElementById(provider + 'KeySuccess');
-  const key = (input ? input.value : '').trim();
-  if (errEl) errEl.style.display = 'none';
-  if (successEl) successEl.style.display = 'none';
-  if (!key) {
-    if (errEl) { errEl.textContent = 'Please enter your API key'; errEl.style.display = 'block'; }
-    return;
-  }
-  try {
-    const r = await fetch(BASE + '/api/settings/provider-key', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, key }),
-    });
-    const data = await r.json();
-    if (data.ok) {
-      if (input) input.value = '';
-      if (successEl) { successEl.textContent = 'Key saved successfully.'; successEl.style.display = 'block'; }
-      loadSettingsView();
-      // Also refresh the chat settings if it was the Claude key
-      if (provider === 'claude') {
-        window.sgHasApiKey = true;
-        window.sgMaskedApiKey = data.masked || null;
-        if (typeof settingsRefreshKeyUI === 'function') settingsRefreshKeyUI();
-        if (typeof updateApiKeyOverlay === 'function') updateApiKeyOverlay();
-      }
-    } else {
-      if (errEl) { errEl.textContent = data.error || 'Failed'; errEl.style.display = 'block'; }
-    }
-  } catch (e) {
-    if (errEl) { errEl.textContent = 'Network error'; errEl.style.display = 'block'; }
-  }
-}
-
-async function removeProviderKey(provider) {
-  if (!confirm('Remove this API key?')) return;
-  try {
-    const r = await fetch(BASE + '/api/settings/provider-key/' + provider, { method: 'DELETE' });
-    const data = await r.json();
-    if (data.ok) {
-      loadSettingsView();
-      if (provider === 'claude') {
-        window.sgHasApiKey = false;
-        window.sgMaskedApiKey = null;
-        if (typeof settingsRefreshKeyUI === 'function') settingsRefreshKeyUI();
-        if (typeof updateApiKeyOverlay === 'function') updateApiKeyOverlay();
-      }
-    }
-  } catch (e) {
-    console.error('Failed to remove key:', e);
-  }
-}
 </script>
 </body>
 </html>
@@ -3880,18 +5245,70 @@ input[type="file"] { display: none; }
 .cat-counts .cnt.failed { color: var(--red); border-color: var(--red); }
 .match-chip {
   display: inline-block;
-  padding: 2px 8px;
+  padding: 1px 6px;
   border-radius: 10px;
-  font-size: 0.7rem;
-  font-weight: 600;
+  font-size: 0.62rem;
+  font-weight: 500;
   font-family: monospace;
   border: 1px solid var(--border);
   margin-left: 6px;
   white-space: nowrap;
+  opacity: 0.65;
 }
 .match-chip.match-green  { color: var(--green);  border-color: var(--green); }
 .match-chip.match-yellow { color: var(--yellow); border-color: var(--yellow); }
 .match-chip.match-red    { color: var(--red);    border-color: var(--red); }
+
+/* Percentile mini-slider */
+.pct-slider { display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; vertical-align: middle; }
+.pct-slider-track {
+  position: relative;
+  border-radius: 3px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  overflow: visible;
+}
+.pct-slider-fill {
+  position: absolute; top: 0; left: 0; bottom: 0;
+  border-radius: 3px 0 0 3px;
+  opacity: 0.25;
+}
+.pct-slider-thumb {
+  position: absolute; top: 50%;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 3px rgba(0,0,0,0.4);
+  z-index: 1;
+}
+.pct-slider-num {
+  font-family: monospace;
+  font-weight: 700;
+  white-space: nowrap;
+}
+/* Percentile bar — large version for modals */
+.pct-bar-lg { margin-top: 10px; }
+.pct-bar-lg .pct-lg-labels { display: flex; justify-content: space-between; font-size: 0.6rem; color: var(--text2); margin-bottom: 2px; }
+.pct-bar-lg .pct-lg-track {
+  position: relative; height: 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: visible;
+}
+.pct-bar-lg .pct-lg-fill {
+  position: absolute; top: 0; left: 0; bottom: 0;
+  border-radius: 4px 0 0 4px;
+  opacity: 0.2;
+}
+.pct-bar-lg .pct-lg-thumb {
+  position: absolute; top: 50%;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 4px rgba(0,0,0,0.4);
+  z-index: 1;
+}
+.pct-bar-lg .pct-lg-value { text-align: center; font-size: 0.75rem; margin-top: 4px; font-weight: 600; font-family: monospace; }
 .meta-item.match-green  span { color: var(--green); }
 .meta-item.match-yellow span { color: var(--yellow); }
 .meta-item.match-red    span { color: var(--red); }
@@ -3947,6 +5364,167 @@ input[type="file"] { display: none; }
 .prep-help { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; background: var(--bg3, #333); color: var(--text2, #aaa); font-size: 0.6rem; font-weight: 700; cursor: help; margin-left: 4px; position: relative; vertical-align: middle; }
 .prep-help:hover .prep-tooltip, .prep-help:focus .prep-tooltip { display: block; }
 .prep-tooltip { display: none; position: absolute; bottom: 120%; left: 50%; transform: translateX(-50%); width: 280px; padding: 8px 10px; background: var(--bg2, #1e1e2e); border: 1px solid var(--border, #333); border-radius: 6px; font-size: 0.7rem; font-weight: 400; line-height: 1.4; color: var(--text, #eee); box-shadow: 0 4px 12px rgba(0,0,0,0.4); z-index: 1000; white-space: normal; text-align: left; }
+
+/* ── Profile system ─────────────────────────────────────── */
+.profile-bar {
+  display: flex; align-items: center; gap: 8px;
+}
+.profile-select {
+  flex: 1; min-width: 0;
+  padding: 6px 10px; font-size: 0.78rem;
+  background: var(--surface2, #1a2332); color: var(--text, #e2e8f0);
+  border: 1px solid var(--border, #2d3748); border-radius: 6px;
+  cursor: pointer;
+}
+.profile-select:focus { border-color: var(--accent, #6c9fff); outline: none; }
+.profile-manage-btn {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text2, #94a3b8); font-size: 0.7rem; padding: 4px 8px;
+  border-radius: 4px; cursor: pointer; white-space: nowrap;
+}
+.profile-manage-btn:hover { background: var(--surface2); color: var(--text); }
+.profile-files-bar {
+  display: flex; gap: 4px; flex-wrap: wrap;
+  margin-top: 4px; padding: 0 2px;
+}
+.profile-file-chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 0.65rem; padding: 2px 6px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 10px; color: var(--text2);
+}
+.profile-file-chip.preferred { border-color: var(--accent, #6c9fff); color: var(--accent); }
+.profile-file-chip .chip-type {
+  font-weight: 600; text-transform: uppercase; font-size: 0.6rem;
+}
+/* File-used badge on test rows */
+.file-used-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 0.6rem; padding: 1px 5px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 8px; color: var(--text2); margin-left: 4px;
+}
+.file-used-badge .badge-type { font-weight: 600; text-transform: uppercase; }
+.retry-badge {
+  display: inline-flex; align-items: center; gap: 2px;
+  font-size: 0.6rem; padding: 1px 5px;
+  background: rgba(251, 191, 36, 0.15); border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: 8px; color: #fbbf24; margin-left: 4px;
+}
+.change-file-btn {
+  font-size: 0.6rem; padding: 1px 5px; margin-left: 2px;
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text2); border-radius: 4px; cursor: pointer;
+}
+.change-file-btn:hover { background: var(--surface2); color: var(--text); }
+.run-file-select {
+  font-size: 0.65rem; padding: 2px 4px;
+  background: var(--surface2); color: var(--text2);
+  border: 1px solid var(--border); border-radius: 4px;
+  cursor: pointer; max-width: 100px;
+}
+.run-file-select:hover { border-color: var(--accent); }
+/* Profile modal */
+.profile-modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  z-index: 9999; display: flex; align-items: center; justify-content: center;
+}
+.profile-modal {
+  background: var(--surface, #111827); border: 1px solid var(--border);
+  border-radius: 12px; padding: 24px; width: 90%; max-width: 500px;
+  max-height: 80vh; overflow-y: auto; color: var(--text);
+}
+.profile-modal h3 { margin: 0 0 16px 0; font-size: 1.1rem; }
+.profile-modal label { display: block; font-size: 0.75rem; color: var(--text2); margin-bottom: 4px; }
+.profile-modal input[type="text"] {
+  width: 100%; padding: 8px 10px; background: var(--surface2);
+  border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+  font-size: 0.85rem; margin-bottom: 12px;
+}
+.profile-modal .file-list { margin: 8px 0; }
+.profile-modal .file-list-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px; margin-bottom: 4px;
+  font-size: 0.78rem; cursor: pointer;
+}
+.profile-modal .file-list-item .fl-type {
+  font-weight: 600; font-size: 0.7rem; text-transform: uppercase;
+  padding: 2px 5px; background: var(--surface2); border-radius: 4px;
+  min-width: 40px; text-align: center;
+}
+.profile-modal .file-list-item .fl-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.profile-modal .modal-btns { display: flex; gap: 8px; margin-top: 16px; }
+.profile-modal .modal-btns button {
+  padding: 8px 16px; border-radius: 6px; font-size: 0.8rem; cursor: pointer; border: none;
+}
+.profile-modal .btn-primary { background: var(--accent, #6c9fff); color: #000; font-weight: 600; }
+.profile-modal .btn-primary:hover { opacity: 0.9; }
+.profile-modal .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border) !important; }
+.profile-modal .btn-danger { background: #ef4444; color: white; }
+.profile-modal .btn-danger:hover { background: #dc2626; }
+
+/* ── Multi-result rows ──────────────────────────────────── */
+.test-status-multi { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.result-line {
+  display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+  padding: 2px 6px; border-radius: 4px; min-height: 22px;
+}
+.result-line-secondary {
+  background: var(--surface2); opacity: 0.85; font-size: 0.9em;
+  border-left: 2px solid var(--border);
+}
+.result-line .view-btn-sm {
+  font-size: 0.6rem; padding: 1px 6px; margin-left: auto;
+}
+/* Per-file run lines in profile mode */
+.file-run-grid { display: flex; flex-direction: column; gap: 3px; grid-column: 2 / 4; }
+.file-run-line {
+  display: flex; align-items: center; gap: 6px; min-height: 24px;
+  padding: 2px 0; font-size: 0.82rem;
+}
+.file-run-line .frl-play {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 50%; border: none;
+  background: var(--green, #4ade80); color: #000; font-size: 0.65rem;
+  cursor: pointer; flex-shrink: 0; transition: opacity 0.15s;
+  padding: 0; line-height: 1;
+}
+.file-run-line .frl-play:hover { opacity: 0.8; }
+.file-run-line .frl-play:disabled { opacity: 0.3; cursor: not-allowed; }
+.file-run-line .frl-play.running { background: var(--accent, #6c9fff); animation: pulse 1s infinite; }
+.file-run-line .frl-type {
+  font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+  min-width: 36px; color: var(--text2, #aaa);
+}
+.file-run-line .frl-name {
+  font-size: 0.72rem; color: var(--text2, #aaa); max-width: 120px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-run-line .frl-result {
+  display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0;
+}
+.file-run-line .frl-result .status-dot { width: 6px; height: 6px; }
+.file-run-line .frl-result .headline {
+  font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-run-line .frl-result .match-chip { font-size: 0.6rem; padding: 0 4px; }
+.file-run-line .view-btn-sm {
+  font-size: 0.58rem; padding: 1px 5px; margin-left: auto; flex-shrink: 0;
+}
+/* Comparison cards in report modal */
+.compare-card {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 8px; background: var(--surface2);
+}
+.compare-card.compare-best { border-color: var(--accent, #6c9fff); }
+.compare-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.compare-fname { font-size: 0.78rem; color: var(--text2); overflow: hidden; text-overflow: ellipsis; }
+.compare-best-tag {
+  font-size: 0.6rem; padding: 1px 6px; background: var(--accent, #6c9fff);
+  color: #000; border-radius: 8px; font-weight: 600;
+}
+.compare-stats { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.compare-hl { font-size: 0.75rem; color: var(--text2); margin-top: 4px; }
 .file-select-hint { font-size: 0.7rem; color: var(--text2, #aaa); margin-top: 3px; padding: 2px 0; }
 .file-select-hint a { color: var(--accent, #6c9fff); text-decoration: underline; cursor: pointer; }
 .test-info p { font-size: 0.75rem; color: var(--text2); margin-top: 2px; }
@@ -4247,11 +5825,18 @@ input[type="file"] { display: none; }
 .tests-tab.active .tab-count { color: var(--accent); opacity: 0.85; }
 
 /* Filter bar */
-.filter-bar {
+.filter-bar, .filter-inline {
   display: inline-block;
   position: relative;
-  margin-bottom: 10px;
 }
+.tests-tabs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.tests-tabs-row .tests-tabs { flex: 1; min-width: 0; }
+.tests-tabs-row .filter-inline { flex-shrink: 0; }
 .filter-toggle-btn {
   padding: 7px 16px;
   border: 1px solid var(--border);
@@ -4617,6 +6202,17 @@ input[type="file"] { display: none; }
   margin-top: 8px;
   display: none;
 }
+.settings-action-btn {
+  background: var(--accent, #6366f1);
+  color: #fff;
+  border: none;
+  padding: 8px 18px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  font-weight: 500;
+}
+.settings-action-btn:hover { opacity: 0.85; }
 .settings-key-actions {
   margin-top: 12px;
   display: flex;
@@ -4642,7 +6238,7 @@ input[type="file"] { display: none; }
 .settings-key-row .key-dot.set { background: #3fb950; }
 .btn-danger-sm { padding: 8px 12px; border-radius: 8px; border: 1px solid #f8717166; background: transparent; color: #f87171; font-size: 0.8rem; cursor: pointer; }
 .btn-danger-sm:hover { background: #f8717122; }
-.nav-settings { font-size: 1.1em !important; opacity: 0.7; }
+.nav-settings { font-size: 1.1em !important; opacity: 0.7; color: #c9d1d9; text-decoration: none; }
 .nav-settings:hover, .nav-settings.active { opacity: 1; }
 
 /* File tags */
@@ -4677,6 +6273,32 @@ input[type="file"] { display: none; }
   text-decoration: none;
   margin-top: 4px;
 }
+
+/* Server info cards */
+.server-info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-bottom: 20px; }
+.server-card { background: var(--surface2, #1a2332); border: 1px solid var(--border, #30363d); border-radius: 8px; padding: 12px; }
+.server-card-label { font-size: 0.65rem; color: var(--text2, #8b949e); text-transform: uppercase; letter-spacing: 0.5px; }
+.server-card-value { font-size: 1.1rem; font-weight: 600; color: var(--text, #e2e8f0); margin-top: 2px; }
+.server-card-sub { font-size: 0.72rem; color: var(--text2, #8b949e); margin-top: 2px; }
+
+/* Dependency checklist */
+.deps-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; margin-bottom: 16px; }
+.dep-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--surface2, #1a2332); border-radius: 6px; font-size: 0.8rem; }
+.dep-item .dep-icon { font-size: 1rem; flex-shrink: 0; }
+.dep-item .dep-name { font-weight: 500; color: var(--text, #e2e8f0); }
+.dep-item .dep-ver { font-size: 0.7rem; color: var(--text2, #8b949e); font-family: monospace; }
+.dep-item .dep-size { font-size: 0.68rem; color: var(--text2, #8b949e); margin-left: auto; }
+.dep-item.missing { border: 1px solid var(--red, #f85149); opacity: 0.85; }
+.dep-item.missing .dep-name { color: var(--red, #f85149); }
+.dep-install-btn { font-size: 0.68rem; padding: 2px 8px; border: 1px solid var(--accent, #58a6ff); border-radius: 6px; background: transparent; color: var(--accent, #58a6ff); cursor: pointer; margin-left: auto; }
+.dep-install-btn:hover { background: var(--accent, #58a6ff); color: white; }
+.install-progress { background: var(--bg, #0d1117); border: 1px solid var(--border, #30363d); border-radius: 6px; padding: 8px 12px; margin-top: 8px; font-family: monospace; font-size: 0.72rem; max-height: 200px; overflow-y: auto; white-space: pre-wrap; color: var(--text2, #8b949e); }
+
+/* Claude.md editor */
+.claudemd-editor { display: flex; flex-direction: column; height: 100%; }
+.claudemd-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border, #30363d); }
+.claudemd-textarea { flex: 1; width: 100%; background: var(--bg, #0d1117); color: var(--text, #e2e8f0); border: none; padding: 12px; font-family: monospace; font-size: 0.82rem; resize: none; outline: none; }
+.claudemd-status { font-size: 0.75rem; color: var(--text2, #8b949e); }
 .settings-info-link:hover { text-decoration: underline; }
 
 .chat-messages {
@@ -4766,6 +6388,41 @@ input[type="file"] { display: none; }
 .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
 @keyframes chat-bounce { 0%,80%,100% { transform: scale(0.7); opacity: 0.4; } 40% { transform: scale(1); opacity: 1; } }
 
+/* ── Status pill ── */
+.chat-status-pill { font-size: 0.72rem; padding: 3px 10px; border-radius: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 5px; transition: all 0.3s; }
+.chat-status-pill.busy { background: #f8514930; color: #f85149; border: 1.5px solid #f8514966; animation: chatPulseBusy 1.5s ease-in-out infinite; }
+.chat-status-pill.idle { background: #3fb95022; color: #3fb950; border: 1px solid #3fb95044; }
+.chat-status-pill.stopped { background: #8b949e22; color: #8b949e; border: 1px solid #8b949e44; }
+.chat-status-pill .status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.chat-model-badge { display: inline-block; background: #30363d; color: #c9d1d9; font-size: 0.62rem; font-weight: 500; padding: 2px 8px; border-radius: 10px; margin-left: 6px; }
+@keyframes chatPulseBusy { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+
+/* ── Raw controls bar ── */
+.chat-raw-controls { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 0.75rem; color: var(--text2, #8b949e); border-bottom: 1px solid var(--border, #21262d); margin-bottom: 4px; }
+.chat-raw-controls .raw-info { flex: 1; }
+.chat-raw-controls button { font-size: 0.7rem; padding: 3px 10px; border: 1px solid #30363d; border-radius: 4px; background: #21262d; color: #c9d1d9; cursor: pointer; }
+.chat-raw-controls button:hover { background: #30363d; border-color: #484f58; }
+
+/* ── Key bar ── */
+.chat-key-bar { display: none; align-items: center; gap: 6px; padding: 6px 8px; background: #161b22; border: 1px solid #21262d; border-radius: 0 0 6px 6px; flex-wrap: wrap; border-top: none; }
+.chat-key-bar.expanded { display: flex; }
+.chat-key-bar-toggle { display: flex; align-items: center; justify-content: center; gap: 4px; margin-top: 4px; padding: 4px 10px; font-size: 0.68rem; color: #8b949e; background: #161b22; border: 1px solid #21262d; border-radius: 6px; cursor: pointer; user-select: none; transition: all 0.15s; width: 100%; flex-shrink: 0; }
+.chat-key-bar-toggle:hover { background: #1c2128; color: #c9d1d9; border-color: #30363d; }
+.chat-key-bar-toggle.open { border-radius: 6px 6px 0 0; border-bottom: none; }
+.chat-key-bar-toggle .kb-chevron { transition: transform 0.2s; display: inline-block; font-size: 0.6rem; }
+.chat-key-bar-toggle.open .kb-chevron { transform: rotate(180deg); }
+.kb-label { font-size: 0.65rem; color: #6e7681; text-transform: uppercase; letter-spacing: 0.04em; margin-right: 4px; user-select: none; white-space: nowrap; }
+.kb-btn { display: inline-flex; align-items: center; justify-content: center; padding: 4px 10px; font-size: 0.72rem; font-family: 'SF Mono', 'Fira Code', Consolas, monospace; font-weight: 500; color: #c9d1d9; background: #21262d; border: 1px solid #30363d; border-radius: 4px; cursor: pointer; transition: all 0.15s; user-select: none; white-space: nowrap; line-height: 1.3; }
+.kb-btn:hover { background: #30363d; color: #f0f6fc; border-color: #484f58; }
+.kb-btn:active { background: #484f58; transform: scale(0.95); }
+.kb-btn.kb-esc { color: #f0883e; border-color: #f0883e55; }
+.kb-btn.kb-esc:hover { background: #f0883e22; color: #ffb366; }
+.kb-btn.kb-ctrlc { color: #f85149; border-color: #f8514955; }
+.kb-btn.kb-ctrlc:hover { background: #f8514922; color: #ff7b73; }
+.kb-btn.kb-slash { color: #d2a8ff; border-color: #d2a8ff44; font-size: 0.68rem; }
+.kb-btn.kb-slash:hover { background: #d2a8ff22; color: #f0f6fc; border-color: #d2a8ff88; }
+.kb-sep { width: 1px; height: 18px; background: #30363d; margin: 0 2px; }
+
 .chat-input-bar {
   display: flex;
   align-items: flex-end;
@@ -4811,6 +6468,147 @@ input[type="file"] { display: none; }
   font-size: 0.85rem;
   cursor: pointer;
 }
+/* --- Master Summary --- */
+.master-summary-section {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  background: var(--bg, #0d1117);
+}
+.master-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  cursor: pointer;
+  user-select: none;
+}
+.master-summary-header:hover { background: var(--surface2); }
+.master-summary-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+.master-summary-chevron { font-size: 0.7rem; color: var(--muted); width: 12px; }
+.master-summary-badge {
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.master-summary-badge.generating {
+  background: rgba(56, 139, 253, 0.15);
+  color: #58a6ff;
+}
+.master-summary-badge.recommend {
+  background: rgba(210, 153, 34, 0.15);
+  color: #d29922;
+}
+.master-summary-meta { font-size: 0.75rem; color: var(--muted); }
+.master-summary-new { color: #d29922; font-weight: 600; }
+.master-summary-body {
+  max-height: 50vh;
+  overflow-y: auto;
+  padding: 0 16px 12px;
+}
+.master-summary-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.ms-profile-select {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+  outline: none;
+  min-width: 140px;
+}
+.ms-profile-select:focus { border-color: var(--green, #3fb950); }
+.master-summary-generate-btn {
+  background: var(--green, #3fb950);
+  color: #fff;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.master-summary-generate-btn:hover { filter: brightness(1.1); }
+.master-summary-generate-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.master-summary-hint { font-size: 0.78rem; color: var(--muted); }
+.master-summary-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.master-summary-content {
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--text);
+}
+.master-summary-content h1,
+.master-summary-content h2,
+.master-summary-content h3 {
+  color: var(--text);
+  margin-top: 16px;
+  margin-bottom: 8px;
+}
+.master-summary-content h1 { font-size: 1.15rem; }
+.master-summary-content h2 { font-size: 1.0rem; }
+.master-summary-content h3 { font-size: 0.92rem; }
+.master-summary-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 0.8rem;
+}
+.master-summary-content th,
+.master-summary-content td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+.master-summary-content th {
+  background: var(--surface2);
+  font-weight: 600;
+}
+.master-summary-content ul,
+.master-summary-content ol {
+  padding-left: 20px;
+  margin: 6px 0;
+}
+.master-summary-content li { margin-bottom: 4px; }
+.master-summary-content strong { color: var(--text); }
+.master-summary-content code {
+  background: var(--surface2);
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 0.82rem;
+}
+.master-summary-content blockquote {
+  border-left: 3px solid var(--border);
+  margin: 8px 0;
+  padding: 4px 12px;
+  color: var(--muted);
+}
+.master-summary-content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
 .chat-raw-prompt {
   color: var(--green, #3fb950);
   font-family: ui-monospace, monospace;
@@ -4820,26 +6618,31 @@ input[type="file"] { display: none; }
 }
 
 .chat-raw-output {
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  padding: 12px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: #c9d1d9;
   flex: 1;
-  overflow: auto;
-  background: var(--bg, #0d1117);
-  font-family: ui-monospace, "SF Mono", Consolas, monospace;
-  font-size: 0.78rem;
-  line-height: 1.4;
-  padding: 12px 16px;
+  min-height: 120px;
+  max-height: calc(100vh - 320px);
+  overflow-y: auto;
+  white-space: pre;
+  word-wrap: normal;
+  overflow-x: auto;
 }
-.chat-raw-pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text);
-}
-.chat-raw-empty {
-  color: var(--text2);
-  font-style: italic;
-  text-align: center;
-  margin-top: 40px;
-}
+.chat-raw-output::-webkit-scrollbar { width: 6px; height: 6px; }
+.chat-raw-output::-webkit-scrollbar-track { background: #0d1117; }
+.chat-raw-output::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+.chat-raw-pre { margin: 0; white-space: pre-wrap; word-wrap: break-word; }
+.chat-raw-empty { color: var(--text2, #8b949e); padding: 20px; text-align: center; }
+
+.cmd-bar { display: flex; align-items: flex-end; gap: 8px; padding: 8px; border-top: 1px solid var(--border, #21262d); background: var(--surface2, #1a2332); flex-shrink: 0; }
+.cmd-bar textarea { flex: 1; resize: none; background: #0d1117; color: #c9d1d9; border: 1px solid #21262d; border-radius: 6px; padding: 8px 12px; font-family: 'SF Mono', 'Fira Code', Consolas, monospace; font-size: 0.82rem; line-height: 1.4; max-height: 150px; min-height: 36px; outline: none; }
+.cmd-bar textarea:focus { border-color: var(--green, #3fb950); }
 .view h2 {
   font-size: 1.3rem;
   font-weight: 600;
@@ -4902,12 +6705,16 @@ input[type="file"] { display: none; }
 .reports-row .rep-when .time { color: var(--text2); font-size: 0.68rem; }
 
 /* PGS rate cells */
-.reports-row .rep-match,
-.reports-row .rep-pct {
+.reports-row .rep-match {
   font-family: monospace;
   font-size: 0.78rem;
   text-align: right;
   font-weight: 600;
+}
+.reports-row .rep-pct {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
 }
 .reports-row .rep-match.match-green  { color: var(--green); }
 .reports-row .rep-match.match-yellow { color: var(--yellow); }
@@ -5068,10 +6875,17 @@ input[type="file"] { display: none; }
         <a href="#/chat" data-view="chat">AI</a>
         <a href="#/tests" data-view="tests">Runs</a>
         <a href="#/reports" data-view="reports">Reports</a>
-        <a href="#/settings" data-view="settings" class="nav-settings">⚙</a>
+
       </nav>
       <div class="header-active-file">
-        <select class="file-select" id="fileSelect" onchange="selectFile(this.value)">
+        <div class="profile-bar">
+          <select class="profile-select" id="profileSelect" onchange="switchProfileOrFile(this.value)">
+            <option value="">— loading —</option>
+          </select>
+
+        </div>
+
+        <select class="file-select" id="fileSelect" onchange="selectFile(this.value)" style="display:none">
           <option value="">— no file loaded —</option>
         </select>
       </div>
@@ -5085,6 +6899,7 @@ input[type="file"] { display: none; }
           <a href="/convert" target="_blank">File Converter</a>
         </div>
       </div>
+      <a href="#/settings" data-view="settings" class="nav-settings" title="Settings" style="margin-left:6px;">&#9881;</a>
       <div class="header-badges">
         <div class="user-chip" id="userChip" style="display:none" title="Signed in">
           <span class="user-dot"></span>
@@ -5107,8 +6922,7 @@ input[type="file"] { display: none; }
 <div class="container">
   <!-- Tests view -->
   <div id="view-tests" class="view">
-    <div class="tests-tabs" id="testsTabs"></div>
-    <div class="filter-bar" id="filterBar"></div>
+    <div class="tests-tabs-row"><div class="tests-tabs" id="testsTabs"></div><div class="filter-inline" id="filterBar"></div></div>
     <div class="top-controls">
       <input type="text" class="search-box" id="searchBox" placeholder="Search tests..." oninput="filterTests()">
       <button onclick="expandAll()">Expand All</button>
@@ -5176,24 +6990,25 @@ input[type="file"] { display: none; }
     </div>
     <div class="chat-panel">
       <div class="chat-header">
-        <div class="chat-header-left">
-          <h2>AI Assistant</h2>
-          <span class="chat-status-badge" id="chatStatusBadge">
-            <span class="chat-status-dot"></span>
-            <span id="chatStatusText">Loading…</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="chatStatusBadge" class="chat-status-pill idle">
+            <span class="status-dot"></span>
+            <span id="chatStatusText">Ready</span>
           </span>
+          <span class="chat-model-badge" id="chatModelBadge" style="display:none"></span>
         </div>
         <div class="chat-header-actions">
-          <button onclick="chatRestart()">Restart</button>
-          <button onclick="chatClear()">Clear</button>
+          <button onclick="chatRestart()" title="Kill &amp; restart session">Restart</button>
+          <button onclick="chatClear()" title="Clear chat history">Clear</button>
         </div>
       </div>
 
       <div class="chat-tab-bar">
         <button class="chat-tab" id="chatTabTerminal" onclick="chatSwitchTab('terminal')">Terminal</button>
         <button class="chat-tab" id="chatTabChat" onclick="chatSwitchTab('chat')">Chat</button>
-        <button class="chat-tab" id="chatTabSettings" onclick="chatSwitchTab('settings')">Settings</button>
-        <button class="chat-tab-stop" id="chatStopBtn" onclick="chatInterrupt()" style="display:none">Stop</button>
+        <button class="chat-tab" id="chatTabSettings" onclick="chatSwitchTab('settings')">Connect</button>
+        <button class="chat-tab" id="chatTabClaudemd" onclick="chatSwitchTab('claudemd')">Claude.md</button>
+
       </div>
 
       <!-- Chat sub-tab -->
@@ -5217,18 +7032,108 @@ input[type="file"] { display: none; }
                     onkeydown="chatInputKey(event)" oninput="chatInputAutosize()"></textarea>
           <button class="chat-send-btn" id="chatSendBtn" onclick="chatSend()">Send</button>
         </div>
+
+        <!-- Master Summary section -->
+        <div class="master-summary-section" id="masterSummarySection">
+          <div class="master-summary-header" onclick="masterSummaryToggle()">
+            <div class="master-summary-title">
+              <span class="master-summary-chevron" id="msSummaryChevron">&#x25B6;</span>
+              <span>Master Summary</span>
+              <span class="master-summary-badge" id="msBadge" style="display:none"></span>
+            </div>
+            <div class="master-summary-meta" id="msMeta"></div>
+          </div>
+          <div class="master-summary-body" id="msSummaryBody" style="display:none">
+            <div class="master-summary-actions">
+              <select id="msProfileSelect" class="ms-profile-select" onchange="masterSummaryProfileChanged()">
+                <option value="">All profiles (everyone)</option>
+              </select>
+              <button class="master-summary-generate-btn" id="msGenerateBtn" onclick="masterSummaryGenerate()">
+                Generate Summary
+              </button>
+              <span class="master-summary-hint" id="msHint"></span>
+            </div>
+            <div class="master-summary-loading" id="msLoading" style="display:none">
+              <div class="typing-dots"><span></span><span></span><span></span></div>
+              <span>AI is analyzing your reports...</span>
+            </div>
+            <div class="master-summary-content" id="msContent"></div>
+          </div>
+        </div>
+
+        <div class="chat-key-bar-toggle" onclick="toggleChatKeyBar(this)">
+          <span class="kb-chevron">&#x25BC;</span> Keys &amp; Commands
+        </div>
+        <div class="chat-key-bar" id="chatKeyBar2">
+          <span class="kb-label">Keys:</span>
+          <button class="kb-btn kb-esc" onclick="chatSendKeys(['Escape'])" title="Escape">Esc</button>
+          <button class="kb-btn kb-ctrlc" onclick="chatSendKeys(['C-c'])" title="Ctrl+C — interrupt">Ctrl+C</button>
+          <button class="kb-btn" onclick="chatSendKeys(['C-u'])" title="Ctrl+U — clear input">Clear Input</button>
+          <span class="kb-sep"></span>
+          <button class="kb-btn" onclick="chatSendKeys(['Enter'])" title="Enter">Enter</button>
+          <button class="kb-btn" onclick="chatSendKeys(['Space'])" title="Space">Space</button>
+          <button class="kb-btn" onclick="chatSendKeys(['q'])" title="q — quit pager">q</button>
+          <button class="kb-btn" onclick="chatSendKeys(['y'])" title="y — yes">y</button>
+          <button class="kb-btn" onclick="chatSendKeys(['n'])" title="n — no">n</button>
+          <span class="kb-sep"></span>
+          <button class="kb-btn" onclick="chatSendKeys(['Up'])" title="Arrow up">&#x2191;</button>
+          <button class="kb-btn" onclick="chatSendKeys(['Down'])" title="Arrow down">&#x2193;</button>
+          <button class="kb-btn" onclick="chatSendKeys(['Tab'])" title="Tab">Tab</button>
+          <button class="kb-btn" onclick="chatSendKeys(['C-d'])" title="Ctrl+D — EOF">Ctrl+D</button>
+          <button class="kb-btn" onclick="chatSendKeys(['C-l'])" title="Ctrl+L — clear screen">Ctrl+L</button>
+          <span class="kb-sep"></span>
+          <span class="kb-label">Cmds:</span>
+          <button class="kb-btn kb-slash" onclick="chatSlashCmd('/clear')" title="Wipe conversation">/clear</button>
+          <button class="kb-btn kb-slash" onclick="chatSlashCmd('/compact')" title="Summarize context">/compact</button>
+          <button class="kb-btn kb-slash" onclick="chatSlashCmd('/cost')" title="Session cost">/cost</button>
+          <button class="kb-btn kb-slash" onclick="chatSlashCmd('/model sonnet')" title="Switch to Sonnet">/model sonnet</button>
+          <button class="kb-btn kb-slash" onclick="chatSlashCmd('/model opus')" title="Switch to Opus">/model opus</button>
+        </div>
       </div>
 
       <!-- Terminal sub-tab -->
       <div id="chatSubTerminal" class="chat-sub" style="display:none">
-        <div class="chat-raw-output" id="chatRawOutput">
-          <div class="chat-raw-empty">Loading terminal output…</div>
+        <div class="chat-raw-controls">
+          <span class="raw-info" id="chatRawInfo">Loading terminal...</span>
+          <button onclick="chatRawLoadFull()" title="Reload full terminal output">Reload</button>
+          <button id="chatStopBtnRaw" onclick="chatInterrupt()" style="display:none">Stop</button>
         </div>
-        <div class="chat-input-bar">
+        <div class="chat-raw-output" id="chatRawOutput">
+          <div class="chat-raw-empty">Loading terminal output...</div>
+        </div>
+        <div class="cmd-bar" style="position:relative">
           <span class="chat-raw-prompt">$</span>
-          <textarea id="chatRawInput" rows="1" placeholder="Type a command and press Enter…"
-                    onkeydown="chatRawKey(event)"></textarea>
+          <textarea id="chatRawInput" rows="1" placeholder="Type a command and press Enter..."
+                    onkeydown="chatRawKey(event)" oninput="chatInputAutosize(this)"></textarea>
           <button class="chat-send-btn" onclick="chatRawSend()">Send</button>
+        </div>
+        <div class="chat-key-bar-toggle" onclick="toggleChatKeyBar(this)">
+          <span class="kb-chevron">&#x25BC;</span> Keys &amp; Commands
+        </div>
+        <div class="chat-key-bar" id="chatKeyBar">
+          <span class="kb-label">Keys:</span>
+          <button class="kb-btn kb-esc" onclick="chatSendKeys(['Escape'])" title="Escape">Esc</button>
+          <button class="kb-btn kb-ctrlc" onclick="chatSendKeys(['C-c'])" title="Ctrl+C — interrupt">Ctrl+C</button>
+          <button class="kb-btn" onclick="chatSendKeys(['C-u'])" title="Ctrl+U — clear input">Clear Input</button>
+          <span class="kb-sep"></span>
+          <button class="kb-btn" onclick="chatSendKeys(['Enter'])" title="Enter">Enter</button>
+          <button class="kb-btn" onclick="chatSendKeys(['Space'])" title="Space">Space</button>
+          <button class="kb-btn" onclick="chatSendKeys(['q'])" title="q — quit pager">q</button>
+          <button class="kb-btn" onclick="chatSendKeys(['y'])" title="y — yes">y</button>
+          <button class="kb-btn" onclick="chatSendKeys(['n'])" title="n — no">n</button>
+          <span class="kb-sep"></span>
+          <button class="kb-btn" onclick="chatSendKeys(['Up'])" title="Arrow up">&#x2191;</button>
+          <button class="kb-btn" onclick="chatSendKeys(['Down'])" title="Arrow down">&#x2193;</button>
+          <button class="kb-btn" onclick="chatSendKeys(['Tab'])" title="Tab">Tab</button>
+          <button class="kb-btn" onclick="chatSendKeys(['C-d'])" title="Ctrl+D — EOF">Ctrl+D</button>
+          <button class="kb-btn" onclick="chatSendKeys(['C-l'])" title="Ctrl+L — clear screen">Ctrl+L</button>
+          <span class="kb-sep"></span>
+          <span class="kb-label">Cmds:</span>
+          <button class="kb-btn kb-slash" onclick="chatSlashCmd('/clear')" title="Wipe conversation">/clear</button>
+          <button class="kb-btn kb-slash" onclick="chatSlashCmd('/compact')" title="Summarize context">/compact</button>
+          <button class="kb-btn kb-slash" onclick="chatSlashCmd('/cost')" title="Session cost">/cost</button>
+          <button class="kb-btn kb-slash" onclick="chatSlashCmd('/model sonnet')" title="Switch to Sonnet">/model sonnet</button>
+          <button class="kb-btn kb-slash" onclick="chatSlashCmd('/model opus')" title="Switch to Opus">/model opus</button>
         </div>
       </div>
 
@@ -5260,6 +7165,29 @@ input[type="file"] { display: none; }
               Get an API key from Anthropic &rarr;
             </a>
           </div>
+
+          <div class="settings-section" style="margin-top:16px; border-top: 1px solid var(--border, #30363d); padding-top: 16px;">
+            <h3>Connect with Claude Max</h3>
+            <p class="settings-desc">
+              If you have a Claude Max subscription, you can connect without an API key.
+              This launches an OAuth flow — click the button, then open the URL shown in the terminal tab.
+            </p>
+            <button class="btn-settings-save" onclick="connectClaudeMax()" id="claudeMaxBtn"
+                    style="margin-top:8px;">Connect with Claude Max</button>
+            <div class="settings-key-success" id="claudeMaxStatus"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Claude.md sub-tab -->
+      <div id="chatSubClaudemd" class="chat-sub" style="display:none">
+        <div class="claudemd-editor">
+          <div class="claudemd-toolbar">
+            <span style="font-weight:600;font-size:0.85rem;">Claude.md</span>
+            <span class="claudemd-status" id="claudemdStatus"></span>
+            <button class="btn-settings-save" onclick="saveClaudeMd()" style="margin-left:auto;">Save</button>
+          </div>
+          <textarea class="claudemd-textarea" id="claudemdTextarea" placeholder="Loading..." spellcheck="false"></textarea>
         </div>
       </div>
     </div>
@@ -5269,9 +7197,28 @@ input[type="file"] { display: none; }
 
   <!-- Settings view -->
   <div id="view-settings" class="view">
-    <div class="settings-page">
-      <h2 class="settings-page-title">⚙ Settings</h2>
+    <div class="settings-page" style="max-width:800px;">
+      <h2 class="settings-page-title">Settings</h2>
 
+      <!-- Server Info -->
+      <div class="settings-section" id="settingsServerSection">
+        <h3>Server Info</h3>
+        <div class="server-info-grid" id="serverInfoGrid">
+          <div class="server-card"><div class="server-card-label">Loading...</div></div>
+        </div>
+      </div>
+
+      <!-- Dependencies -->
+      <div class="settings-section" id="settingsDepsSection">
+        <h3>Dependencies</h3>
+        <h4 style="font-size:0.8rem;color:var(--text2);margin:0 0 8px 0;text-transform:uppercase;letter-spacing:0.5px;">Tools</h4>
+        <div class="deps-grid" id="depsToolsGrid"></div>
+        <h4 style="font-size:0.8rem;color:var(--text2);margin:12px 0 8px 0;text-transform:uppercase;letter-spacing:0.5px;">Data</h4>
+        <div class="deps-grid" id="depsDataGrid"></div>
+        <div class="install-progress" id="installProgress" style="display:none"></div>
+      </div>
+
+      <!-- AI Interpretation Model -->
       <div class="settings-section">
         <h3>AI Interpretation Model</h3>
         <p class="settings-desc">Choose which AI model generates the plain-English interpretation of test results.</p>
@@ -5285,6 +7232,7 @@ input[type="file"] { display: none; }
         <div class="settings-model-note" id="settingsModelNote"></div>
       </div>
 
+      <!-- OpenAI Key -->
       <div class="settings-section">
         <h3>OpenAI API Key</h3>
         <p class="settings-desc">Required if you select OpenAI for interpretations. Key is encrypted at rest.</p>
@@ -5303,6 +7251,7 @@ input[type="file"] { display: none; }
         <div class="settings-key-success" id="openaiKeySuccess"></div>
       </div>
 
+      <!-- Anthropic Key -->
       <div class="settings-section">
         <h3>Anthropic API Key</h3>
         <p class="settings-desc">Required if you select Claude for interpretations. Also powers the AI Assistant chat.</p>
@@ -5321,6 +7270,7 @@ input[type="file"] { display: none; }
         <div class="settings-key-success" id="claudeKeySuccess"></div>
       </div>
 
+      <!-- Gemini -->
       <div class="settings-section">
         <h3>Gemini (Vertex AI)</h3>
         <p class="settings-desc">Uses the server's built-in Vertex AI credentials. No user key needed.</p>
@@ -5328,6 +7278,21 @@ input[type="file"] { display: none; }
           <span class="key-dot set"></span>
           <span class="key-label" style="color: var(--text, #e2e8f0)">Active (server credential)</span>
         </div>
+      </div>
+
+      <!-- Profile Management -->
+      <div class="settings-section">
+        <h3>Profile Management</h3>
+        <p class="settings-desc">Manage your profiles, file assignments, and preferred files.</p>
+        <button class="settings-action-btn" onclick="openProfileModal()">Manage Profiles</button>
+      </div>
+
+      <!-- PGS Enrichment -->
+      <div class="settings-section">
+        <h3>PGS Enrichment</h3>
+        <p class="settings-desc">Refresh all PGS categories with latest scoring data from the PGS Catalog.</p>
+        <button class="settings-action-btn" onclick="enrichAllPgs()" id="enrichAllBtn">Enrich All PGS Categories</button>
+        <div id="enrichAllStatus" style="margin-top:8px;font-size:.8rem;color:var(--text2)"></div>
       </div>
     </div>
   </div>
@@ -5384,9 +7349,43 @@ let categories = [];
 let testStatus = {};  // test_id -> { status, headline, error }
 let taskMap = {};     // test_id -> task_id (latest for the active file)
 
+// ── Curated Short List IDs ────────────────────────────────────────
+const CURATED_IDS = new Set([
+  // Cancer
+  'pgs_breast_4153', 'pgs_prostate_662', 'pgs_colorectal_3979',
+  'pgs_lung_078', 'pgs_pancreatic_794', 'pgs_melanoma_743',
+  // Cardiovascular
+  'pgs_coronary_5091', 'pgs_atrial_5168', 'pgs_hf_5097',
+  'pgs_stroke_2724', 'pgs_vte_043', 'pgs_aortic_3429', 'pgs_coronary_2297',
+  // Metabolic / Endocrine
+  'pgs_t2d_2308', 'pgs_type_4874', 'pgs_ldl_2337',
+  'pgs_bmi_5198', 'pgs_celiac_040', 'pgs_bmd_2632',
+  // Autoimmune / Inflammatory
+  'pgs_ibd_4151', 'pgs_multiple_2726', 'pgs_rheumatoid_4163', 'pgs_asthma_4877',
+  // Neurological / Mental Health
+  'pgs_alzheimers_334', 'pgs_parkinsons_2940', 'pgs_schiz_135',
+  'pgs_depression_3333', 'pgs_adhd_2746', 'pgs_autism_327', 'pgs_addiction_3849',
+  // Renal / Urinary
+  'pgs_ckd_4889',
+  // Eye / Vision
+  'pgs_glaucoma_1797', 'pgs_amd_4606',
+  // Cognitive & Educational
+  'pgs_edu_2012', 'pgs_intelligence_3723',
+  // Lifestyle / Behavioral
+  'pgs_longevity_906',
+  // Validation (one each)
+  'sex_xy_ratio', 'ancestry_pca',
+]);
+
+// Helper: get tests for a given tab key, respecting curated
+function testsForTab(tk, testList) {
+  if (tk === 'curated') return testList.filter(t => CURATED_IDS.has(t.id));
+  return testList.filter(t => tabForCategory(t.category) === tk);
+}
+
 // ── Tab definitions ──────────────────────────────────────────────
 const TAB_DEFS = {
-  general: { label: 'General', categories: ['Sex Check', 'Sample QC', 'Ancestry'] },
+  validations: { label: 'Validations', categories: ['Sex Check', 'Sample QC', 'Ancestry'] },
   polygenic: { label: 'Polygenic Scores', categories: [
     'PGS - Cancer', 'PGS - Cardiovascular', 'PGS - Metabolic',
     'PGS - Autoimmune', 'PGS - Neurological', 'PGS - Traits',
@@ -5395,9 +7394,10 @@ const TAB_DEFS = {
     'Monogenic', 'Carrier Status', 'Single Variants',
     'Fun Traits', 'Nutrigenomics', 'Sports & Fitness', 'Sleep & Circadian'] },
   pharmacogenomics: { label: 'Pharmacogenomics', categories: ['Pharmacogenomics'] },
+  curated: { label: 'Curated Short List', categories: [] },
 };
-const TAB_ORDER = ['general', 'polygenic', 'monogenic', 'pharmacogenomics'];
-let activeTab = 'general';
+const TAB_ORDER = ['curated', 'polygenic', 'monogenic', 'pharmacogenomics', 'validations'];
+let activeTab = 'curated';
 
 function tabForCategory(cat) {
   for (const [key, def] of Object.entries(TAB_DEFS)) {
@@ -5411,7 +7411,7 @@ function renderTabs() {
   const vis = applyFilter(tests);
   el.innerHTML = TAB_ORDER.map(tk => {
     const def = TAB_DEFS[tk];
-    const count = vis.filter(t => tabForCategory(t.category) === tk).length;
+    const count = testsForTab(tk, vis).length;
     const cls = tk === activeTab ? 'tests-tab active' : 'tests-tab';
     return `<button class="${cls}" onclick="switchTab('${tk}')">${def.label}<span class="tab-count">${count}</span></button>`;
   }).join('');
@@ -5425,7 +7425,7 @@ function switchTab(tk) {
 }
 
 // ── Filter presets ──────────────────────────────────────────────
-let activeFilter = null;
+let activeFilters = new Set();
 
 // Each filter defines which test IDs or patterns to EXCLUDE.
 // 'match' is a function(test) => true if the test should be HIDDEN.
@@ -5524,31 +7524,48 @@ const FILTERS = {
 const FILTER_ORDER = ['female', 'male', 'pediatric', 'carrier', 'actionable'];
 
 function applyFilter(testList) {
-  if (!activeFilter || !FILTERS[activeFilter]) return testList;
-  return testList.filter(t => !FILTERS[activeFilter].match(t));
+  if (activeFilters.size === 0) return testList;
+  return testList.filter(t => {
+    for (const fk of activeFilters) {
+      if (FILTERS[fk] && FILTERS[fk].match(t)) return false;
+    }
+    return true;
+  });
 }
 
 function renderFilters() {
   const bar = document.getElementById('filterBar');
-  const tabTests = tests.filter(t => tabForCategory(t.category) === activeTab);
-  const activeLabel = activeFilter ? FILTERS[activeFilter].label : 'All';
-  const btnCls = activeFilter ? 'filter-toggle-btn has-filter' : 'filter-toggle-btn';
+  const tabTests = testsForTab(activeTab, tests);
+  const activeLabels = [];
+  for (const fk of activeFilters) {
+    if (FILTERS[fk]) activeLabels.push(FILTERS[fk].label);
+  }
+  const activeLabel = activeLabels.length ? activeLabels.join(' + ') : 'All';
+  const btnCls = activeFilters.size ? 'filter-toggle-btn has-filter' : 'filter-toggle-btn';
   const popupOpen = bar.querySelector('.filter-popup.open') ? ' open' : '';
 
   const chips = FILTER_ORDER.map(fk => {
     const f = FILTERS[fk];
-    const filtered = tabTests.filter(t => !f.match(t));
-    const cls = fk === activeFilter ? 'filter-chip active' : 'filter-chip';
+    const cls = activeFilters.has(fk) ? 'filter-chip active' : 'filter-chip';
+    // Count how many tests remain when this filter is active (combined with others)
+    const testFilters = new Set(activeFilters);
+    if (testFilters.has(fk)) testFilters.delete(fk); else testFilters.add(fk);
+    const filtered = tabTests.filter(t => {
+      for (const afk of testFilters) {
+        if (FILTERS[afk] && FILTERS[afk].match(t)) return false;
+      }
+      return true;
+    });
     return `<button class="${cls}" onclick="toggleFilter('${fk}')" title="${f.desc}">${f.label}<span class="chip-count">${filtered.length}</span></button>`;
   }).join('');
 
   const allCount = tabTests.length;
-  const allCls = !activeFilter ? 'filter-chip active' : 'filter-chip';
+  const allCls = activeFilters.size === 0 ? 'filter-chip active' : 'filter-chip';
   const allChip = `<button class="${allCls}" onclick="toggleFilter(null)">All<span class="chip-count">${allCount}</span></button>`;
 
   bar.innerHTML = `
     <button class="${btnCls}" onclick="toggleFilterPopup(event)">
-      <span class="filter-icon">⚙</span> Filters: ${activeLabel}
+      <span class="filter-icon">&#9881;</span> Filters: ${activeLabel}
     </button>
     <div class="filter-popup${popupOpen}">
       ${allChip}
@@ -5564,10 +7581,16 @@ function toggleFilterPopup(e) {
 }
 
 function toggleFilter(fk) {
-  activeFilter = (activeFilter === fk) ? null : fk;
-  // Close popup after selection
-  const popup = document.querySelector('.filter-popup');
-  if (popup) popup.classList.remove('open');
+  if (fk === null) {
+    activeFilters.clear();
+  } else if (activeFilters.has(fk)) {
+    activeFilters.delete(fk);
+  } else {
+    // Don't allow both male and female at once
+    if (fk === 'male') activeFilters.delete('female');
+    if (fk === 'female') activeFilters.delete('male');
+    activeFilters.add(fk);
+  }
   renderFilters();
   renderTests();
   renderTabs();
@@ -5575,13 +7598,21 @@ function toggleFilter(fk) {
 
 // Close filter popup when clicking outside
 document.addEventListener('click', function(e) {
-  if (!e.target.closest('.filter-bar')) {
+  if (!e.target.closest('.filter-bar') && !e.target.closest('.filter-inline')) {
     const popup = document.querySelector('.filter-popup');
     if (popup) popup.classList.remove('open');
   }
 });
 let files = [];       // [{id, name, path, source, size, added_at}]
 let activeFileId = null;
+
+// ── Profile state ───────────────────────────────────────────────
+let profiles = [];      // [{id, name, file_ids, file_details, preferred_file, ...}]
+let ungroupedFiles = []; // [{id, name, file_type, ...}]
+let activeProfileId = null;  // currently selected profile id or null for ungrouped/file mode
+// In profile mode, store ALL results per test (one per file).
+// testMultiStatus: { test_id: [{status, headline, file_type, file_id, task_id, ...}, ...] }
+let testMultiStatus = {};
 
 function fmStatus(msg, kind) {
   const el = document.getElementById('fmStatus');
@@ -5606,6 +7637,7 @@ async function init() {
   renderFilters();
   renderTests();
   await refreshFiles();
+  await loadProfiles();
   pollStatus();
 }
 
@@ -5737,6 +7769,289 @@ async function selectFile(fileId) {
   if (currentView() === 'data') renderDataFiles();
 }
 
+
+// ── Profile functions ───────────────────────────────────────────
+
+async function loadProfiles() {
+  try {
+    const resp = await fetch(BASE + '/api/profiles');
+    const data = await resp.json();
+    profiles = data.profiles || [];
+    ungroupedFiles = data.ungrouped_files || [];
+
+    // Auto-select first profile if none is active and profiles exist
+    if (!activeProfileId && profiles.length > 0) {
+      const prof = profiles[0];
+      activeProfileId = prof.id;
+      if (prof.file_details && prof.file_details.length) {
+        activeFileId = prof.file_details[0].id;
+        fetch(BASE + `/api/files/${activeFileId}/select`, { method: 'POST' }).catch(() => {});
+      }
+      testStatus = {};
+      testMultiStatus = {};
+      taskMap = {};
+    }
+    renderProfileSelect();
+    renderTests();
+  } catch (e) {
+    console.error('loadProfiles:', e);
+  }
+}
+
+function renderProfileSelect() {
+  const sel = document.getElementById('profileSelect');
+  if (!sel) return;
+
+  let html = '';
+
+  // Profiles
+  if (profiles.length > 0) {
+    html += '<optgroup label="Profiles">';
+    for (const p of profiles) {
+      const types = (p.file_details || []).map(f => (f.file_type || '').toUpperCase()).filter(Boolean);
+      const typeStr = types.length ? ' [' + [...new Set(types)].join('+') + ']' : '';
+      const sel_attr = (activeProfileId === p.id) ? 'selected' : '';
+      html += `<option value="profile:${p.id}" ${sel_attr}>${escapeHtml(p.name)}${typeStr} (${p.file_count || 0} files)</option>`;
+    }
+    html += '</optgroup>';
+  }
+
+  // Ungrouped files — show as individual file options
+  if (ungroupedFiles.length > 0) {
+    html += '<optgroup label="Ungrouped Files">';
+    for (const f of ungroupedFiles) {
+      const ft = (f.file_type || '').toUpperCase();
+      const tag = ft ? ` [${ft}]` : '';
+      const sel_attr = (!activeProfileId && activeFileId === f.id) ? 'selected' : '';
+      html += `<option value="file:${f.id}" ${sel_attr}>${escapeHtml(f.name)}${tag}</option>`;
+    }
+    html += '</optgroup>';
+  }
+
+  // All files mode
+  const allSel = (!activeProfileId && isAllMode()) ? 'selected' : '';
+  html += `<option value="all" ${allSel}>&#9733; All files (${files.length})</option>`;
+
+  // No data fallback
+  if (!profiles.length && !ungroupedFiles.length && !files.length) {
+    html = '<option value="">\u2014 no files loaded \u2014</option>';
+  }
+
+  sel.innerHTML = html;
+  renderProfileFilesBar();
+}
+
+function renderProfileFilesBar() {
+  return; // file badges removed from header
+  const bar = document.getElementById('profileFilesBar');
+  if (!bar) return;
+  if (!activeProfileId) {
+    bar.innerHTML = '';
+    return;
+  }
+  const prof = profiles.find(p => p.id === activeProfileId);
+  if (!prof || !prof.file_details || !prof.file_details.length) {
+    bar.innerHTML = '';
+    return;
+  }
+  bar.innerHTML = prof.file_details.map(f => {
+    const isPref = Object.values(prof.preferred_file || {}).includes(f.id);
+    const cls = isPref ? 'profile-file-chip preferred' : 'profile-file-chip';
+    const ft = (f.file_type || '').toUpperCase();
+    return `<span class="${cls}"><span class="chip-type">${ft}</span>${escapeHtml(f.name.length > 25 ? f.name.substring(0,22)+'...' : f.name)}</span>`;
+  }).join('');
+}
+
+function switchProfileOrFile(val) {
+  if (!val) return;
+
+  if (val === 'all') {
+    activeProfileId = null;
+    activeFileId = ALL_FILES;
+    testStatus = {};
+    testMultiStatus = {};
+    taskMap = {};
+    renderTests();
+    renderProfileFilesBar();
+    updateVcfBadge();
+    if (currentView() === 'reports') renderReportsView();
+    if (currentView() === 'data') renderDataFiles();
+    return;
+  }
+
+  if (val.startsWith('profile:')) {
+    const profId = val.slice(8);
+    activeProfileId = profId;
+    const prof = profiles.find(p => p.id === profId);
+    if (prof && prof.file_details && prof.file_details.length) {
+      activeFileId = prof.file_details[0].id;
+      fetch(BASE + `/api/files/${activeFileId}/select`, { method: 'POST' }).catch(() => {});
+    }
+    testStatus = {};
+    testMultiStatus = {};
+    taskMap = {};
+    renderTests();
+    renderProfileFilesBar();
+    updateVcfBadge();
+    if (currentView() === 'reports') renderReportsView();
+    if (currentView() === 'data') renderDataFiles();
+    return;
+  }
+
+  if (val.startsWith('file:')) {
+    const fid = val.slice(5);
+    activeProfileId = null;
+    selectFile(fid);
+    renderProfileFilesBar();
+    return;
+  }
+}
+
+// Override runTest to send profile_id when a profile is active
+async function runTestWithProfile(testId) {
+  const data = await fetch(BASE + `/api/run/${testId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: activeProfileId })
+  }).then(r => r.json());
+  if (!data.ok) { alert(data.error); return; }
+  taskMap[testId] = data.task_id;
+  testStatus[testId] = { status: 'queued', headline: 'queued' };
+  updateRow(testId);
+}
+
+// Store original runTest for fallback
+let _origRunTest = null;
+
+function _normalize_ft(f) {
+  const p = (f.path || f.name || '').toLowerCase();
+  if (p.endsWith('.g.vcf.gz') || p.endsWith('.gvcf.gz') || p.endsWith('.gvcf')) return 'gVCF';
+  if (p.endsWith('.vcf.gz') || p.endsWith('.vcf') || p.endsWith('.bcf')) return 'VCF';
+  if (p.endsWith('.bam')) return 'BAM';
+  if (p.endsWith('.cram')) return 'CRAM';
+  return f.file_type || '';
+}
+
+// Profile modal
+function openProfileModal(editId) {
+  const overlay = document.createElement('div');
+  overlay.className = 'profile-modal-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+  const isEdit = !!editId;
+  const prof = isEdit ? profiles.find(p => p.id === editId) : null;
+
+  const allFilesList = files.map(f => {
+    const ft = _normalize_ft(f);
+    const inProfile = prof ? (prof.file_ids || []).includes(f.id) : false;
+    return `<label class="file-list-item">
+      <input type="checkbox" name="file_ids" value="${f.id}" ${inProfile ? 'checked' : ''}>
+      <span class="fl-type">${ft}</span>
+      <span class="fl-name">${escapeHtml(f.name)}</span>
+    </label>`;
+  }).join('');
+
+  const modal = document.createElement('div');
+  modal.className = 'profile-modal';
+  modal.innerHTML = `
+    <h3>${isEdit ? 'Edit Profile' : 'Create Profile'}</h3>
+    <label>Profile Name</label>
+    <input type="text" id="profNameInput" value="${isEdit ? escapeHtml(prof.name) : ''}" placeholder="e.g. John Doe">
+    <label>Assign Files</label>
+    <div class="file-list">${allFilesList || '<div style="color:var(--text2);font-size:0.8rem">No files available</div>'}</div>
+    <div class="modal-btns">
+      <button class="btn-primary" onclick="saveProfile('${editId || ''}')">${isEdit ? 'Save Changes' : 'Create Profile'}</button>
+      ${isEdit ? `<button class="btn-danger" onclick="deleteProfileConfirm('${editId}')">Delete</button>` : ''}
+      <button class="btn-secondary" onclick="this.closest('.profile-modal-overlay').remove()">Cancel</button>
+    </div>
+  `;
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+}
+
+async function saveProfile(editId) {
+  const name = document.getElementById('profNameInput').value.trim();
+  if (!name) { alert('Please enter a profile name'); return; }
+  const checks = document.querySelectorAll('input[name="file_ids"]:checked');
+  const fileIds = [...checks].map(c => c.value);
+
+  if (editId) {
+    const prof = profiles.find(p => p.id === editId);
+    const oldIds = new Set(prof ? (prof.file_ids || []) : []);
+    const newIds = new Set(fileIds);
+    const addFiles = fileIds.filter(id => !oldIds.has(id));
+    const removeFiles = [...oldIds].filter(id => !newIds.has(id));
+    await fetch(BASE + `/api/profiles/${editId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, add_files: addFiles, remove_files: removeFiles })
+    });
+  } else {
+    await fetch(BASE + '/api/profiles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, file_ids: fileIds })
+    });
+  }
+  document.querySelector('.profile-modal-overlay')?.remove();
+  await loadProfiles();
+  await refreshFiles();
+}
+
+async function deleteProfileConfirm(profId) {
+  const prof = profiles.find(p => p.id === profId);
+  if (!confirm('Delete profile "' + (prof?.name || profId) + '"?\nFiles will be ungrouped, not deleted.')) return;
+  await fetch(BASE + `/api/profiles/${profId}`, { method: 'DELETE' });
+  document.querySelector('.profile-modal-overlay')?.remove();
+  activeProfileId = null;
+  await loadProfiles();
+  await refreshFiles();
+}
+
+// Run a specific test with a specific file from the dropdown
+async function runTestWithFile(testId, fileId) {
+  if (!fileId || !activeProfileId) return;
+  const data = await fetch(BASE + `/api/run/${testId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: activeProfileId, override_file_id: fileId })
+  }).then(r => r.json());
+  if (!data.ok) { alert(data.error); return; }
+  // Optimistic update: mark this specific file as queued in multi-status
+  // without wiping results from other files.
+  const prof = profiles.find(p => p.id === activeProfileId);
+  const fentry = prof ? (prof.file_details || []).find(f => f.id === fileId) : null;
+  const multi = testMultiStatus[testId] || [];
+  const existing = multi.findIndex(m => m.file_id === fileId);
+  const newEntry = {
+    status: 'queued', headline: 'queued', file_id: fileId,
+    file_type: fentry ? fentry.file_type : '',
+    task_id: data.task_id, no_report: true
+  };
+  if (existing >= 0) {
+    multi[existing] = newEntry;
+  } else {
+    multi.push(newEntry);
+  }
+  testMultiStatus[testId] = multi;
+  taskMap[testId] = data.task_id;
+  // Also update primary status to reflect something is running
+  testStatus[testId] = multi.find(m => m.status === 'running' || m.status === 'queued') || multi[0] || newEntry;
+  updateRow(testId);
+}
+
+async function runTestOverride(testId, overrideFileId) {
+  const data = await fetch(BASE + `/api/run/${testId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: activeProfileId, override_file_id: overrideFileId })
+  }).then(r => r.json());
+  if (!data.ok) { alert(data.error); return; }
+  taskMap[testId] = data.task_id;
+  testStatus[testId] = { status: 'queued', headline: 'queued' };
+  updateRow(testId);
+}
+
 async function deleteFile() {
   if (!activeFileId) { fmStatus('No file selected', 'error'); return; }
   const active = files.find(f => f.id === activeFileId);
@@ -5866,6 +8181,42 @@ function updateCategoryHeader(cat) {
   if (el) el.innerHTML = categoryCountsHtml(cat);
 }
 
+function pctColor(p) {
+  if (p == null) return '#4b5563';
+  if (p >= 90) return 'var(--red)';
+  if (p >= 75) return 'var(--yellow)';
+  if (p >= 25) return 'var(--green)';
+  if (p >= 10) return 'var(--yellow)';
+  return 'var(--accent)';
+}
+function pctSlider(pct, opts) {
+  if (pct == null) return '';
+  opts = opts || {};
+  const w = opts.w || 60, h = opts.h || 5, th = opts.th || 9, fs = opts.fs || '0.72rem';
+  const c = pctColor(pct);
+  const pv = typeof pct === 'number' ? pct.toFixed(0) : pct;
+  return '<span class="pct-slider">' +
+    '<span class="pct-slider-track" style="width:' + w + 'px;height:' + h + 'px">' +
+    '<span class="pct-slider-fill" style="width:' + pv + '%;background:' + c + '"></span>' +
+    '<span class="pct-slider-thumb" style="left:' + pv + '%;background:' + c + ';width:' + th + 'px;height:' + th + 'px"></span>' +
+    '</span>' +
+    '<span class="pct-slider-num" style="color:' + c + ';font-size:' + fs + '">' + pv + '%</span>' +
+    '</span>';
+}
+function pctBarLg(pct) {
+  if (pct == null) return '';
+  const c = pctColor(pct);
+  const pv = typeof pct === 'number' ? pct.toFixed(0) : pct;
+  return '<div class="pct-bar-lg">' +
+    '<div class="pct-lg-labels"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>' +
+    '<div class="pct-lg-track">' +
+    '<span class="pct-lg-fill" style="width:' + pv + '%;background:' + c + '"></span>' +
+    '<span class="pct-lg-thumb" style="left:' + pv + '%;background:' + c + '"></span>' +
+    '</div>' +
+    '<div class="pct-lg-value" style="color:' + c + '">' + pv + 'th percentile</div>' +
+    '</div>';
+}
+
 function matchClass(rate) {
   if (rate == null) return '';
   if (rate >= 95) return 'match-green';
@@ -5960,11 +8311,21 @@ function renderTests() {
   document.querySelectorAll('.tests-body.open').forEach(b => wasOpen.add(b.dataset.cat));
   container.innerHTML = '';
 
-  const tabCats = categories.filter(c => tabForCategory(c) === activeTab);
+  let tabCats;
   const filteredTests = applyFilter(tests);
+  if (activeTab === 'curated') {
+    // For curated tab, get categories of curated tests that pass the filter
+    const curatedFiltered = filteredTests.filter(t => CURATED_IDS.has(t.id));
+    const catSet = new Set(curatedFiltered.map(t => t.category));
+    tabCats = categories.filter(c => catSet.has(c));
+  } else {
+    tabCats = categories.filter(c => tabForCategory(c) === activeTab);
+  }
 
   for (const cat of tabCats) {
-    const catTests = filteredTests.filter(t => t.category === cat &&
+    const catTests = filteredTests.filter(t =>
+      (activeTab === 'curated' ? CURATED_IDS.has(t.id) : true) &&
+      t.category === cat &&
       (search === '' || t.name.toLowerCase().includes(search) || t.description.toLowerCase().includes(search) || t.category.toLowerCase().includes(search)));
     if (catTests.length === 0) continue;
 
@@ -6006,7 +8367,7 @@ function renderTests() {
           <span class="cat-counts" id="cat-counts-${slug}">${categoryCountsHtml(cat)}</span>
         </h2>
         <div class="cat-actions">
-          ${cat.startsWith('PGS') ? `<button class="cat-btn enrich-btn" onclick="event.stopPropagation(); refreshPgsCategory('${cat.replace(/'/g, "\\'")}')" id="enrich-btn-${slug}" title="Fetch metadata from PGS Catalog">&#x21bb; Enrich</button>` : ''}
+          
           <button class="cat-btn" onclick="event.stopPropagation(); runCategory('${cat.replace(/'/g, "\\'")}')">Run All</button>
         </div>
       </div>
@@ -6018,22 +8379,144 @@ function renderTests() {
   }
 }
 
-function renderTestRow(t) {
-  const info = testStatus[t.id] || { status: 'idle' };
-  const st = info.status;
-  const headline = info.headline || (st === 'idle' ? '' : st);
-  const error = info.error || '';
+function _renderResultLine(info, isPrimary) {
+  const st = info.status || 'idle';
+  const headline = info.headline || '';
   const noReport = info.no_report === true;
   const hasReport = !noReport && ['passed', 'warning', 'failed', 'completed'].includes(st);
-  const isRunning = st === 'running' || st === 'queued';
-  const title = error ? error.replace(/"/g, '&quot;') : '';
-
-  // PGS quality chip — only when match_rate_value is present and we
-  // actually have a report (i.e. >= 60%).
+  const title = (info.error || '').replace(/"/g, '&quot;');
+  const hasPct = info.percentile != null && !noReport;
+  const hasMatch = info.match_rate_value != null && !noReport;
   let chip = '';
-  if (info.match_rate_value != null && !noReport) {
-    chip = `<span class="match-chip ${matchClass(info.match_rate_value)}">match ${info.match_rate_value}%</span>`;
+  if (hasMatch) {
+    chip = `<span class="match-chip ${matchClass(info.match_rate_value)}">${info.match_rate_value}%</span>`;
   }
+  let pctBar = '';
+  if (hasPct) {
+    pctBar = pctSlider(info.percentile, { w: 56, h: 4, th: 8, fs: '0.7rem' });
+  }
+  // Compact headline: strip trait name prefix + score value (test name is already in the row)
+  let shortHL = '';
+  if (!hasPct && !hasMatch) {
+    // Non-PGS: keep the useful part of the headline
+    const raw = headline;
+    shortHL = raw.includes(': ') ? raw.split(': ').slice(1).join(': ') : raw;
+    shortHL = shortHL.replace(/^score=[\d.eE+-]+,?\s*/i, '').trim();
+    if (shortHL.length > 80) shortHL = shortHL.substring(0, 78) + '..';
+  } else if (st === 'running') {
+    shortHL = 'running…';
+  } else if (st === 'queued') {
+    shortHL = 'queued';
+  }
+  const fileBadge = info.file_type ? `<span class="file-used-badge"><span class="badge-type">${escapeHtml(info.file_type.toUpperCase())}</span></span>` : '';
+  const viewBtn = hasReport && info.task_id ? `<button class="view-btn view-btn-sm" onclick="viewReportByTaskId('${info.task_id}')">View</button>` : '';
+  return `<div class="result-line ${isPrimary ? '' : 'result-line-secondary'} ${st}" title="${title}">
+    ${fileBadge}
+    <span class="status-dot ${st}"></span>
+    ${shortHL ? `<span class="headline">${escapeHtml(shortHL)}</span>` : ''}
+    ${chip}${pctBar}${viewBtn}
+  </div>`;
+}
+
+function renderTestRow(t) {
+  const info = testStatus[t.id] || { status: 'idle' };
+  const multi = testMultiStatus[t.id] || [];
+  const st = info.status;
+  const isRunning = st === 'running' || st === 'queued';
+  const hasAnyReport = multi.length > 0 ? multi.some(m => !m.no_report && ['passed','warning','failed','completed'].includes(m.status))
+    : (!info.no_report && ['passed','warning','failed','completed'].includes(st));
+
+  // Profile mode: show per-file run lines
+  const prof = activeProfileId ? profiles.find(p => p.id === activeProfileId) : null;
+  const profileFiles = prof ? (prof.file_details || []) : [];
+
+  if (activeProfileId && profileFiles.length > 0) {
+    // Build a lookup: file_id -> result info from multi-status
+    const resultByFile = {};
+    for (const m of multi) {
+      if (m.file_id) resultByFile[m.file_id] = m;
+    }
+
+    const fileLines = profileFiles.map(f => {
+      const res = resultByFile[f.id];
+      const fRunning = res && (res.status === 'running' || res.status === 'queued');
+      const fDone = res && !res.no_report && ['passed','warning','failed','completed'].includes(res.status);
+      const playCls = fRunning ? 'frl-play running' : 'frl-play';
+      const shortName = f.name.length > 22 ? f.name.substring(0, 20) + '..' : f.name;
+
+      let resultHtml = '';
+      if (res) {
+        const st2 = res.status || 'idle';
+        const noRep = res.no_report === true;
+        const hasPct = res.percentile != null && !noRep;
+        const hasMatch = res.match_rate_value != null && !noRep;
+        // For PGS-style results: just show match chip + percentile slider (test name is on the left).
+        // For non-PGS results: show a compact headline (no trait prefix).
+        let chip = '';
+        if (hasMatch) {
+          chip = `<span class="match-chip ${matchClass(res.match_rate_value)}">${res.match_rate_value}%</span>`;
+        }
+        let pctBar = '';
+        if (hasPct) {
+          pctBar = pctSlider(res.percentile, { w: 52, h: 4, th: 7, fs: '0.65rem' });
+        }
+        const viewBtn = fDone && res.task_id ? `<button class="view-btn view-btn-sm" onclick="viewReportByTaskId('${res.task_id}')">View</button>` : '';
+        // Compact headline: strip trait name prefix (everything before first colon)
+        // and score=... so only status-like info remains (e.g. "PASS", "Male", running text)
+        let shortHL = '';
+        if (!hasPct && !hasMatch) {
+          // Non-PGS test: show compact headline
+          const raw = (res.headline || '');
+          shortHL = raw.includes(': ') ? raw.split(': ').slice(1).join(': ') : raw;
+          // Also strip score=... prefix if present
+          shortHL = shortHL.replace(/^score=[\d.eE+-]+,?\s*/i, '').trim();
+          if (shortHL.length > 60) shortHL = shortHL.substring(0, 58) + '..';
+        } else if (st2 === 'running') {
+          shortHL = 'running…';
+        } else if (st2 === 'queued') {
+          shortHL = 'queued';
+        }
+        const title = (res.error || '').replace(/"/g, '&quot;');
+        resultHtml = `
+          <span class="status-dot ${st2}"></span>
+          ${shortHL ? `<span class="headline" style="font-size:0.72rem">${escapeHtml(shortHL)}</span>` : ''}
+          ${chip}${pctBar}${viewBtn}`;
+      }
+
+      return `<div class="file-run-line">
+        <button class="${playCls}" onclick="event.stopPropagation(); runTestWithFile('${t.id}','${f.id}')" ${fRunning ? 'disabled' : ''} title="Run with ${escapeHtml(f.name)}">&#9654;</button>
+        <span class="frl-type">${(f.file_type || '').toUpperCase()}</span>
+        <span class="frl-name" title="${escapeHtml(f.name)}">${escapeHtml(shortName)}</span>
+        <div class="frl-result">${resultHtml}</div>
+      </div>`;
+    }).join('');
+
+    const compareBtn = multi.length > 1 && hasAnyReport ? `<button class="view-btn" style="margin-top:4px;font-size:0.7rem" onclick="viewMultiReport('${t.id}')">Compare</button>` : '';
+    const clearBtn = hasAnyReport ? `<button class="clear-row-btn" style="margin-top:4px" onclick="clearSingleReport('${t.id}')" title="Clear all results">Clear</button>` : '';
+
+    return `
+      <div class="test-row" id="row-${t.id}" style="grid-template-columns: 1fr; grid-template-rows: auto auto;">
+        <div class="test-info">
+          <h3>${t.name}${t.params&&t.params.pgs_id ? ' <a href="https://www.pgscatalog.org/score/'+t.params.pgs_id+'/" target="_blank" class="pgs-link" title="View on PGS Catalog">↗</a>' : ''}</h3>
+          <p>${t.description.substring(0, 120)}${t.description.length > 120 ? '...' : ''}</p>
+          ${t.enrichment ? `<div class="pgs-enrichment">
+            ${t.enrichment.doi ? `<span class="enr-item"><a href="${t.enrichment.doi}" target="_blank" class="enr-link">${t.enrichment.citation || 'Publication'}</a></span>` : (t.enrichment.citation ? `<span class="enr-item">${t.enrichment.citation}</span>` : '')}
+            ${t.enrichment.genome_build && t.enrichment.genome_build !== 'NR' ? `<span class="enr-chip">${t.enrichment.genome_build}</span>` : ''}
+            ${t.enrichment.weight_type && t.enrichment.weight_type !== 'NR' ? `<span class="enr-chip">${t.enrichment.weight_type}</span>` : ''}
+            ${t.enrichment.gwas_ancestry && t.enrichment.gwas_ancestry !== 'Not reported' ? `<span class="enr-item enr-ancestry">${t.enrichment.gwas_n ? t.enrichment.gwas_n.toLocaleString() + ' individuals' : ''} (${t.enrichment.gwas_ancestry})</span>` : ''}
+            ${t.enrichment.trait_description ? `<span class="enr-desc">${t.enrichment.trait_description.substring(0, 150)}${t.enrichment.trait_description.length > 150 ? '...' : ''}</span>` : ''}
+          </div>` : ''}
+          ${clearBtn} ${compareBtn}
+        </div>
+        <div class="file-run-grid">
+          ${fileLines}
+        </div>
+      </div>
+    `;
+  }
+
+  // Non-profile mode: original layout
+  let statusHtml = _renderResultLine(info, true);
 
   return `
     <div class="test-row" id="row-${t.id}">
@@ -6048,14 +8531,10 @@ function renderTestRow(t) {
           ${t.enrichment.trait_description ? `<span class="enr-desc">${t.enrichment.trait_description.substring(0, 150)}${t.enrichment.trait_description.length > 150 ? '...' : ''}</span>` : ''}
         </div>` : ''}
       </div>
-      <div class="test-status ${st}" title="${title}">
-        <span class="status-dot ${st}"></span>
-        <span class="headline">${escapeHtml(headline)}</span>
-        ${chip}
-      </div>
+      ${statusHtml}
       <div>
-        ${hasReport ? `<button class="clear-row-btn" onclick="clearSingleReport('${t.id}')" title="Delete this report so you can re-run">Clear</button>` : ''}
-        ${hasReport ? `<button class="view-btn" onclick="viewReport('${t.id}')">View</button>` : ''}
+        ${hasAnyReport ? `<button class="clear-row-btn" onclick="clearSingleReport('${t.id}')" title="Delete this report so you can re-run">Clear</button>` : ''}
+        ${hasAnyReport ? `<button class="view-btn" onclick="viewReport('${t.id}')">View</button>` : ''}
         <button class="run-btn" onclick="runTest('${t.id}')" ${isRunning ? 'disabled' : ''}>Run</button>
       </div>
     </div>
@@ -6215,7 +8694,7 @@ async function runAll() {
   if (!targets.length) return;
   if (isAllMode()) {
     const tabLabel = TAB_DEFS[activeTab]?.label || 'all';
-    const tabTests = tests.filter(t => tabForCategory(t.category) === activeTab);
+    const tabTests = testsForTab(activeTab, tests);
     const total = tabTests.length * files.length;
     if (!confirm(
           `Queue every ${tabLabel} test against every file?\n\n` +
@@ -6439,7 +8918,8 @@ function updateRow(testId) {
 
 async function pollStatus() {
   try {
-    const resp = await fetch(BASE + '/api/status');
+    const profileParam = activeProfileId ? `?profile_id=${activeProfileId}` : '';
+    const resp = await fetch(BASE + '/api/status' + profileParam);
     const data = await resp.json();
 
     const running = data.running_count != null
@@ -6453,28 +8933,36 @@ async function pollStatus() {
     paintQueueChip();
 
     // Status is scoped server-side to the active file. Results keyed by
-    // task_id; for the test-list view we only care about the most recent
-    // task per test_id.
+    // task_id; for the test-list view we group by test_id.
     const results = data.results || {};
-    const latestPerTest = {};  // test_id -> {taskId, result}
+
+    // In profile mode, collect ALL results per test (one per file_id).
+    // In single-file mode, keep just the latest per test.
+    const allPerTest = {};  // test_id -> [{taskId, res, completed}, ...]
     for (const [taskId, res] of Object.entries(results)) {
       const testId = res.test_id;
       if (!testId) continue;
       const completed = res.completed_at || res.queued_at || res.started_at || '';
-      if (!latestPerTest[testId] ||
-          (latestPerTest[testId].completed || '') < completed) {
-        latestPerTest[testId] = { taskId, res, completed };
-      }
+      if (!allPerTest[testId]) allPerTest[testId] = [];
+      allPerTest[testId].push({ taskId, res, completed });
+    }
+    // Sort each group: most recent first
+    for (const testId of Object.keys(allPerTest)) {
+      allPerTest[testId].sort((a, b) => (b.completed || '').localeCompare(a.completed || ''));
     }
 
-    // Work out which rows need a redraw (status or headline changed) AND
-    // which previously-known rows have no results now (e.g. after clearing
-    // or switching to a file with fewer runs).
-    const seen = new Set();
-    for (const [testId, { taskId, res }] of Object.entries(latestPerTest)) {
-      seen.add(testId);
-      const prev = testStatus[testId] || {};
-      const newInfo = {
+    // Deduplicate by file_id within each test (keep latest per file)
+    for (const testId of Object.keys(allPerTest)) {
+      const seen_files = new Set();
+      allPerTest[testId] = allPerTest[testId].filter(entry => {
+        const fid = entry.res.file_id || '';
+        if (!fid || !seen_files.has(fid)) { seen_files.add(fid); return true; }
+        return false;
+      });
+    }
+
+    function _toInfo(res) {
+      return {
         status: res.status,
         headline: res.headline || (res.status === 'running' ? 'running…' :
                                    res.status === 'queued' ? 'queued' : ''),
@@ -6483,19 +8971,46 @@ async function pollStatus() {
         match_rate_value: res.match_rate_value,
         percentile: res.percentile,
         no_report: res.no_report === true,
+        file_type: res.file_type || '',
+        file_id: res.file_id || '',
+        task_id: res.task_id || '',
+        retried_as: res.retried_as || '',
+        selection_reason: res.selection_reason || '',
       };
-      taskMap[testId] = taskId;
-      if (prev.status !== newInfo.status || prev.headline !== newInfo.headline ||
+    }
+
+    const seen = new Set();
+    for (const [testId, entries] of Object.entries(allPerTest)) {
+      seen.add(testId);
+      // Primary result = first entry (most recent / best)
+      const primary = entries[0];
+      const newInfo = _toInfo(primary.res);
+      newInfo.task_id = primary.taskId;
+      taskMap[testId] = primary.taskId;
+
+      // Build multi-status array for profile mode
+      const multiArr = entries.map(e => {
+        const info = _toInfo(e.res);
+        info.task_id = e.taskId;
+        return info;
+      });
+
+      const prev = testStatus[testId] || {};
+      const prevMulti = testMultiStatus[testId] || [];
+      const changed = prev.status !== newInfo.status || prev.headline !== newInfo.headline ||
           prev.match_rate_value !== newInfo.match_rate_value ||
-          prev.no_report !== newInfo.no_report) {
-        testStatus[testId] = newInfo;
-        updateRow(testId);
-      }
+          prev.no_report !== newInfo.no_report ||
+          multiArr.length !== prevMulti.length;
+
+      testStatus[testId] = newInfo;
+      testMultiStatus[testId] = multiArr;
+      if (changed) updateRow(testId);
     }
     // Drop any stale entries that no longer exist for this file.
     for (const testId of Object.keys(testStatus)) {
       if (!seen.has(testId)) {
         delete testStatus[testId];
+        delete testMultiStatus[testId];
         delete taskMap[testId];
         updateRow(testId);
       }
@@ -6531,6 +9046,67 @@ async function viewReport(testId) {
   const resp = await fetch(BASE + `/api/report/${taskId}`);
   const report = await resp.json();
   _openReportModal(report);
+}
+
+async function viewMultiReport(testId) {
+  const multi = testMultiStatus[testId] || [];
+  if (multi.length === 0) return;
+  if (multi.length === 1) { viewReport(testId); return; }
+
+  // Fetch all reports in parallel
+  const reports = await Promise.all(
+    multi.filter(m => m.task_id).map(async m => {
+      try {
+        const resp = await fetch(BASE + `/api/report/${m.task_id}`);
+        return await resp.json();
+      } catch { return null; }
+    })
+  );
+  const valid = reports.filter(r => r && r.test_id);
+  if (valid.length === 0) return;
+  if (valid.length === 1) { _openReportModal(valid[0]); return; }
+
+  // Build a combined comparison view
+  const modal = document.getElementById('reportModal');
+  document.getElementById('modalTitle').textContent = (valid[0].test_name || 'Report') + ' — Comparison';
+
+  const metaItems = valid.map((r, i) => {
+    const res = r.result || {};
+    const ft = (r.file_type || _normalize_ft({ path: r.vcf_path || '' })).toUpperCase();
+    const fname = (r.vcf_path || '').split('/').pop();
+    const mr = res.match_rate_value;
+    const mrCls = mr != null ? matchClass(mr) : '';
+    const pctl = res.percentile;
+    return `<div class="compare-card ${i === 0 ? 'compare-best' : ''}">
+      <div class="compare-header">
+        <span class="file-used-badge" style="font-size:0.72rem"><span class="badge-type">${ft}</span></span>
+        <span class="compare-fname">${escapeHtml(fname)}</span>
+        ${i === 0 ? '<span class="compare-best-tag">best</span>' : ''}
+      </div>
+      <div class="compare-stats">
+        ${mr != null ? `<span class="match-chip ${mrCls}">match ${mr}%</span>` : ''}
+        ${pctl != null ? pctSlider(pctl, { w: 56, h: 4, th: 8, fs: '0.7rem' }) : ''}
+        ${res.raw_score != null ? `<span style="font-size:0.7rem;color:var(--text2)">score: ${typeof res.raw_score === 'number' ? res.raw_score.toFixed(4) : res.raw_score}</span>` : ''}
+      </div>
+      ${res.headline ? `<div class="compare-hl">${escapeHtml(res.headline)}</div>` : ''}
+      <div style="margin-top:4px"><button class="view-btn view-btn-sm" onclick="viewReportByTaskId('${r.task_id}')">Full Report</button></div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('reportMeta').innerHTML = metaItems;
+
+  // Show interpretation from best result
+  const interpEl = document.getElementById('reportInterpretation');
+  const bestReport = valid[0];
+  if (bestReport.interpretation) {
+    interpEl.innerHTML = '<h4>AI Interpretation (best result)</h4><p>' + escapeHtml(bestReport.interpretation) + '</p>';
+    interpEl.style.display = 'block';
+  } else {
+    interpEl.style.display = 'none';
+  }
+
+  document.getElementById('reportContent').innerHTML = '';
+  modal.classList.add('open');
 }
 
 function closeModal() {
@@ -7226,7 +9802,7 @@ function renderReportsView() {
       const tip = matchTooltip(mr, status);
       matchHtml = `<div class="rep-match ${cls}" title="${escapeHtml(tip)}">${mr.toFixed(0)}%</div>`;
       pctHtml = (r.percentile != null)
-        ? `<div class="rep-pct">${(typeof r.percentile === 'number' ? r.percentile.toFixed(0) : escapeHtml(r.percentile))}%</div>`
+        ? `<div class="rep-pct">${pctSlider(typeof r.percentile === 'number' ? r.percentile : parseFloat(r.percentile), { w: 48, h: 4, th: 7, fs: '0.68rem' })}</div>`
         : '<div class="rep-pct dim">—</div>';
     } else {
       // Non-PGS row: hover the dash to surface the row's overall status.
@@ -7322,7 +9898,7 @@ function _openReportModal(report) {
     );
     if (result.percentile != null) {
       metaItems.push(
-        `<div class="meta-item"><label>Percentile (EUR)</label><span>${result.percentile}%</span></div>`
+        `<div class="meta-item"><label>Percentile (EUR)</label><span>${pctSlider(typeof result.percentile === 'number' ? result.percentile : parseFloat(result.percentile), { w: 64, h: 5, th: 9, fs: '0.75rem' })}</span></div>`
       );
     }
   }
@@ -7364,16 +9940,31 @@ function _openReportModal(report) {
     html += `<div class="score-item"><label>Matched Variants</label><span>${(result.matched_variants || 0).toLocaleString()} / ${(result.total_variants || 0).toLocaleString()}</span></div>`;
     html += `<div class="score-item"><label>Match Rate</label><span>${escapeHtml(result.match_rate || 'N/A')}</span></div>`;
     if (result.percentile != null) {
-      html += `<div class="score-item"><label>Percentile (EUR)</label><span class="pctl-value">${result.percentile}%</span></div>`;
+      html += `<div class="score-item"><label>Percentile (EUR)</label><span class="pctl-value">${typeof result.percentile === 'number' ? result.percentile.toFixed(0) : result.percentile}%</span></div>`;
+    }
+    if (result.percentile != null) {
+      html += `<div class="score-item" style="grid-column: 1 / -1">${pctBarLg(typeof result.percentile === 'number' ? result.percentile : parseFloat(result.percentile))}</div>`;
     }
     if (result.genome_build) {
-      html += `<div class="score-item"><label>Genome Build</label><span>${escapeHtml(result.genome_build)}</span></div>`;
+      html += `<div class="score-item"><label>Scoring Positions</label><span>${escapeHtml(result.genome_build)}</span></div>`;
     }
     if (result.scoring_file_source) {
       html += `<div class="score-item"><label>Scoring File</label><span>${escapeHtml(result.scoring_file_source)}</span></div>`;
     }
-    if (result.build_notes) {
-      html += `<div class="score-item build-note"><label>Build Notes</label><span>${escapeHtml(result.build_notes)}</span></div>`;
+    // Build validation summary
+    const bv = result.build_validation;
+    if (bv) {
+      const bvSt = bv.status || 'unknown';
+      const bvCls = bvSt === 'PASS' ? 'ok' : bvSt === 'WARN' ? 'warn' : 'fail';
+      const bvLabel = bvSt === 'PASS' ? 'Build verified' : bvSt === 'WARN' ? 'Build warning' : 'Build mismatch';
+      let bvText = bvLabel;
+      if (bv.spot_check) {
+        const sc = bv.spot_check;
+        if (sc.status === 'PASS') bvText += ' (rs7412 spot-check passed)';
+        else if (sc.status === 'FAIL' && sc.wrong_build) bvText += ` (sample appears ${escapeHtml(sc.wrong_build)})`;
+        else if (sc.status === 'NOT_FOUND') bvText += ' (sentinel variant not in file)';
+      }
+      html += `<div class="score-item"><label>Build Check</label><span class="diag-badge ${bvCls}" style="font-size:.78rem;padding:2px 8px">${escapeHtml(bvText)}</span></div>`;
     }
     if (result.sample_id) {
       html += `<div class="score-item"><label>Sample</label><span>${escapeHtml(result.sample_id)}</span></div>`;
@@ -7391,18 +9982,22 @@ function _openReportModal(report) {
     html += `<div class="pipe-item"><label>Method</label><span>${escapeHtml(pi.scoring_method || '')}</span></div>`;
     html += `<div class="pipe-item"><label>Input File</label><span>${escapeHtml(pi.input_file || '')}</span></div>`;
     html += `<div class="pipe-item"><label>Input Type</label><span>${escapeHtml(pi.input_type || '')}</span></div>`;
-    html += `<div class="pipe-item"><label>Genome Build</label><span>${escapeHtml(pi.genome_build || '')}</span></div>`;
-    if (pi.scoring_file_build) {
-      html += `<div class="pipe-item"><label>Scoring File Build</label><span>${escapeHtml(pi.scoring_file_build)}</span></div>`;
+    // Build info — show actual positions build clearly
+    const _posBuild = pi.genome_build || pi.scoring_file_build || '';
+    const _origBuild = pi.original_study_build || '';
+    const _usedHm = pi.used_harmonized_positions;
+    if (_posBuild) {
+      if (_origBuild && _origBuild !== _posBuild && _origBuild !== 'NR' && _origBuild !== 'unknown') {
+        html += `<div class="pipe-item"><label>Scoring Positions</label><span>${escapeHtml(_posBuild)} <small style="opacity:.7">(harmonized from original ${escapeHtml(_origBuild)} study)</small></span></div>`;
+      } else {
+        html += `<div class="pipe-item"><label>Scoring Positions</label><span>${escapeHtml(_posBuild)}</span></div>`;
+      }
     }
     if (pi.scoring_file_source) {
       html += `<div class="pipe-item"><label>Scoring File</label><span>${escapeHtml(pi.scoring_file_source)}</span></div>`;
     }
     if (pi.liftover_applied) {
       html += `<div class="pipe-item"><label>Liftover</label><span>${escapeHtml(pi.liftover_applied)}</span></div>`;
-    }
-    if (pi.build_notes) {
-      html += `<div class="pipe-item"><label>Build Notes</label><span>${escapeHtml(pi.build_notes)}</span></div>`;
     }
     html += `<div class="pipe-item"><label>Normalization</label><span>${escapeHtml(pi.normalization || 'none')}</span></div>`;
     html += `<div class="pipe-item"><label>Reference Population</label><span>${escapeHtml(pi.reference_population || '')}</span></div>`;
@@ -7537,6 +10132,53 @@ async function doLogout() {
   window.sgHasApiKey = !!me.has_api_key;
   window.sgMaskedApiKey = me.masked_api_key || null;
 
+  // ── Profile integration: override runTest/runCategory/runAll ─────
+  _origRunTest = runTest;
+  runTest = function(testId) {
+    if (activeProfileId) {
+      return runTestWithProfile(testId);
+    }
+    return _origRunTest(testId);
+  };
+
+  const _origRunCategory = runCategory;
+  runCategory = async function(cat) {
+    if (activeProfileId) {
+      const resp = await fetch(BASE + `/api/run-category/${encodeURIComponent(cat)}?profile_id=${activeProfileId}`, { method: 'POST' });
+      const data = await resp.json();
+      if (!data.ok) { alert(data.error); return; }
+      for (const tid of data.task_ids) {
+        const testId = tid.split('_').slice(0, -1).join('_');
+        taskMap[testId] = tid;
+        testStatus[testId] = { status: 'queued', headline: 'queued' };
+        updateRow(testId);
+      }
+      updateCategoryHeader(cat);
+      expandCategory(cat);
+      return;
+    }
+    return _origRunCategory(cat);
+  };
+
+  const _origRunAll = runAll;
+  runAll = async function() {
+    if (activeProfileId) {
+      const resp = await fetch(BASE + `/api/run-all?profile_id=${activeProfileId}`, { method: 'POST' });
+      const data = await resp.json();
+      if (!data.ok) { alert(data.error); return; }
+      for (const tid of data.task_ids) {
+        const testId = tid.split('_').slice(0, -1).join('_');
+        taskMap[testId] = tid;
+        testStatus[testId] = { status: 'queued', headline: 'queued' };
+        updateRow(testId);
+      }
+      for (const cat of categories) updateCategoryHeader(cat);
+      expandAll();
+      return;
+    }
+    return _origRunAll();
+  };
+
   await init();       // loads tests + files registry
   applyRoute();       // safe to render My Data / Reports now
   pollSystemStats();  // kick off the 5s poll
@@ -7551,13 +10193,15 @@ const chatState = {
   messages: [],
   status: 'idle',
   detail: '',
+  model: '',
   sessionExists: false,
   active: false,
-  sub: 'terminal',       // 'terminal' | 'chat'
+  sub: 'terminal',
   pollHandle: null,
   rawPollHandle: null,
   rawLines: 0,
   rawScrollAtBottom: true,
+  rawUserScrolledUp: false,
   msgScrollAtBottom: true,
   sending: false,
 };
@@ -7576,12 +10220,15 @@ function chatRenderInline(text) {
 
 function chatRenderMarkdown(text) {
   if (!text) return '';
-  // Split on fenced code blocks ```...```
   const parts = text.split(/(```[\s\S]*?```)/g);
   return parts.map(part => {
     if (part.startsWith('```')) {
       const code = part.replace(/^```\w*\n?/, '').replace(/\n?```$/, '');
       return '<pre class="chat-code-block"><code>' + chatEscape(code) + '</code></pre>';
+    }
+    // Detect box-drawing / table blocks and render as preformatted
+    if (/[┌┬┐├┼┤└┴┘│─╭╮╰╯║═╔╗╚╝╠╣╦╩╬]/.test(part) || /[┄┈┅┉┆┊]/.test(part)) {
+      return '<pre class="chat-code-block"><code>' + chatEscape(part) + '</code></pre>';
     }
     return chatRenderInline(part);
   }).join('');
@@ -7593,13 +10240,23 @@ function chatFormatTime(ts) {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function formatModelName(model) {
+  if (!model) return '';
+  let m = model.replace(/^claude-/, '');
+  m = m.replace(/-\d{8}$/, '');
+  const parts = m.match(/^([a-z]+)-(.+)$/);
+  if (parts) return parts[1] + ' ' + parts[2].replace(/-/g, '.');
+  return m;
+}
+
+function chatIsMsgAtBottom(el) {
+  return (el.scrollHeight - el.scrollTop - el.clientHeight) < 50;
+}
+
 function chatRenderMessages() {
   const root = document.getElementById('chatMessages');
   if (!root) return;
-  if (!chatState.messages.length) {
-    // Welcome stays visible by default; nothing to render.
-    return;
-  }
+  if (!chatState.messages.length) return;
   const html = chatState.messages.map(m => {
     const body = m.role === 'assistant'
       ? chatRenderMarkdown(m.text)
@@ -7612,12 +10269,10 @@ function chatRenderMessages() {
   let extra = '';
   if (chatState.status === 'busy') {
     const detail = chatState.detail || 'Working';
-    extra = '<div class="chat-typing"><div class="typing-dots"><span></span><span></span><span></span></div><span>' + chatEscape(detail) + '…</span></div>';
+    extra = '<div class="chat-typing"><div class="typing-dots"><span></span><span></span><span></span></div><span>' + chatEscape(detail) + '&hellip;</span></div>';
   }
   root.innerHTML = html + extra;
-  if (chatState.msgScrollAtBottom) {
-    root.scrollTop = root.scrollHeight;
-  }
+  if (chatState.msgScrollAtBottom) root.scrollTop = root.scrollHeight;
 }
 
 function chatUpdateBadge() {
@@ -7626,35 +10281,33 @@ function chatUpdateBadge() {
   if (!badge || !text) return;
   badge.classList.remove('busy', 'idle', 'stopped', 'unknown');
   badge.classList.add(chatState.status || 'unknown');
-  if (chatState.status === 'busy') {
-    text.textContent = chatState.detail || 'Working…';
-  } else if (chatState.status === 'idle') {
-    text.textContent = 'Ready';
-  } else if (chatState.status === 'stopped') {
-    text.textContent = 'Session stopped';
-  } else {
-    text.textContent = chatState.detail || 'Unknown';
+  if (chatState.status === 'busy') text.textContent = chatState.detail || 'Working...';
+  else if (chatState.status === 'idle') text.textContent = 'Ready';
+  else if (chatState.status === 'stopped') text.textContent = 'Session stopped';
+  else text.textContent = chatState.detail || 'Unknown';
+  // Stop button
+  const stopBtn = document.getElementById('chatStopBtnRaw');
+  if (stopBtn) stopBtn.style.display = chatState.status === 'busy' ? '' : 'none';
+  // Model badge
+  const modelBadge = document.getElementById('chatModelBadge');
+  if (modelBadge) {
+    const name = formatModelName(chatState.model);
+    if (name) { modelBadge.textContent = name; modelBadge.style.display = ''; }
+    else modelBadge.style.display = 'none';
   }
-  document.getElementById('chatStopBtn').style.display =
-    chatState.status === 'busy' ? '' : 'none';
 }
 
 function chatMergeMessages(incoming) {
   if (!Array.isArray(incoming)) return;
-  // Use role|ts as identity — server emits monotonic timestamps.
-  const seen = new Set(chatState.messages.map(m => m.role + '|' + m.ts));
+  // Dedup by role + first 100 chars of text (not timestamp — client/server timestamps differ)
+  const keyOf = m => m.role + '|' + (m.text || '').substring(0, 100);
+  const seen = new Set(chatState.messages.map(keyOf));
   let added = false;
   for (const m of incoming) {
-    const key = m.role + '|' + m.ts;
-    if (!seen.has(key)) {
-      chatState.messages.push(m);
-      seen.add(key);
-      added = true;
-    }
+    const key = keyOf(m);
+    if (!seen.has(key)) { chatState.messages.push(m); seen.add(key); added = true; }
   }
-  if (added) {
-    chatState.messages.sort((a, b) => a.ts - b.ts);
-  }
+  if (added) chatState.messages.sort((a, b) => a.ts - b.ts);
 }
 
 async function chatPollStatus() {
@@ -7662,117 +10315,162 @@ async function chatPollStatus() {
     const r = await fetch(BASE + '/api/chat/status');
     if (!r.ok) return;
     const data = await r.json();
+    const prevStatus = chatState.status;
     chatState.status = data.status || 'idle';
     chatState.detail = data.detail || '';
+    chatState.model = data.model || chatState.model || '';
     chatState.sessionExists = !!data.session_exists;
     if (data.messages) chatMergeMessages(data.messages);
     chatUpdateBadge();
     chatRenderMessages();
-  } catch (e) {
-    // Network blip — leave state alone.
-  }
+    if (prevStatus === 'busy' && chatState.status !== 'busy') setTimeout(chatRawPollTail, 500);
+  } catch (e) {}
+}
+
+function chatSetOptimisticBusy() {
+  chatState.status = 'busy';
+  chatState.detail = 'Processing...';
+  chatUpdateBadge();
+  chatRenderMessages();
+}
+
+function chatScheduleBusyVerify() {
+  setTimeout(async () => {
+    try {
+      const r = await fetch(BASE + '/api/chat/status');
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.status === 'busy') { chatState.detail = data.detail || 'Working'; chatUpdateBadge(); return; }
+      setTimeout(async () => {
+        try {
+          const r2 = await fetch(BASE + '/api/chat/status');
+          if (!r2.ok) return;
+          const d2 = await r2.json();
+          chatState.status = d2.status || 'idle';
+          chatState.detail = d2.detail || '';
+          chatState.model = d2.model || chatState.model;
+          if (d2.messages) chatMergeMessages(d2.messages);
+          chatUpdateBadge();
+          chatRenderMessages();
+        } catch (e) {}
+      }, 3000);
+    } catch (e) {}
+  }, 5000);
 }
 
 async function chatSend() {
   if (chatState.sending) return;
-  if (!window.sgHasApiKey) {
-    chatSwitchTab('settings');
-    return;
-  }
+  if (!window.sgHasApiKey) { chatSwitchTab('settings'); return; }
   const input = document.getElementById('chatInput');
   const text = (input.value || '').trim();
   if (!text) return;
   chatState.sending = true;
   document.getElementById('chatSendBtn').disabled = true;
-  input.value = '';
-  input.style.height = 'auto';
-
-  // Optimistically append the user message so it appears immediately.
+  input.value = ''; input.style.height = 'auto';
   chatState.messages.push({ role: 'user', text, ts: Date.now() / 1000 });
   chatState.msgScrollAtBottom = true;
-  chatRenderMessages();
-
+  chatSetOptimisticBusy();
   try {
     const r = await fetch(BASE + '/api/chat/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: text }),
     });
     const data = await r.json();
-    if (data && data.ok) {
-      chatState.status = 'busy';
-      chatUpdateBadge();
-    } else if (r.status === 403) {
-      // API key missing or invalid on the server — reset and show settings
-      window.sgHasApiKey = false;
-      window.sgMaskedApiKey = null;
-      updateApiKeyOverlay();
-      settingsRefreshKeyUI();
-      chatState.messages.push({
-        role: 'assistant',
-        text: 'Please set your Anthropic API key in the Settings tab to use the AI Assistant.',
-        ts: Date.now() / 1000,
-      });
-      chatRenderMessages();
+    if (data && data.ok) { chatState.status = 'busy'; chatUpdateBadge(); }
+    else if (r.status === 403) {
+      window.sgHasApiKey = false; window.sgMaskedApiKey = null;
+      updateApiKeyOverlay(); settingsRefreshKeyUI();
+      chatState.messages.push({ role: 'assistant', text: 'Please set your API key in the Connect tab.', ts: Date.now() / 1000 });
+      chatState.status = 'idle'; chatUpdateBadge(); chatRenderMessages();
     } else {
-      chatState.messages.push({
-        role: 'assistant',
-        text: 'Error: ' + (data && data.error ? data.error : 'send failed'),
-        ts: Date.now() / 1000,
-      });
+      chatState.messages.push({ role: 'assistant', text: 'Error: ' + (data && data.error ? data.error : 'send failed'), ts: Date.now() / 1000 });
       chatRenderMessages();
     }
   } catch (e) {
-    chatState.messages.push({
-      role: 'assistant',
-      text: 'Error: ' + e.message,
-      ts: Date.now() / 1000,
-    });
+    chatState.messages.push({ role: 'assistant', text: 'Error: ' + e.message, ts: Date.now() / 1000 });
     chatRenderMessages();
   } finally {
     chatState.sending = false;
     document.getElementById('chatSendBtn').disabled = false;
-    // Force a fast follow-up poll so the assistant reply lands ASAP
     setTimeout(chatPollStatus, 1500);
+    chatScheduleBusyVerify();
   }
 }
 
-function chatInputKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    chatSend();
-  }
-}
-
-function chatInputAutosize() {
-  const ta = document.getElementById('chatInput');
+function chatInputKey(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatSend(); } }
+function chatInputAutosize(ta) {
+  if (!ta) ta = document.getElementById('chatInput');
   if (!ta) return;
-  ta.style.height = 'auto';
-  ta.style.height = Math.min(ta.scrollHeight, 150) + 'px';
+  ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 150) + 'px';
 }
 
 async function chatInterrupt() {
   try { await fetch(BASE + '/api/chat/interrupt', { method: 'POST' }); } catch (e) {}
-  setTimeout(chatPollStatus, 500);
+  setTimeout(chatPollStatus, 500); setTimeout(chatRawPollTail, 500);
 }
 
 async function chatRestart() {
   if (!confirm('Kill the AI session and start a new one?')) return;
   try { await fetch(BASE + '/api/chat/restart', { method: 'POST' }); } catch (e) {}
-  chatState.messages = [];
-  chatRenderMessages();
+  chatState.messages = []; chatState.model = '';
+  chatRenderMessages(); chatUpdateBadge();
   setTimeout(chatPollStatus, 500);
 }
 
 async function chatClear() {
-  if (!confirm('Clear chat history? (The Claude Code session will keep running.)')) return;
+  if (!confirm('Clear chat history?')) return;
   try { await fetch(BASE + '/api/chat/clear', { method: 'POST' }); } catch (e) {}
-  chatState.messages = [];
-  chatRenderMessages();
+  chatState.messages = []; chatRenderMessages();
 }
+
+// ── Send keys to tmux ──
+async function chatSendKeys(keys) {
+  try {
+    await fetch(BASE + '/api/chat/send-keys', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keys }),
+    });
+    setTimeout(chatRawPollTail, 400);
+  } catch (e) { console.error('Failed to send keys:', e); }
+}
+
+async function chatSlashCmd(cmd) {
+  chatState.messages.push({ role: 'user', text: cmd, ts: Date.now() / 1000 });
+  chatSetOptimisticBusy();
+  try {
+    await fetch(BASE + '/api/chat/send', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: cmd }),
+    });
+  } catch (e) {}
+  chatScheduleBusyVerify();
+}
+
+// ── Key bar toggle ──
+function toggleChatKeyBar(toggleEl) {
+  // Find the next sibling key bar (works for both Chat and Terminal tabs)
+  const bar = toggleEl.nextElementSibling;
+  if (!bar || !bar.classList.contains('chat-key-bar')) return;
+  const isOpen = bar.classList.contains('expanded');
+  bar.classList.toggle('expanded'); toggleEl.classList.toggle('open');
+  localStorage.setItem('sgKeyBarOpen', isOpen ? 'false' : 'true');
+}
+// Restore key bar state
+(function() {
+  if (localStorage.getItem('sgKeyBarOpen') === 'true') {
+    setTimeout(function() {
+      var bars = document.querySelectorAll('.chat-key-bar');
+      var toggles = document.querySelectorAll('.chat-key-bar-toggle');
+      bars.forEach(function(bar) { bar.classList.add('expanded'); });
+      toggles.forEach(function(toggle) { toggle.classList.add('open'); });
+    }, 100);
+  }
+})();
 
 // ── Terminal sub-tab ──
 async function chatRawLoadFull() {
+  var infoEl = document.getElementById('chatRawInfo');
+  if (infoEl) infoEl.textContent = 'Loading...';
   try {
     const r = await fetch(BASE + '/api/chat/raw');
     if (!r.ok) return;
@@ -7782,14 +10480,15 @@ async function chatRawLoadFull() {
     if (data.raw) {
       out.innerHTML = '<pre class="chat-raw-pre"></pre>';
       out.querySelector('pre').textContent = data.raw;
+      chatState.rawUserScrolledUp = false;
       out.scrollTop = out.scrollHeight;
+      if (infoEl) infoEl.textContent = (data.lines || 0) + ' lines';
     } else {
-      out.innerHTML = '<div class="chat-raw-empty">'
-        + (chatState.sessionExists ? 'No output yet.' : 'Session not running.')
-        + '</div>';
+      out.innerHTML = '<div class="chat-raw-empty">' + (chatState.sessionExists ? 'No output yet.' : 'Session not running.') + '</div>';
+      if (infoEl) infoEl.textContent = chatState.sessionExists ? 'Empty' : 'No session';
     }
     chatState.rawLines = data.lines || 0;
-  } catch (e) {}
+  } catch (e) { if (infoEl) infoEl.textContent = 'Error'; }
 }
 
 async function chatRawPollTail() {
@@ -7798,273 +10497,67 @@ async function chatRawPollTail() {
     if (!r.ok) return;
     const data = await r.json();
     const out = document.getElementById('chatRawOutput');
+    const infoEl = document.getElementById('chatRawInfo');
     if (!out) return;
     if (data.mode === 'full') {
       out.innerHTML = '<pre class="chat-raw-pre"></pre>';
       out.querySelector('pre').textContent = data.raw || '';
+      chatState.rawLines = data.total_lines || 0;
+      if (infoEl) infoEl.textContent = chatState.rawLines + ' lines';
+      if (!chatState.rawUserScrolledUp) out.scrollTop = out.scrollHeight;
     } else if (data.mode === 'delta' && data.raw) {
-      let pre = out.querySelector('pre');
-      if (!pre) {
-        out.innerHTML = '<pre class="chat-raw-pre"></pre>';
-        pre = out.querySelector('pre');
-      }
+      var pre = out.querySelector('pre');
+      if (!pre) { out.innerHTML = '<pre class="chat-raw-pre"></pre>'; pre = out.querySelector('pre'); }
       pre.textContent += data.raw;
+      chatState.rawLines = data.total_lines || chatState.rawLines;
+      if (infoEl) infoEl.textContent = chatState.rawLines + ' lines';
+      if (!chatState.rawUserScrolledUp) out.scrollTop = out.scrollHeight;
     }
-    chatState.rawLines = data.total_lines || chatState.rawLines;
-    if (chatState.rawScrollAtBottom) out.scrollTop = out.scrollHeight;
   } catch (e) {}
 }
+
+// Track user scroll in raw terminal
+(function() {
+  setTimeout(function() {
+    var out = document.getElementById('chatRawOutput');
+    if (out) {
+      out.addEventListener('wheel', function() {
+        setTimeout(function() {
+          var atBottom = (out.scrollHeight - out.scrollTop - out.clientHeight) < 80;
+          chatState.rawUserScrolledUp = !atBottom;
+        }, 50);
+      }, { passive: true });
+    }
+  }, 500);
+})();
 
 async function chatRawSend() {
   const input = document.getElementById('chatRawInput');
   const cmd = (input.value || '').trim();
   if (!cmd) return;
-  input.value = '';
+  input.value = ''; input.style.height = 'auto';
+  chatState.messages.push({ role: 'user', text: cmd, ts: Date.now() / 1000 });
+  chatSetOptimisticBusy();
+  chatRenderMessages();
   try {
     await fetch(BASE + '/api/chat/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message: cmd }),
     });
+    chatState.rawUserScrolledUp = false;
+    setTimeout(chatRawPollTail, 500);
   } catch (e) {}
-  setTimeout(chatRawPollTail, 500);
+  chatScheduleBusyVerify();
 }
 
-function chatRawKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    chatRawSend();
-  }
-}
-
-function chatSwitchTab(name) {
-  chatState.sub = name;
-  document.getElementById('chatSubChat').style.display = name === 'chat' ? '' : 'none';
-  document.getElementById('chatSubTerminal').style.display = name === 'terminal' ? '' : 'none';
-  document.getElementById('chatSubSettings').style.display = name === 'settings' ? '' : 'none';
-  document.getElementById('chatTabChat').classList.toggle('active', name === 'chat');
-  document.getElementById('chatTabTerminal').classList.toggle('active', name === 'terminal');
-  document.getElementById('chatTabSettings').classList.toggle('active', name === 'settings');
-
-  // Manage terminal polling
-  if (name === 'terminal') {
-    chatRawLoadFull();
-    if (chatState.rawPollHandle) clearInterval(chatState.rawPollHandle);
-    chatState.rawPollHandle = setInterval(chatRawPollTail, 1500);
-  } else if (chatState.rawPollHandle) {
-    clearInterval(chatState.rawPollHandle);
-    chatState.rawPollHandle = null;
-  }
-  // Refresh settings display when switching to settings
-  if (name === 'settings') {
-    settingsRefreshKeyUI();
-  }
-}
-
-// ─── API Key management ─────────────────────────────────────────
-window.sgHasApiKey = false;
-window.sgMaskedApiKey = null;
-
-// Show/hide the first-run blocking overlay
-function updateApiKeyOverlay() {
-  const overlay = document.getElementById('chatApiKeyOverlay');
-  if (!overlay) return;
-  overlay.style.display = window.sgHasApiKey ? 'none' : 'flex';
-}
-
-// ─── First-run overlay save ─────────────────────────────────────
-async function overlayKeySave() {
-  const input = document.getElementById('overlayKeyInput');
-  const errEl = document.getElementById('overlayKeyError');
-  const saveBtn = document.getElementById('overlayKeySaveBtn');
-  const key = (input ? input.value : '').trim();
-
-  if (!key) {
-    if (errEl) { errEl.textContent = 'Please enter your API key'; errEl.style.display = 'block'; }
-    return;
-  }
-  if (!key.startsWith('sk-ant-')) {
-    if (errEl) { errEl.textContent = 'Key must start with sk-ant-'; errEl.style.display = 'block'; }
-    return;
-  }
-
-  if (saveBtn) saveBtn.disabled = true;
-  if (errEl) errEl.style.display = 'none';
-
-  try {
-    const r = await fetch(BASE + '/api/auth/api-key', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: key }),
-    });
-    const data = await r.json();
-    if (data && data.ok) {
-      window.sgHasApiKey = true;
-      window.sgMaskedApiKey = data.masked_key || null;
-      if (input) input.value = '';
-      updateApiKeyOverlay();
-      settingsRefreshKeyUI();
-    } else {
-      if (errEl) {
-        errEl.textContent = (data && data.error) || 'Failed to save key';
-        errEl.style.display = 'block';
-      }
-    }
-  } catch (e) {
-    if (errEl) {
-      errEl.textContent = 'Network error: ' + e.message;
-      errEl.style.display = 'block';
-    }
-  } finally {
-    if (saveBtn) saveBtn.disabled = false;
-  }
-}
-
-// ─── Settings tab: key display ──────────────────────────────────
-function settingsRefreshKeyUI() {
-  const dot = document.getElementById('settingsKeyDot');
-  const label = document.getElementById('settingsKeyLabel');
-  const masked = document.getElementById('settingsKeyMasked');
-  const actions = document.getElementById('settingsKeyActions');
-  const input = document.getElementById('settingsKeyInput');
-  const errEl = document.getElementById('settingsKeyError');
-  const successEl = document.getElementById('settingsKeySuccess');
-
-  if (errEl) errEl.style.display = 'none';
-  if (successEl) successEl.style.display = 'none';
-  if (input) input.value = '';
-
-  if (window.sgHasApiKey) {
-    if (dot) { dot.classList.remove('unset'); dot.classList.add('set'); }
-    if (label) label.textContent = 'Active:';
-    if (masked) masked.textContent = window.sgMaskedApiKey || 'set';
-    if (actions) actions.style.display = '';
-    if (input) input.placeholder = 'Enter new key to replace...';
-  } else {
-    if (dot) { dot.classList.remove('set'); dot.classList.add('unset'); }
-    if (label) label.textContent = 'No key set';
-    if (masked) masked.textContent = '';
-    if (actions) actions.style.display = 'none';
-    if (input) input.placeholder = 'sk-ant-api03-...';
-  }
-}
-
-async function settingsSaveKey() {
-  const input = document.getElementById('settingsKeyInput');
-  const errEl = document.getElementById('settingsKeyError');
-  const successEl = document.getElementById('settingsKeySuccess');
-  const saveBtn = document.getElementById('settingsKeySaveBtn');
-  const key = (input ? input.value : '').trim();
-
-  if (successEl) successEl.style.display = 'none';
-  if (!key) {
-    if (errEl) { errEl.textContent = 'Please enter your API key'; errEl.style.display = 'block'; }
-    return;
-  }
-  if (!key.startsWith('sk-ant-')) {
-    if (errEl) { errEl.textContent = 'Key must start with sk-ant-'; errEl.style.display = 'block'; }
-    return;
-  }
-
-  if (saveBtn) saveBtn.disabled = true;
-  if (errEl) errEl.style.display = 'none';
-
-  try {
-    const r = await fetch(BASE + '/api/auth/api-key', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: key }),
-    });
-    const data = await r.json();
-    if (data && data.ok) {
-      window.sgHasApiKey = true;
-      window.sgMaskedApiKey = data.masked_key || null;
-      settingsRefreshKeyUI();
-      updateApiKeyOverlay();
-      if (successEl) {
-        successEl.textContent = 'API key saved. The AI session will restart with the new key.';
-        successEl.style.display = 'block';
-        setTimeout(() => { successEl.style.display = 'none'; }, 5000);
-      }
-    } else {
-      if (errEl) {
-        errEl.textContent = (data && data.error) || 'Failed to save key';
-        errEl.style.display = 'block';
-      }
-    }
-  } catch (e) {
-    if (errEl) {
-      errEl.textContent = 'Network error: ' + e.message;
-      errEl.style.display = 'block';
-    }
-  } finally {
-    if (saveBtn) saveBtn.disabled = false;
-  }
-}
-
-async function settingsRemoveKey() {
-  if (!confirm('Remove your API key? The AI Assistant will stop working until you set a new one.')) return;
-  const errEl = document.getElementById('settingsKeyError');
-  const successEl = document.getElementById('settingsKeySuccess');
-
-  try {
-    const r = await fetch(BASE + '/api/auth/api-key', { method: 'DELETE' });
-    const data = await r.json();
-    if (data && data.ok) {
-      window.sgHasApiKey = false;
-      window.sgMaskedApiKey = null;
-      settingsRefreshKeyUI();
-      updateApiKeyOverlay();
-      if (successEl) {
-        successEl.textContent = 'API key removed.';
-        successEl.style.display = 'block';
-        setTimeout(() => { successEl.style.display = 'none'; }, 4000);
-      }
-    }
-  } catch (e) {
-    if (errEl) {
-      errEl.textContent = 'Failed to remove key: ' + e.message;
-      errEl.style.display = 'block';
-    }
-  }
-}
+function chatRawKey(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); chatRawSend(); } }
 
 function chatViewActivated() {
   if (chatState.active) return;
   chatState.active = true;
-  updateApiKeyOverlay();
-  // Wire scroll-tracking once
-  const msgEl = document.getElementById('chatMessages');
-  if (msgEl && !msgEl.dataset.scrollWired) {
-    msgEl.addEventListener('scroll', () => {
-      chatState.msgScrollAtBottom = (msgEl.scrollHeight - msgEl.scrollTop - msgEl.clientHeight) < 50;
-    });
-    msgEl.dataset.scrollWired = '1';
-  }
-  const rawEl = document.getElementById('chatRawOutput');
-  if (rawEl && !rawEl.dataset.scrollWired) {
-    rawEl.addEventListener('scroll', () => {
-      chatState.rawScrollAtBottom = (rawEl.scrollHeight - rawEl.scrollTop - rawEl.clientHeight) < 50;
-    });
-    rawEl.dataset.scrollWired = '1';
-  }
-  // Default to the terminal sub-tab on first activation
-  if (!document.getElementById('chatTabTerminal').classList.contains('active')) {
-    chatSwitchTab('terminal');
-  }
-  // Seed messages from server
-  fetch(BASE + '/api/chat/history').then(r => r.json()).then(data => {
-    if (data && data.messages) {
-      chatState.messages = data.messages.slice().sort((a, b) => a.ts - b.ts);
-      chatRenderMessages();
-    }
-  }).catch(() => {});
-  // Start polling
   chatPollStatus();
-  if (chatState.pollHandle) clearInterval(chatState.pollHandle);
-  chatState.pollHandle = setInterval(() => {
-    chatPollStatus();
-  }, chatState.status === 'busy' ? 2000 : 4000);
+  chatState.pollHandle = setInterval(chatPollStatus, chatState.status === 'busy' ? 2000 : 4000);
+  masterSummaryLoad();
 }
 
 function chatViewDeactivated() {
@@ -8072,21 +10565,355 @@ function chatViewDeactivated() {
   chatState.active = false;
   if (chatState.pollHandle) { clearInterval(chatState.pollHandle); chatState.pollHandle = null; }
   if (chatState.rawPollHandle) { clearInterval(chatState.rawPollHandle); chatState.rawPollHandle = null; }
+  if (_msPollHandle) { clearInterval(_msPollHandle); _msPollHandle = null; }
 }
 
+// ── Master Summary ───────────────────────────────────────────────
+var _msExpanded = false;
+var _msData = null;
+var _msPollHandle = null;
+var _msProfileId = '';  // '' = all profiles
+var _msProfilesLoaded = false;
+
+function masterSummaryToggle() {
+  _msExpanded = !_msExpanded;
+  document.getElementById('msSummaryBody').style.display = _msExpanded ? '' : 'none';
+  document.getElementById('msSummaryChevron').innerHTML = _msExpanded ? '&#x25BC;' : '&#x25B6;';
+  if (_msExpanded) {
+    if (!_msProfilesLoaded) masterSummaryLoadProfiles();
+    masterSummaryLoad();
+  }
+}
+
+async function masterSummaryLoadProfiles() {
+  try {
+    var res = await fetch('/api/profiles', { credentials: 'include' });
+    if (!res.ok) return;
+    var data = await res.json();
+    var sel = document.getElementById('msProfileSelect');
+    // Keep the "All" option, clear the rest
+    sel.innerHTML = '<option value="">All profiles (everyone)</option>';
+    (data.profiles || []).forEach(function(p) {
+      var opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name + ' (' + p.file_count + ' files)';
+      sel.appendChild(opt);
+    });
+    _msProfilesLoaded = true;
+    // Restore selection
+    sel.value = _msProfileId;
+  } catch (e) { /* ignore */ }
+}
+
+function masterSummaryProfileChanged() {
+  var sel = document.getElementById('msProfileSelect');
+  _msProfileId = sel.value;
+  _msData = null;
+  document.getElementById('msContent').innerHTML = '';
+  document.getElementById('msMeta').textContent = '';
+  masterSummaryLoad();
+}
+
+async function masterSummaryLoad() {
+  try {
+    var url = '/api/master-summary';
+    if (_msProfileId) url += '?profile_id=' + encodeURIComponent(_msProfileId);
+    var res = await fetch(url, { credentials: 'include' });
+    if (!res.ok) return;
+    _msData = await res.json();
+    masterSummaryRender();
+    // If generating, start polling
+    if (_msData.generating && !_msPollHandle) {
+      _msPollHandle = setInterval(masterSummaryLoad, 3000);
+    } else if (!_msData.generating && _msPollHandle) {
+      clearInterval(_msPollHandle);
+      _msPollHandle = null;
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function masterSummaryGenerate() {
+  var btn = document.getElementById('msGenerateBtn');
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+  document.getElementById('msLoading').style.display = '';
+  try {
+    var body = {};
+    if (_msProfileId) body.profile_id = _msProfileId;
+    var res = await fetch('/api/master-summary/generate', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      var d = await res.json();
+      alert('Failed: ' + (d.error || 'Unknown error'));
+      btn.disabled = false;
+      btn.textContent = _msData && _msData.exists ? 'Regenerate Summary' : 'Generate Summary';
+      document.getElementById('msLoading').style.display = 'none';
+      return;
+    }
+    // Start polling
+    if (!_msPollHandle) {
+      _msPollHandle = setInterval(masterSummaryLoad, 3000);
+    }
+  } catch (e) {
+    alert('Error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = _msData && _msData.exists ? 'Regenerate Summary' : 'Generate Summary';
+    document.getElementById('msLoading').style.display = 'none';
+  }
+}
+
+function masterSummaryRender() {
+  if (!_msData) return;
+  var badge = document.getElementById('msBadge');
+  var meta = document.getElementById('msMeta');
+  var btn = document.getElementById('msGenerateBtn');
+  var hint = document.getElementById('msHint');
+  var loading = document.getElementById('msLoading');
+  var content = document.getElementById('msContent');
+
+  // Badge
+  if (_msData.generating) {
+    badge.style.display = '';
+    badge.className = 'master-summary-badge generating';
+    badge.textContent = 'Generating...';
+  } else if (_msData.recommend_rerun) {
+    badge.style.display = '';
+    badge.className = 'master-summary-badge recommend';
+    badge.textContent = 'Update recommended';
+  } else {
+    badge.style.display = 'none';
+  }
+
+  // Meta line
+  if (_msData.exists && !_msData.generating) {
+    var dateStr = _msData.generated_at ? new Date(_msData.generated_at).toLocaleDateString([], {month:'short',day:'numeric',year:'numeric'}) + ' ' + new Date(_msData.generated_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : 'Unknown';
+    var oldC = _msData.report_count_at_generation || 0;
+    var curC = _msData.current_report_count || 0;
+    var diff = curC - oldC;
+    meta.innerHTML = dateStr + ' &middot; ' + oldC + ' reports' + (diff > 0 ? ' <span class="master-summary-new">(+' + diff + ' new)</span>' : '');
+  } else {
+    meta.textContent = '';
+  }
+
+  // Button
+  if (_msData.generating) {
+    btn.disabled = true;
+    btn.textContent = 'Generating...';
+  } else {
+    btn.disabled = _msData.current_report_count === 0;
+    btn.textContent = _msData.exists ? 'Regenerate Summary' : 'Generate Summary';
+  }
+
+  // Hint
+  if (_msData.generating) {
+    hint.textContent = '';
+  } else if (_msData.current_report_count === 0) {
+    hint.textContent = 'No reports available yet. Run some analyses first.';
+  } else if (!_msData.exists) {
+    hint.textContent = _msData.current_report_count + ' reports available. Click to generate.';
+  } else if (_msData.recommend_rerun) {
+    var n = (_msData.current_report_count || 0) - (_msData.report_count_at_generation || 0);
+    hint.textContent = n + ' new reports since last generation. Consider regenerating.';
+  } else {
+    hint.textContent = '';
+  }
+
+  // Loading spinner
+  loading.style.display = _msData.generating && !_msData.exists ? '' : 'none';
+
+  // Content
+  if (_msData.content) {
+    content.innerHTML = _msRenderMarkdown(_msData.content);
+  } else {
+    content.innerHTML = '';
+  }
+}
+
+function _msRenderMarkdown(text) {
+  if (!text) return '';
+  // Simple markdown to HTML: headings, bold, italic, code blocks, inline code, lists, tables, hr, blockquotes, links
+  var html = text
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    // Code blocks
+    .replace(/```[\w]*\n([\s\S]*?)```/g, function(m, code) {
+      return '<pre><code>' + code + '</code></pre>';
+    })
+    // Tables (detect lines with |)
+    .replace(/((?:^|\n)\|.+\|(?:\n\|.+\|)+)/g, function(tableBlock) {
+      var rows = tableBlock.trim().split('\n').filter(function(r){ return r.trim(); });
+      if (rows.length < 2) return tableBlock;
+      var isHeader = rows.length >= 2 && /^\|[\s\-:|]+\|$/.test(rows[1]);
+      var startIdx = isHeader ? 2 : 0;
+      var headerRow = isHeader ? rows[0] : null;
+      var out = '<table>';
+      if (headerRow) {
+        var cells = headerRow.split('|').filter(function(c,i,a){ return i > 0 && i < a.length-1; });
+        out += '<thead><tr>' + cells.map(function(c){ return '<th>' + c.trim() + '</th>'; }).join('') + '</tr></thead>';
+      }
+      out += '<tbody>';
+      for (var ri = startIdx; ri < rows.length; ri++) {
+        var cells = rows[ri].split('|').filter(function(c,i,a){ return i > 0 && i < a.length-1; });
+        out += '<tr>' + cells.map(function(c){ return '<td>' + c.trim() + '</td>'; }).join('') + '</tr>';
+      }
+      out += '</tbody></table>';
+      return out;
+    })
+    // Headings
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    // Bold and italic
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    // Inline code
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // Horizontal rules
+    .replace(/^---+$/gm, '<hr>')
+    // Blockquotes
+    .replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
+    // Unordered lists (simple)
+    .replace(/^[-*] (.+)$/gm, '<li>$1</li>')
+    // Ordered lists
+    .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
+    // Wrap consecutive <li> in <ul>
+    .replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>')
+    // Paragraphs (double newline)
+    .replace(/\n\n/g, '</p><p>')
+    // Single newlines to <br> (except in pre/table)
+    .replace(/\n/g, '<br>');
+  return '<p>' + html + '</p>';
+}
+
+function chatSwitchTab(name) {
+  chatState.sub = name;
+  document.getElementById('chatSubChat').style.display = name === 'chat' ? '' : 'none';
+  document.getElementById('chatSubTerminal').style.display = name === 'terminal' ? '' : 'none';
+  document.getElementById('chatSubSettings').style.display = name === 'settings' ? '' : 'none';
+  var cmdEl = document.getElementById('chatSubClaudemd');
+  if (cmdEl) cmdEl.style.display = name === 'claudemd' ? '' : 'none';
+  document.getElementById('chatTabChat').classList.toggle('active', name === 'chat');
+  document.getElementById('chatTabTerminal').classList.toggle('active', name === 'terminal');
+  document.getElementById('chatTabSettings').classList.toggle('active', name === 'settings');
+  var cmdTab = document.getElementById('chatTabClaudemd');
+  if (cmdTab) cmdTab.classList.toggle('active', name === 'claudemd');
+  // Manage terminal polling
+  if (name === 'terminal') {
+    chatRawLoadFull();
+    if (chatState.rawPollHandle) clearInterval(chatState.rawPollHandle);
+    chatState.rawPollHandle = setInterval(chatRawPollTail, 1200);
+  } else if (chatState.rawPollHandle) {
+    clearInterval(chatState.rawPollHandle); chatState.rawPollHandle = null;
+  }
+  if (name === 'settings') settingsRefreshKeyUI();
+  if (name === 'claudemd') loadClaudeMd();
+}
 
 // ─── Settings view ──────────────────────────────────────────────
-async function loadSettingsView() {
-  try {
-    const r = await fetch(BASE + '/api/settings');
-    if (!r.ok) return;
-    const data = await r.json();
+async function enrichAllPgs() {
+      const btn = document.getElementById('enrichAllBtn');
+      const status = document.getElementById('enrichAllStatus');
+      if (!btn || !status) return;
+      btn.disabled = true;
+      btn.textContent = 'Enriching...';
+      status.textContent = '';
 
-    // Model selector
+      const pgsCats = Object.values(TAB_DEFS)
+        .flatMap(d => d.categories)
+        .filter(c => c.startsWith('PGS'));
+
+      let done = 0;
+      for (const cat of pgsCats) {
+        status.textContent = `Enriching ${cat}... (${done}/${pgsCats.length})`;
+        try {
+          await refreshPgsCategory(cat);
+        } catch (e) {
+          console.error('Enrich failed for', cat, e);
+        }
+        done++;
+      }
+      status.textContent = `Done — refreshed ${done} PGS categories.`;
+      btn.disabled = false;
+      btn.textContent = 'Enrich All PGS Categories';
+    }
+
+    async function loadSettingsView() {
+  try {
+    const [settingsR, depsR] = await Promise.all([
+      fetch(BASE + '/api/settings'),
+      fetch(BASE + '/api/settings/deps'),
+    ]);
+    const data = settingsR.ok ? await settingsR.json() : {};
+    const depsData = depsR.ok ? await depsR.json() : {};
+
+    // ── Server info cards ──
+    const sys = data.system || {};
+    const grid = document.getElementById('serverInfoGrid');
+    if (grid && sys.hostname) {
+      const gpu = (sys.gpu && sys.gpu.available && sys.gpu.devices && sys.gpu.devices.length)
+        ? sys.gpu.devices[0] : null;
+      grid.innerHTML = `
+        <div class="server-card">
+          <div class="server-card-label">Hostname</div>
+          <div class="server-card-value">${sys.hostname || '—'}</div>
+        </div>
+        <div class="server-card">
+          <div class="server-card-label">CPU</div>
+          <div class="server-card-value">${sys.cpu ? sys.cpu.threads + ' threads' : '—'}</div>
+          <div class="server-card-sub">${sys.cpu ? sys.cpu.usage_pct + '% used' : ''}</div>
+        </div>
+        <div class="server-card">
+          <div class="server-card-label">Memory</div>
+          <div class="server-card-value">${sys.memory ? sys.memory.total_gb + ' GB' : '—'}</div>
+          <div class="server-card-sub">${sys.memory ? sys.memory.used_gb + ' GB used (' + sys.memory.usage_pct + '%)' : ''}</div>
+        </div>
+        ${gpu ? `<div class="server-card">
+          <div class="server-card-label">GPU</div>
+          <div class="server-card-value">${gpu.name}</div>
+          <div class="server-card-sub">${Math.round(gpu.memory_total_mb/1024)} GB VRAM, ${gpu.utilization_pct}% util</div>
+        </div>` : ''}
+        <div class="server-card">
+          <div class="server-card-label">Uptime</div>
+          <div class="server-card-value">${sys.uptime || '—'}</div>
+        </div>
+        <div class="server-card">
+          <div class="server-card-label">Load Avg</div>
+          <div class="server-card-value">${sys.load_avg || '—'}</div>
+        </div>
+      `;
+    }
+
+    // ── Dependency grids ──
+    const deps = depsData.deps || [];
+    const toolsGrid = document.getElementById('depsToolsGrid');
+    const dataGrid = document.getElementById('depsDataGrid');
+    if (toolsGrid) toolsGrid.innerHTML = '';
+    if (dataGrid) dataGrid.innerHTML = '';
+
+    for (const dep of deps) {
+      const el = document.createElement('div');
+      el.className = 'dep-item' + (dep.installed ? '' : ' missing');
+      let inner = `<span class="dep-icon">${dep.installed ? '&#x2705;' : '&#x274C;'}</span>`;
+      inner += `<span class="dep-name">${dep.name}</span>`;
+      if (dep.version) inner += `<span class="dep-ver">${dep.version}</span>`;
+      if (dep.size) inner += `<span class="dep-size">${dep.size}</span>`;
+      if (!dep.installed && dep.installable && dep.install_flag) {
+        inner += `<button class="dep-install-btn" onclick="installDep('${dep.install_flag}',this)">Install</button>`;
+      }
+      el.innerHTML = inner;
+      if (dep.category === 'tool' && toolsGrid) toolsGrid.appendChild(el);
+      else if (dataGrid) dataGrid.appendChild(el);
+    }
+
+    // ── Model selector ──
     const sel = document.getElementById('settingsInterpModel');
     if (sel) sel.value = data.interp_model || 'gemini';
 
-    // Key status for each provider
+    // ── Key status ──
     for (const provider of ['openai', 'claude']) {
       const info = (data.keys || {})[provider] || {};
       const dot = document.getElementById(provider + 'KeyDot');
@@ -8105,10 +10932,126 @@ async function loadSettingsView() {
         if (removeBtn) removeBtn.style.display = 'none';
       }
     }
-
     updateModelNote();
   } catch (e) {
     console.error('Failed to load settings:', e);
+  }
+}
+
+let _installPollHandle = null;
+async function installDep(flag, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Installing...'; }
+  const prog = document.getElementById('installProgress');
+  if (prog) { prog.style.display = 'block'; prog.textContent = 'Starting install...'; }
+  try {
+    const r = await fetch(BASE + '/api/settings/install-dep', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ flag }),
+    });
+    const data = await r.json();
+    if (!data.ok) {
+      if (prog) prog.textContent = 'Error: ' + (data.error || 'unknown');
+      if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+      return;
+    }
+    // Poll for progress
+    const jobId = data.job_id;
+    if (_installPollHandle) clearInterval(_installPollHandle);
+    _installPollHandle = setInterval(async () => {
+      try {
+        const sr = await fetch(BASE + '/api/settings/install-dep/' + jobId);
+        const sd = await sr.json();
+        if (prog) {
+          prog.textContent = sd.output || 'Running...';
+          prog.scrollTop = prog.scrollHeight;
+        }
+        if (!sd.running) {
+          clearInterval(_installPollHandle);
+          _installPollHandle = null;
+          const ok = sd.exit_code === 0;
+          if (prog) prog.textContent += '\n\n' + (ok ? 'Done!' : 'Failed (exit ' + sd.exit_code + ')');
+          if (btn) { btn.disabled = false; btn.textContent = ok ? 'Done' : 'Retry'; }
+          // Refresh deps
+          setTimeout(() => loadSettingsView(), 1000);
+        }
+      } catch (e) {
+        clearInterval(_installPollHandle);
+        _installPollHandle = null;
+      }
+    }, 1500);
+  } catch (e) {
+    if (prog) prog.textContent = 'Network error';
+    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+  }
+}
+
+
+async function connectClaudeMax() {
+  const btn = document.getElementById('claudeMaxBtn');
+  const status = document.getElementById('claudeMaxStatus');
+  if (btn) btn.disabled = true;
+  if (status) { status.textContent = 'Starting OAuth flow...'; status.style.display = 'block'; }
+  try {
+    // Send /login command to the tmux session — this triggers Claude's OAuth flow
+    // First, ensure there's a tmux session without requiring API key
+    const r = await fetch(BASE + '/api/chat/oauth-start', { method: 'POST' });
+    const data = await r.json();
+    if (data.ok) {
+      if (status) {
+        status.innerHTML = 'OAuth started! Switch to the <a href="#" onclick="chatSwitchTab(\'terminal\');return false;" style="color:var(--accent)">Terminal</a> tab to see the login URL. Open it in your browser to authenticate.';
+      }
+    } else {
+      if (status) { status.textContent = data.error || 'Failed to start OAuth'; status.style.cssText += 'color:#f87171 !important'; }
+    }
+  } catch (e) {
+    if (status) { status.textContent = 'Network error'; status.style.cssText += 'color:#f87171 !important'; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+
+async function loadClaudeMd() {
+  const ta = document.getElementById('claudemdTextarea');
+  const status = document.getElementById('claudemdStatus');
+  if (!ta) return;
+  try {
+    if (status) status.textContent = 'Loading...';
+    const r = await fetch(BASE + '/api/claude-md/rebuild', {method: 'POST'});
+    if (r.ok) {
+      const d = await r.json();
+      ta.value = d.content || '';
+      if (status) status.textContent = '';
+    } else {
+      if (status) status.textContent = 'Failed to load';
+    }
+  } catch (e) {
+    if (status) status.textContent = 'Error';
+  }
+}
+
+async function saveClaudeMd() {
+  const ta = document.getElementById('claudemdTextarea');
+  const status = document.getElementById('claudemdStatus');
+  if (!ta) return;
+  try {
+    if (status) status.textContent = 'Saving...';
+    const r = await fetch(BASE + '/api/claude-md', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: ta.value }),
+    });
+    if (r.ok) {
+      const d = await r.json();
+      ta.value = d.content || ta.value;
+      if (status) status.textContent = 'Saved';
+      setTimeout(() => { if (status) status.textContent = ''; }, 2000);
+    } else {
+      if (status) status.textContent = 'Save failed';
+    }
+  } catch (e) {
+    if (status) status.textContent = 'Error saving';
   }
 }
 
