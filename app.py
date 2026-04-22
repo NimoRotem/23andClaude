@@ -1502,7 +1502,16 @@ def queue_worker(worker_id):
             # Set task context for subprocess tracking (cancellation support)
             set_task_context(task_id)
             try:
-                result = run_test(vcf_path, test_def, progress_cb=progress_cb)
+                # Pass ref_pop override if specified by user
+                _ref_pop = task.get("ref_pop", "")
+                if _ref_pop and test_def.get("test_type") == "pgs_score":
+                    _td_override = dict(test_def)
+                    _td_override.setdefault("params", {})
+                    _td_override["params"] = dict(_td_override["params"])
+                    _td_override["params"]["ref_pop"] = _ref_pop
+                    result = run_test(vcf_path, _td_override, progress_cb=progress_cb)
+                else:
+                    result = run_test(vcf_path, test_def, progress_cb=progress_cb)
             finally:
                 clear_task_context()
             elapsed = time.time() - start
@@ -2432,18 +2441,37 @@ async def get_tests(username: str = Depends(current_user)):
     _eager_inject_custom_pgs_for_user(username)
     active = _get_active_file(username)
 
-    # Merge PGS enrichment data into test entries
+    # Merge PGS enrichment data + ref availability into test entries
     enrichment = _load_pgs_enrichment()
+    # Load ref availability in bulk
+    _ref_coverage = {}
+    if _PIPELINE_DB_AVAILABLE:
+        try:
+            _ref_coverage = pipeline_db.get_stats_coverage()
+        except Exception:
+            pass
+    # Also check legacy stats for EUR
+    import os as _os
+    _legacy_dir = "/data/pgs2/ref_panel_stats"
+    if _os.path.isdir(_legacy_dir):
+        for _fname in _os.listdir(_legacy_dir):
+            if _fname.endswith(".json") and _fname.startswith("PGS"):
+                _pid = _fname.split("_")[0]
+                if _pid not in _ref_coverage:
+                    _ref_coverage[_pid] = ["EUR"]
+
     enriched_tests = []
     for t in TESTS:
         if t.get("test_type") == "pgs_score" and t.get("params", {}).get("pgs_id"):
             pgs_id = t["params"]["pgs_id"]
+            t_copy = dict(t)
             e = enrichment.get(pgs_id)
             if e:
-                t_copy = dict(t)
                 t_copy["enrichment"] = e
-                enriched_tests.append(t_copy)
-                continue
+            # Add ref availability
+            t_copy["available_refs"] = _ref_coverage.get(pgs_id, [])
+            enriched_tests.append(t_copy)
+            continue
         enriched_tests.append(t)
 
     return {
@@ -2765,7 +2793,8 @@ async def put_tests_markdown(request: Request, tab: str = "", username: str = De
 
 
 def _queue_task(username, test_def, active, profile_id=None,
-                override_file_id=None, attempt=1, exclude_file_ids=None):
+                override_file_id=None, attempt=1, exclude_file_ids=None,
+                ref_pop=None):
     """Build + enqueue a task. Each task carries `username` so the worker
     routes the resulting report to the right per-user dir on disk.
 
@@ -2816,6 +2845,7 @@ def _queue_task(username, test_def, active, profile_id=None,
         "attempt": attempt,
         "exclude_file_ids": list(exclude_file_ids or []),
         "selection_reason": selection_reason,
+        "ref_pop": ref_pop or "",
     }
     with queue_lock:
         task_queue.append(task)
@@ -2849,6 +2879,7 @@ async def run_single_test(
     test_id: str,
     request: Request,
     file_id: str = "",
+    ref_pop: str = "",
     username: str = Depends(current_user),
 ):
     # Accept profile_id and override_file_id from query or JSON body
@@ -2881,7 +2912,7 @@ async def run_single_test(
     target = _resolve_target_file(username, file_id)
     if not target:
         return JSONResponse({"ok": False, "error": "No file selected. Upload or add a file first."}, status_code=400)
-    task_id = _queue_task(username, test_def, target)
+    task_id = _queue_task(username, test_def, target, ref_pop=ref_pop or None)
     return {"ok": True, "task_id": task_id, "file_id": target["id"]}
 
 
@@ -3993,6 +4024,33 @@ async def get_pgs_refs(pgs_id: str, username: str = Depends(current_user)):
     return {"pgs_id": pgs_id, "refs": result_refs}
 
 
+
+@app.get("/api/pgs/refs-bulk")
+async def get_pgs_refs_bulk(username: str = Depends(current_user)):
+    """Return available reference populations for ALL PGS tests at once."""
+    import os, json as _json
+    result = {}
+    if _PIPELINE_DB_AVAILABLE:
+        coverage = pipeline_db.get_stats_coverage()
+        for pgs_id, pops in coverage.items():
+            result[pgs_id] = pops
+    # Also check legacy stats dir for any EUR-only PGS not in the new DB
+    legacy_dir = "/data/pgs2/ref_panel_stats"
+    if os.path.isdir(legacy_dir):
+        for fname in os.listdir(legacy_dir):
+            if not fname.endswith(".json"):
+                continue
+            # Parse PGS ID from filename like PGS000005_EUR_GRCh38.json
+            parts = fname.split("_")
+            if len(parts) >= 2 and parts[0].startswith("PGS"):
+                pid = parts[0]
+                if pid not in result:
+                    result[pid] = ["EUR"]
+                elif "EUR" not in result[pid]:
+                    result[pid].append("EUR")
+    return {"refs": result}
+
+
 @app.get("/api/pgs/{pgs_id}/percentile")
 async def get_pgs_percentile(pgs_id: str, task_id: str, ref: str = "EUR",
                               username: str = Depends(current_user)):
@@ -4752,6 +4810,12 @@ async def index():
     return HTMLResponse(FRONTEND_HTML)
 
 
+@app.get("/app", response_class=HTMLResponse)
+async def app_spa():
+    """SPA catch-all: /app redirects to / preserving the hash fragment."""
+    return HTMLResponse(FRONTEND_HTML)
+
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_page():
     return HTMLResponse(_AUTH_PAGE_HTML.replace("__MODE__", "login"))
@@ -4901,6 +4965,47 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 const BASE = window.location.pathname.startsWith('/simple') ? '/simple' : '';
 
 // Population labels for ref tabs
+// Track user's selected ref population per test row
+const _selectedRefs = {};  // testId -> 'EUR'|'EAS'|'MIX'
+
+// Build ref badges HTML for a PGS test
+function _refBadgesHtml(t) {
+  const refs = t.available_refs || [];
+  if (!refs.length && t.test_type !== 'pgs_score') return '';
+  if (t.test_type !== 'pgs_score') return '';
+  const UI_POPS = ['EUR', 'EAS', 'MIX'];
+  let html = '<span class="ref-badges">';
+  for (const pop of UI_POPS) {
+    const has = refs.includes(pop);
+    html += `<span class="ref-badge ${has ? 'ref-badge-ok' : 'ref-badge-miss'}" title="${has ? pop + ' reference available' : pop + ' — no precomputed stats'}">${pop}</span>`;
+  }
+  // Show count of other available refs (AFR, SAS, AMR) if any
+  const others = refs.filter(r => !UI_POPS.includes(r));
+  if (others.length > 0) {
+    html += `<span class="ref-badge ref-badge-ok" title="${others.join(', ')} also available">+${others.length}</span>`;
+  }
+  html += '</span>';
+  return html;
+}
+
+// Build ref dropdown HTML for a PGS test
+function _refDropdownHtml(t) {
+  if (t.test_type !== 'pgs_score') return '';
+  const refs = t.available_refs || [];
+  // Always show EUR/EAS/MIX options; disable those without precomputed stats
+  const UI_POPS = ['EUR', 'EAS', 'MIX'];
+  const sel = _selectedRefs[t.id] || 'EUR';
+  let html = '<select class="ref-select" onchange="_selectedRefs[\'' + t.id + '\']=this.value" title="Reference population for percentile">';
+  for (const pop of UI_POPS) {
+    const has = refs.includes(pop);
+    const label = (_POP_LABELS[pop] || pop);
+    const tag = has ? '' : ' (no ref)';
+    html += `<option value="${pop}" ${pop === sel ? 'selected' : ''} ${!has ? 'style="color:#aaa"' : ''}>${pop} – ${label}${tag}</option>`;
+  }
+  html += '</select>';
+  return html;
+}
+
 window._POP_LABELS = {
   EUR: 'European', EAS: 'East Asian', AFR: 'African',
   SAS: 'South Asian', AMR: 'Admixed American',
@@ -7213,6 +7318,18 @@ input[type="file"] { display: none; }
 }
 .data-files-row.active-row .df-name { color: var(--accent2); font-weight: 600; }
 
+/* ── Ref availability badges & dropdown in test rows ── */
+.ref-badges { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: middle; }
+.ref-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.62rem;
+  font-weight: 600; letter-spacing: 0.02em; line-height: 1.4; }
+.ref-badge-ok { background: rgba(76,175,80,0.13); color: #4caf50; }
+.ref-badge-miss { background: rgba(158,158,158,0.10); color: var(--text3, #aaa); text-decoration: line-through; opacity: 0.5; }
+.ref-select { font-size: 0.72rem; padding: 2px 6px; border-radius: 4px;
+  border: 1px solid var(--border, #ddd); background: var(--bg2, #f5f5f5);
+  color: var(--text, #333); cursor: pointer; margin-left: 4px; font-family: inherit;
+  max-width: 90px; }
+.ref-select:focus { border-color: var(--accent, #5b6abf); outline: none; }
+.no-ref-hint { font-size: 0.65rem; color: var(--text3, #999); font-style: italic; margin-left: 4px; }
 /* ── Reference population tabs ── */
 .ref-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
 .ref-tab { padding: 3px 10px; border: 1px solid var(--border, #ddd); border-radius: 12px;
@@ -8876,10 +8993,12 @@ function renderTestRow(t) {
     const compareBtn = multi.length > 1 && hasAnyReport ? `<button class="view-btn" style="margin-top:4px;font-size:0.7rem" onclick="viewMultiReport('${t.id}')">Compare</button>` : '';
     const clearBtn = hasAnyReport ? `<button class="clear-row-btn" style="margin-top:4px" onclick="clearSingleReport('${t.id}')" title="Clear all results">Clear</button>` : '';
 
+    const _isPgsP = t.test_type === 'pgs_score';
+    const _refBadgesP = _isPgsP ? _refBadgesHtml(t) : '';
     return `
       <div class="test-row" id="row-${t.id}" style="grid-template-columns: 1fr; grid-template-rows: auto auto;">
         <div class="test-info">
-          <h3>${t.name}${t.params&&t.params.pgs_id ? ' <a href="https://www.pgscatalog.org/score/'+t.params.pgs_id+'/" target="_blank" class="pgs-link" title="View on PGS Catalog">↗</a>' : ''}</h3>
+          <h3>${t.name}${t.params&&t.params.pgs_id ? ' <a href="https://www.pgscatalog.org/score/'+t.params.pgs_id+'/" target="_blank" class="pgs-link" title="View on PGS Catalog">↗</a>' : ''}${_refBadgesP}</h3>
           <p>${t.description.substring(0, 120)}${t.description.length > 120 ? '...' : ''}</p>
           ${t.enrichment ? `<div class="pgs-enrichment">
             ${t.enrichment.doi ? `<span class="enr-item"><a href="${t.enrichment.doi}" target="_blank" class="enr-link">${t.enrichment.citation || 'Publication'}</a></span>` : (t.enrichment.citation ? `<span class="enr-item">${t.enrichment.citation}</span>` : '')}
@@ -8899,11 +9018,14 @@ function renderTestRow(t) {
 
   // Non-profile mode: original layout
   let statusHtml = _renderResultLine(info, true);
+  const _isPgs = t.test_type === 'pgs_score';
+  const _refBadges = _isPgs ? _refBadgesHtml(t) : '';
+  const _refDrop = _isPgs ? _refDropdownHtml(t) : '';
 
   return `
     <div class="test-row" id="row-${t.id}">
       <div class="test-info">
-        <h3>${t.name}${t.params&&t.params.pgs_id ? ' <a href="https://www.pgscatalog.org/score/'+t.params.pgs_id+'/" target="_blank" class="pgs-link" title="View on PGS Catalog">↗</a>' : ''}</h3>
+        <h3>${t.name}${t.params&&t.params.pgs_id ? ' <a href="https://www.pgscatalog.org/score/'+t.params.pgs_id+'/" target="_blank" class="pgs-link" title="View on PGS Catalog">↗</a>' : ''}${_refBadges}</h3>
         <p>${t.description.substring(0, 120)}${t.description.length > 120 ? '...' : ''}</p>
         ${t.enrichment ? `<div class="pgs-enrichment">
           ${t.enrichment.doi ? `<span class="enr-item"><a href="${t.enrichment.doi}" target="_blank" class="enr-link">${t.enrichment.citation || 'Publication'}</a></span>` : (t.enrichment.citation ? `<span class="enr-item">${t.enrichment.citation}</span>` : '')}
@@ -8918,6 +9040,7 @@ function renderTestRow(t) {
         ${hasAnyReport ? `<button class="clear-row-btn" onclick="clearSingleReport('${t.id}')" title="Delete this report so you can re-run">Clear</button>` : ''}
         ${hasAnyReport ? `<button class="view-btn" onclick="viewReport('${t.id}')">View</button>` : ''}
         ${isRunning ? `<button class="stop-btn" onclick="stopTask('${t.id}')" title="Stop this test">Stop</button>` : ''}
+        ${_refDrop}
         <button class="run-btn" onclick="runTest('${t.id}')" ${isRunning ? 'disabled' : ''}>Run</button>
       </div>
     </div>
@@ -9014,10 +9137,11 @@ function _runTargetFileIds() {
   return [null];  // null = let the server use its active file
 }
 
-async function _postRun(url, fileId) {
+async function _postRun(url, fileId, refPop) {
   // Append ?file_id when explicit; backend treats missing param as
   // "use server-side active file".
-  const fullUrl = fileId ? `${url}${url.includes('?') ? '&' : '?'}file_id=${encodeURIComponent(fileId)}` : url;
+  let fullUrl = fileId ? `${url}${url.includes('?') ? '&' : '?'}file_id=${encodeURIComponent(fileId)}` : url;
+  if (refPop) fullUrl += `${fullUrl.includes('?') ? '&' : '?'}ref_pop=${encodeURIComponent(refPop)}`;
   const resp = await fetch(fullUrl, { method: 'POST' });
   return resp.json();
 }
@@ -9025,8 +9149,9 @@ async function _postRun(url, fileId) {
 async function runTest(testId) {
   const targets = _runTargetFileIds();
   if (!targets.length) return;
+  const refPop = _selectedRefs[testId] || '';
   for (const fid of targets) {
-    const data = await _postRun(`${BASE}/api/run/${testId}`, fid);
+    const data = await _postRun(`${BASE}/api/run/${testId}`, fid, refPop);
     if (!data.ok) { alert(data.error); continue; }
     // Only mirror the local row state when we ran against the file the
     // user is currently viewing.
