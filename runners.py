@@ -2707,7 +2707,7 @@ def _sex_from_vcf(vcf_path, method):
 
 # ─── PGS Scoring Runner ─────────────────────────────────────────
 
-def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tmpdir, trait="", build_check=None):
+def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tmpdir, trait="", build_check=None, ref_pop=""):
     """Fast PGS scoring for small/medium variant sets -- bypasses full pgen build.
 
     For a gVCF with <=2000 PGS variants, expand only those positions with
@@ -3094,7 +3094,8 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
             _progress(f"Fast-scoring {pgs_id} ({variant_count} variants)…")
             fast_result = _score_pgs_fast(vcf_path, pgs_id, scoring_file,
                                           plink2_scoring, metadata, tmpdir,
-                                          trait=trait, build_check=build_check)
+                                          trait=trait, build_check=build_check,
+                                          ref_pop=ref_pop)
             if fast_result is not None:
                 return fast_result
             logger.warning(f"{pgs_id}: fast path failed, falling back to full pgen")
@@ -3195,13 +3196,18 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
         # a precomputed stats file inside the helper if this isn't possible).
         raw_score = result.get("raw_score")
         _score_sum = result.get("score_sum")
+        # Build ancestry hint from user-selected ref population
+        _ancestry_hint_slow = None
+        if ref_pop:
+            _ancestry_hint_slow = {ref_pop: 1.0}
         percentile, pctl_details = _compute_percentile(
             pgs_id, raw_score or 0,
             scoring_file=scoring_file,
             matched_vars_path=vars_file,
             tmpdir=tmpdir,
             return_details=True,
-            score_sum=_score_sum)
+            score_sum=_score_sum,
+            ancestry_result=_ancestry_hint_slow)
 
         pipeline_info = _build_pipeline_info(
             vcf_path, pgs_id, metadata, "pgen_cache",

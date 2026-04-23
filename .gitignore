@@ -1,19 +1,32 @@
 # Secrets & user data
+.env
 .fernet_key
 users.json
 users/
 sessions.json
 
-# Runtime caches
+# Runtime caches & databases
 cram_vcf_cache/
 ref_cache/
 __pycache__/
 *.pyc
 .pytest_cache/
+pgs_pipeline.db
 
 # Backup files
 *.bak*
 *.pre-*-backup
+*.pre-*
+app.py.original-ref
+app.py.patch3c-broken
+app.py.failed-attempt
+
+# Temporary patch/fix scripts
+patch_*.py
+fix_*.py
+compare_results.py
+debug_genotypes.py
+pgs_cleanup_disabled.py
 
 # Liftover working files (keep chain + binary)
 liftover/input.bed
@@ -22,6 +35,11 @@ liftover/output.bed.unmap
 liftover/output_ucsc.bed
 liftover/unmapped.bed
 
+# Large data (downloaded via setup_data.sh)
+trees/phylotree-*/
+trees/*.yaml
+pgs_enrichment.json
+
 # IDE
 .vscode/
 .idea/
@@ -29,9 +47,3 @@ liftover/unmapped.bed
 # OS
 .DS_Store
 Thumbs.db
-
-# Large data (downloaded via setup_data.sh)
-trees/phylotree-*/
-trees/*.yaml
-pgs_enrichment.json
-.env
