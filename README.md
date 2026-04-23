@@ -287,7 +287,7 @@ Every validation result is logged to `/scratch/simple-genomics/build_validation.
 - **Method**: `plink2 --score` against PGS Catalog harmonized scoring files
 - **Data**: `/data/pgs_cache/` (scoring files), `/data/pgen_cache/sg/` (VCF→pgen cache)
 - **Reference panel**: `/data/pgs2/ref_panel/GRCh38_1000G_ALL` (1000 Genomes Phase 3)
-- **Percentile stats**: `/data/pgs2/ref_panel_stats/` (precomputed EUR distribution)
+- **Percentile stats**: Multi-population precomputed distributions — see [Custom Reference Panel Statistics](#custom-reference-panel-statistics-eureasafrsasamrmix) below
 - **Fast path**: gVCF + small PGS (≤500 variants) bypasses full pgen build (~5s vs ~15min)
 - **Percentile method**: precomputed stats preferred (reliable); dynamic scoring used as validation/fallback
 - **Sanity gates**: `|z|>6` fails, `|z|>4` warns, std-collapse detection, percentile capped at [0.5, 99.5]
@@ -405,7 +405,9 @@ When querying a gVCF, reference blocks (ALT = `<*>` or `<NON_REF>`, GT = `0/0`) 
 | HaploGrep3 | `/home/nimrod_rotem/tools/haplogrep3/haplogrep3` | GitHub release | `setup_data.sh --haplogrep3` |
 | Reference FASTA | `/data/refs/GRCh38.fa → hs38DH.fa` | Prerequisite | Manual |
 | 1000G ref panel | `/data/pgs2/ref_panel/GRCh38_1000G_ALL.{pgen,psam,pvar.zst}` | Prerequisite | Manual |
-| Ref panel stats | `/data/pgs2/ref_panel_stats/{PGS*}_EUR_GRCh38.json` | `scripts/build_ref_panel_stats.py` | Manual |
+| Ref panel stats (legacy) | `/data/pgs2/ref_panel_stats/{PGS*}_EUR_GRCh38.json` | `scripts/build_ref_panel_stats.py` | Manual |
+| Ref panel stats (multi-pop) | `/data/ref_stats/{PGS*}/{POP}_GRCh38.json` | `pipeline/build_ref_stats.py` | See [below](#custom-reference-panel-statistics-eureasafrsasamrmix) |
+| Population sample lists | `/data/pgs2/ref_panel/pop_samples/{EUR,EAS,AFR,SAS,AMR}.txt` | Derived from 1000G psam | Manual |
 | PGS scoring files | `/data/pgs_cache/PGS*/` | PGS Catalog | Auto-downloaded on demand |
 
 ## Tools Required
@@ -420,6 +422,128 @@ When querying a gVCF, reference blocks (ALT = `<*>` or `<NON_REF>`, GT = `0/0`) 
 
 ---
 
+## Custom Reference Panel Statistics (EUR/EAS/AFR/SAS/AMR/MIX)
+
+**This data is not available from the PGS Catalog.** The PGS Catalog provides harmonized scoring files (variant weights), but does not provide population-specific score distributions. Without these distributions, a raw polygenic score is just a number with no frame of reference — you cannot compute a percentile or z-score.
+
+simple-genomics computes its own reference panel statistics by scoring the entire 1000 Genomes Phase 3 reference panel (3,202 samples) against each PGS scoring file, then computing per-population distribution parameters (mean, std, median, quantiles). This is a computationally expensive one-time step that produces the data needed to convert raw scores into meaningful percentiles.
+
+![The PGS test runner showing EUR, EAS, and MIX reference availability badges per test. Each badge indicates that precomputed reference statistics exist for that population, enabling ancestry-aware percentile calculation.](docs/populations.png)
+
+### What is computed
+
+For each PGS scoring file and each population, the pipeline runs `plink2 --score` against the 1000 Genomes reference panel using population-specific `--keep` sample lists, then records:
+
+| Field | Description |
+|-------|-------------|
+| `mean` | Mean SCORE1_AVG across all samples in the population |
+| `std` | Standard deviation of SCORE1_AVG |
+| `median` | Median score |
+| `quantiles` | Percentile breakpoints (1st, 5th, 10th, 25th, 50th, 75th, 90th, 95th, 99th) |
+| `n_samples` | Number of reference samples scored |
+| `matched_variants` | Variants successfully matched between scoring file and reference panel |
+| `total_variants` | Total variants in the scoring file |
+| `score_sum_mean/std` | Sum-scale statistics (for scale reconciliation) |
+
+### Populations
+
+| Code | Label | N samples | Source |
+|------|-------|-----------|--------|
+| **EUR** | European | 633 | 1000 Genomes Phase 3 EUR superpopulation |
+| **EAS** | East Asian | 585 | 1000 Genomes Phase 3 EAS superpopulation |
+| **AFR** | African | 893 | 1000 Genomes Phase 3 AFR superpopulation |
+| **SAS** | South Asian | 601 | 1000 Genomes Phase 3 SAS superpopulation |
+| **AMR** | Admixed American | 490 | 1000 Genomes Phase 3 AMR superpopulation |
+| **MIX** | Mixed / Global | 2,450 | Balanced subsample: 490 from each of the 5 populations (seed=42) |
+
+The **MIX** population is a synthetic balanced panel designed for admixed individuals who don't fall cleanly into a single ancestry cluster. It prevents any single population from dominating the distribution.
+
+### Storage layout
+
+```
+/data/ref_stats/                       # Multi-population stats (computed by us)
+├── PGS000005/
+│   ├── EUR_GRCh38.json        # Distribution parameters
+│   ├── EUR_scores.npy         # Raw score array (for empirical percentiles)
+│   ├── EAS_GRCh38.json
+│   ├── EAS_scores.npy
+│   ├── AFR_GRCh38.json
+│   ├── AFR_scores.npy
+│   ├── SAS_GRCh38.json
+│   ├── SAS_scores.npy
+│   ├── AMR_GRCh38.json
+│   ├── AMR_scores.npy
+│   ├── MIX_GRCh38.json
+│   └── MIX_scores.npy
+├── PGS000078/
+│   └── ...
+└── ...
+
+/data/pgs2/ref_panel_stats/            # Legacy EUR-only stats (fallback)
+├── PGS000005_EUR_GRCh38.json
+├── PGS000078_EUR_GRCh38.json
+└── ...
+```
+
+### JSON format
+
+```json
+{
+  "pgs_id": "PGS000005",
+  "population": "EUR",
+  "genome_build": "GRCh38",
+  "mean": 0.000244,
+  "std": 0.001020,
+  "median": 0.000281,
+  "n_samples": 633,
+  "min": -0.00332,
+  "max": 0.00331,
+  "quantiles": {
+    "1": -0.00211, "5": -0.00150, "10": -0.00108,
+    "25": -0.00041, "50": 0.00028, "75": 0.00090,
+    "90": 0.00156, "95": 0.00185, "99": 0.00274
+  },
+  "matched_variants": 312,
+  "total_variants": 626,
+  "score_sum_mean": 0.1525,
+  "score_sum_std": 0.6368
+}
+```
+
+### How percentiles are computed
+
+1. **Ancestry-aware reference selection**: If the user has a PCA ancestry result, the system selects the closest matching reference population automatically:
+   - Single ancestry (top component >= 80%) → that population as primary reference
+   - Admixed (no component >= 80%) → MIX as primary reference
+   - Without ancestry data → EUR as default, MIX as secondary
+
+2. **Z-score and percentile**: `z = (raw_score - ref_mean) / ref_std`, then `percentile = Φ(z) × 100` (standard normal CDF).
+
+3. **Sanity gates**: `|z| > 6` → unreliable (rejected), `|z| > 4` → warning, std collapse → rejected, output clamped to [0.5, 99.5].
+
+4. **Multi-reference display**: The UI shows the primary percentile and offers a reference-population switcher so the user can compare their score against EUR, EAS, or MIX distributions side by side.
+
+### Building reference stats
+
+```bash
+# Build stats for a single PGS + population
+python3 -c "from pipeline.build_ref_stats import build_ref_stats; build_ref_stats('PGS000005', 'EUR')"
+
+# Build stats for all populations for a PGS
+python3 -c "
+from pipeline.build_ref_stats import build_ref_stats
+from pipeline.config import BUILDABLE_POPULATIONS
+for pop in BUILDABLE_POPULATIONS:
+    build_ref_stats('PGS000005', pop)
+"
+
+# Legacy EUR-only builder (standalone script)
+python3 scripts/build_ref_panel_stats.py PGS000005
+```
+
+The build process is idempotent — it skips any PGS/population combination where both the JSON and `.npy` files already exist (pass `force=True` to rebuild).
+
+---
 ## Updating ClinVar
 
 ClinVar is updated weekly. To refresh:
