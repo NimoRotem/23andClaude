@@ -66,6 +66,7 @@ SG_DATA_ROOT = Path(os.getenv(
 USERS_DIR = SG_DATA_ROOT / "users"
 USERS_FILE = SG_DATA_ROOT / "users.json"
 SESSIONS_FILE = SG_DATA_ROOT / "sessions.json"
+CONVERTER_JOBS_DIR = Path("/home/nimrod_rotem/bam-converter/jobs")
 USERS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Legacy single-namespace paths kept ONLY for the one-time migration to
@@ -238,9 +239,38 @@ except Exception as _ge:
 # Rate-limit concurrent Gemini calls to avoid 429 RESOURCE_EXHAUSTED
 _gemini_semaphore = Semaphore(2)  # max 2 concurrent LLM calls
 
-# Pipeline E+ (BAM/CRAM pileup) uses ~23 parallel processes per test.
-# Limit to 1 concurrent BAM/CRAM test to avoid crashing the system.
-_bam_cram_semaphore = Semaphore(1)
+# -- Core-budget system for BAM/CRAM concurrency -----------------
+# Instead of a binary semaphore, allocate a core budget so lightweight
+# BAM tests (PGx, ClinVar, variant_lookup -- ~2 threads) can run in
+# parallel with each other and alongside heavy PGS tests (~23 threads).
+import threading as _threading
+
+_CORE_BUDGET_TOTAL = 28   # leave 4 cores for system (32-core machine)
+_CORE_BUDGET_HEAVY = 23   # Pipeline E+ PGS on BAM/CRAM
+_CORE_BUDGET_LIGHT = 2    # variant_lookup, clinvar, PGx on BAM/CRAM
+
+_core_budget_lock = _threading.Lock()
+_core_budget_available = _CORE_BUDGET_TOTAL
+_core_budget_cond = _threading.Condition(_core_budget_lock)
+
+
+def _acquire_cores(n_cores, task_id=''):
+    global _core_budget_available
+    with _core_budget_cond:
+        while _core_budget_available < n_cores:
+            _core_budget_cond.wait()
+        _core_budget_available -= n_cores
+        _avail = _core_budget_available
+    logger.info(f'[{task_id}] Acquired {n_cores} cores ({_avail}/{_CORE_BUDGET_TOTAL} avail)')
+
+
+def _release_cores(n_cores, task_id=''):
+    global _core_budget_available
+    with _core_budget_cond:
+        _core_budget_available += n_cores
+        _avail = _core_budget_available
+        _core_budget_cond.notify_all()
+    logger.info(f'[{task_id}] Released {n_cores} cores ({_avail}/{_CORE_BUDGET_TOTAL} avail)')
 
 # Fallback Anthropic API key for when Gemini hits rate limits
 _FALLBACK_ANTHROPIC_KEY = os.getenv("FALLBACK_ANTHROPIC_KEY", "")
@@ -841,6 +871,77 @@ def _auto_assign_profile(username, file_id, file_entry):
             _save_profiles(username, data)
             return prof_id
     return None
+
+_converter_scan_cache = {}  # username -> (scan_time, newly_registered)
+_CONVERTER_SCAN_INTERVAL = 30  # seconds between rescans
+
+def _scan_converter_outputs(username):
+    """Scan bam-converter completed jobs for output VCF/gVCF files.
+    Auto-register files that match existing profiles by sample name."""
+    now = time.time()
+    cached = _converter_scan_cache.get(username)
+    if cached and (now - cached[0]) < _CONVERTER_SCAN_INTERVAL:
+        return cached[1]
+
+    if not CONVERTER_JOBS_DIR.is_dir():
+        _converter_scan_cache[username] = (now, [])
+        return []
+
+    ctx = get_user_state(username)
+    with ctx.lock:
+        registered_paths = {e["path"] for e in ctx.files_state["files"].values()}
+
+    newly_registered = []
+
+    for jf in sorted(CONVERTER_JOBS_DIR.glob("*.json")):
+        try:
+            job = json.loads(jf.read_text())
+        except Exception:
+            continue
+        if job.get("status") != "completed":
+            continue
+        output_dir = job.get("output_dir", "")
+        if not output_dir:
+            continue
+        dv_dir = os.path.join(output_dir, "dv")
+        if not os.path.isdir(dv_dir):
+            continue
+        for fname in sorted(os.listdir(dv_dir)):
+            fpath = os.path.join(dv_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            ftype = _normalize_file_type(fname)
+            if not ftype or ftype in ("bam", "cram"):
+                continue
+            if fpath in registered_paths:
+                continue
+            sample = _extract_sample_from_filename(fname)
+            if not sample:
+                continue
+            # Only auto-register if user has a profile matching this sample
+            data = _load_profiles(username)
+            sample_lower = sample.lower().strip()
+            matched_prof = None
+            for prof_id, prof in data["profiles"].items():
+                if prof["name"].lower().strip() == sample_lower:
+                    matched_prof = prof_id
+                    break
+            if not matched_prof:
+                continue
+            entry = _register_file(username, fpath, source="converter", name=fname, select=False)
+            entry["sample_name"] = sample
+            with ctx.lock:
+                ctx.files_state["files"][entry["id"]] = entry
+                ctx.save_files()
+            data = _load_profiles(username)
+            _assign_file_to_profile(data, matched_prof, entry["id"], username)
+            _save_profiles(username, data)
+            newly_registered.append(entry)
+            registered_paths.add(fpath)
+            logger.info(f"Auto-registered converter output {fname} -> profile {sample}")
+
+    _converter_scan_cache[username] = (now, newly_registered)
+    return newly_registered
 
 
 def _extract_sample_from_filename(name):
@@ -1482,14 +1583,16 @@ def queue_worker(worker_id):
         _ft = task.get("file_type", "")
         _needs_bam_gate = _ft in ("bam", "cram")
         try:
-            # BAM/CRAM tests use Pipeline E+ (~23 parallel processes).
-            # Gate them through a semaphore to prevent system overload.
+            # BAM/CRAM tests: gate through core-budget system.
+            # Heavy PGS tests need ~23 cores; lightweight tests need ~2.
+            _core_cost = 0
             if _needs_bam_gate:
+                _core_cost = _CORE_BUDGET_HEAVY if test_def.get('test_type') == 'pgs_score' else _CORE_BUDGET_LIGHT
+            if _core_cost > 0:
                 task_results[task_id]["status"] = "waiting_for_resources"
-                task_results[task_id]["headline"] = "Waiting for BAM/CRAM slot..."
-                logger.info(f"[{task_id}] Waiting for BAM/CRAM semaphore ({test_def['name']})")
-                _bam_cram_semaphore.acquire()
-                logger.info(f"[{task_id}] Acquired BAM/CRAM semaphore")
+                task_results[task_id]["headline"] = f"Waiting for {_core_cost} cores..."
+                logger.info(f"[{task_id}] Waiting for {_core_cost} cores ({test_def['name']})")
+                _acquire_cores(_core_cost, task_id)
                 task_results[task_id]["status"] = "running"
 
             logger.info(f"Running [{username}]: {test_def['name']} ({test_id})")
@@ -1504,6 +1607,12 @@ def queue_worker(worker_id):
             try:
                 # Pass ref_pop override if specified by user
                 _ref_pop = task.get("ref_pop", "")
+                # Auto-detect ancestry for PGS if no explicit ref_pop
+                if not _ref_pop and test_def.get("test_type") == "pgs_score":
+                    _detected = _get_detected_ancestry(username, file_id)
+                    if _detected:
+                        _ref_pop = _detected
+                        logger.info(f"[{task_id}] Auto-detected ancestry: {_ref_pop}")
                 if _ref_pop and test_def.get("test_type") == "pgs_score":
                     _td_override = dict(test_def)
                     _td_override.setdefault("params", {})
@@ -1657,9 +1766,8 @@ def queue_worker(worker_id):
             }
             log_error(username, task_id, test_id, test_def["name"], err)
         finally:
-            if _needs_bam_gate:
-                _bam_cram_semaphore.release()
-                logger.info(f"[{task_id}] Released BAM/CRAM semaphore")
+            if _core_cost > 0:
+                _release_cores(_core_cost, task_id)
             with queue_lock:
                 running_tasks.discard(task_id)
 
@@ -2141,7 +2249,9 @@ async def list_files(username: str = Depends(current_user)):
 @app.get("/api/profiles")
 async def list_profiles(username: str = Depends(current_user)):
     """List profiles + ungrouped files. Triggers lazy migration on first call."""
-    data = _migrate_to_profiles(username)
+    _migrate_to_profiles(username)
+    _scan_converter_outputs(username)
+    data = _load_profiles(username)
     ctx = get_user_state(username)
     # Enrich profiles with file details
     profiles_out = []
@@ -2296,6 +2406,18 @@ async def add_file_from_path(
     if not os.path.isfile(path):
         return JSONResponse({"ok": False, "error": f"Not a file: {path}"}, status_code=400)
     entry = _register_file(username, path, source="local_path")
+    # Probe metadata and auto-assign to profile (like upload does)
+    try:
+        meta = _probe_file_metadata(path)
+        if meta.get("sample_name"):
+            entry["sample_name"] = meta["sample_name"]
+            ctx = get_user_state(username)
+            with ctx.lock:
+                ctx.files_state["files"][entry["id"]] = entry
+                ctx.save_files()
+        _auto_assign_profile(username, entry["id"], entry)
+    except Exception:
+        pass
     return {"ok": True, "file": entry}
 
 
@@ -2348,7 +2470,8 @@ async def select_file(file_id: str, username: str = Depends(current_user)):
         ctx.files_state["active_file_id"] = file_id
         ctx.save_files()
         entry = dict(ctx.files_state["files"][file_id])
-    return {"ok": True, "file": entry}
+    _det = _get_detected_ancestry(username, file_id)
+    return {"ok": True, "file": entry, "detected_ancestry": _det}
 
 
 @app.delete("/api/files/{file_id}")
@@ -2436,13 +2559,14 @@ async def rename_file(file_id: str, request: Request, username: str = Depends(cu
 
 def _get_detected_ancestry(username, file_id):
     """Return the detected ancestry population code (EUR/EAS/AFR/etc) from
-    a completed ancestry_pca or ancestry_admixture report for this file."""
+    a completed ancestry_pca or ancestry_admixture report for this file,
+    or any sibling file with the same sample_name."""
     import json as _json
-    try:
-        reports_dir = user_reports_root(username) / file_id
+
+    def _scan_reports(reports_dir):
+        """Scan a reports dir for ancestry results."""
         if not reports_dir.exists():
             return None
-        # Check for ancestry_admixture or ancestry_pca reports
         for fname in sorted(reports_dir.iterdir(), reverse=True):
             if not fname.name.endswith('.json'):
                 continue
@@ -2450,9 +2574,35 @@ def _get_detected_ancestry(username, file_id):
                 with open(fname) as f:
                     report = _json.load(f)
                 result = report.get("result", {})
-                top_pop = result.get("top_population")
+                # admixture uses "top_population", pca uses "closest_population"
+                top_pop = result.get("top_population") or result.get("closest_population")
                 if top_pop:
                     return top_pop
+        return None
+
+    try:
+        # First: check this file's own reports
+        hit = _scan_reports(user_reports_root(username) / file_id)
+        if hit:
+            return hit
+
+        # Second: find sibling files with the same sample_name and check theirs
+        ctx = get_user_state(username)
+        with ctx.lock:
+            this_entry = ctx.files_state.get("files", {}).get(file_id, {})
+            sample_name = this_entry.get("sample_name", "")
+            if not sample_name:
+                return None
+            sibling_ids = [
+                fid for fid, entry in ctx.files_state.get("files", {}).items()
+                if fid != file_id
+                and isinstance(entry, dict)
+                and entry.get("sample_name") == sample_name
+            ]
+        for sib_id in sibling_ids:
+            hit = _scan_reports(user_reports_root(username) / sib_id)
+            if hit:
+                return hit
     except Exception:
         pass
     return None
@@ -2546,7 +2696,7 @@ TAB_DEFS = {
             "PGS - Autoimmune / Inflammatory", "PGS - Neurological / Mental Health",
             "PGS - Renal / Urinary", "PGS - Eye / Vision",
             "PGS - Cognitive & Educational", "PGS - Physical Traits",
-            "PGS - Lifestyle / Behavioral", "PGS - rsID Lists",
+            "PGS - Lifestyle / Behavioral",
         ],
     },
     "monogenic": {
@@ -2579,13 +2729,11 @@ def _tab_for_category(cat):
 # ── Test registry markdown export / import ────────────────────────
 def _tests_to_markdown(tab=None):
     """Serialize TESTS to Markdown. If tab given, only that tab's categories.
-    rsid_pgs_score tests excluded (they come from rsid_list_pgs.py)."""
+    """
     tab_label = TAB_DEFS[tab]["label"] if tab and tab in TAB_DEFS else "Test Registry"
     lines = [f"# {tab_label}\n"]
     current_cat = None
     for t in TESTS:
-        if t["test_type"] == "rsid_pgs_score":
-            continue
         if tab == "curated":
             if t["id"] not in CURATED_IDS:
                 continue
@@ -2670,7 +2818,7 @@ def _rewrite_test_registry_file(tests_list):
     out.append("Each test has: id, category, name, description, test_type, params.")
     out.append("")
     out.append("test_type determines which runner handles it:")
-    out.append("  - variant_lookup / vcf_stats / pgs_score / clinvar_screen / specialized / rsid_pgs_score")
+    out.append("  - variant_lookup / vcf_stats / pgs_score / clinvar_screen / specialized")
     out.append('"""')
     out.append("")
     out.append("TESTS = []")
@@ -2693,35 +2841,6 @@ def _rewrite_test_registry_file(tests_list):
         out.append(f"   {repr(t['test_type'])}, {repr(t['params'])})")
         out.append("")
 
-    # rsID PGS import block (always preserved)
-    out.append("")
-    out.append("# \u2500\u2500 PGS - rsID Lists (from rsid-list.md) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
-    out.append("try:")
-    out.append("    from rsid_list_pgs import RSID_PGS as _RSID_PGS_LIST")
-    out.append("except ImportError:")
-    out.append("    _RSID_PGS_LIST = []")
-    out.append("")
-    out.append("def _slug(s):")
-    out.append("    import re as _re")
-    out.append('    return _re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")')
-    out.append("")
-    out.append("_seen_ids = set()")
-    out.append("for _idx, _pgs in enumerate(_RSID_PGS_LIST):")
-    out.append('    _title = _pgs["title"]')
-    out.append('    _citation = _pgs["citation"]')
-    out.append('    _author = _citation.split(",")[0].strip().lower() if _citation else f"v{_idx}"')
-    out.append('    _id = f"rsid_{_slug(_title)}_{_slug(_author)}"')
-    out.append("    _base = _id")
-    out.append("    _suffix = 2")
-    out.append("    while _id in _seen_ids:")
-    out.append('        _id = f"{_base}_{_suffix}"')
-    out.append("        _suffix += 1")
-    out.append("    _seen_ids.add(_id)")
-    out.append('    _name = f"{_title} ({_citation})" if _citation else _title')
-    out.append("    _desc = f\"{len(_pgs['variants'])} variants from {_citation or 'rsid-list.md'}. \" \\")
-    out.append('            f"Score = sum(dosage \u00d7 effect) across rsIDs."')
-    out.append('    _t(_id, "PGS - rsID Lists", _name, _desc,')
-    out.append('       "rsid_pgs_score", {"title": _title, "citation": _citation, "variants": _pgs["variants"]})')
     out.append("")
     out.append('TESTS_BY_ID = {t["id"]: t for t in TESTS}')
     out.append("CATEGORIES = []")
@@ -2730,6 +2849,13 @@ def _rewrite_test_registry_file(tests_list):
     out.append('    if t["category"] not in _seen:')
     out.append('        CATEGORIES.append(t["category"])')
     out.append('        _seen.add(t["category"])')
+    out.append("")
+
+    # Preserve CURATED_IDS from the current in-memory set
+    out.append("CURATED_IDS = {")
+    for cid in sorted(CURATED_IDS):
+        out.append(f"    {repr(cid)},")
+    out.append("}")
     out.append("")
 
     with open(registry_path, "w") as f:
@@ -2744,31 +2870,6 @@ def _reload_tests_from_parsed(new_tests, username=None):
     for t in new_tests:
         TESTS.append(t)
         TESTS_BY_ID[t["id"]] = t
-    # Re-add rsid_pgs_score tests
-    try:
-        from rsid_list_pgs import RSID_PGS as _rpgs
-        import re as _re2
-        _seen2 = {t["id"] for t in TESTS}
-        for _idx2, _pgs2 in enumerate(_rpgs):
-            _title2 = _pgs2["title"]
-            _cit2 = _pgs2["citation"]
-            _auth2 = _cit2.split(",")[0].strip().lower() if _cit2 else f"v{_idx2}"
-            _id2 = f"rsid_{_re2.sub(r'[^a-z0-9]+', '_', _title2.lower()).strip('_')}_{_re2.sub(r'[^a-z0-9]+', '_', _auth2.lower()).strip('_')}"
-            _base2 = _id2
-            _suf2 = 2
-            while _id2 in _seen2:
-                _id2 = f"{_base2}_{_suf2}"
-                _suf2 += 1
-            _seen2.add(_id2)
-            _nm2 = f"{_title2} ({_cit2})" if _cit2 else _title2
-            _desc2 = f"{len(_pgs2['variants'])} variants from {_cit2 or 'rsid-list.md'}. Score = sum(dosage \u00d7 effect) across rsIDs."
-            t2 = {"id": _id2, "category": "PGS - rsID Lists", "name": _nm2,
-                   "description": _desc2, "test_type": "rsid_pgs_score",
-                   "params": {"title": _title2, "citation": _cit2, "variants": _pgs2["variants"]}}
-            TESTS.append(t2)
-            TESTS_BY_ID[_id2] = t2
-    except ImportError:
-        pass
     # Rebuild CATEGORIES
     seen = set()
     for t in TESTS:
@@ -2801,10 +2902,10 @@ async def get_tests_markdown(tab: str = "", username: str = Depends(current_user
     t = tab if tab in TAB_DEFS else None
     md = _tests_to_markdown(tab=t)
     if t == "curated":
-        count = sum(1 for tt in TESTS if tt["id"] in CURATED_IDS and tt["test_type"] != "rsid_pgs_score")
+        count = sum(1 for tt in TESTS if tt["id"] in CURATED_IDS)
     else:
         count = sum(1 for tt in TESTS if (not t or _tab_for_category(tt["category"]) == t)
-                    and tt["test_type"] != "rsid_pgs_score")
+                   )
     return {"ok": True, "markdown": md, "test_count": count, "tab": t or "all"}
 
 
@@ -2827,7 +2928,7 @@ async def put_tests_markdown(request: Request, tab: str = "", username: str = De
         return JSONResponse({"ok": False, "error": "Curated tab cannot be edited directly. Edit tests in their original tabs."}, status_code=400)
     elif t:
         kept = [tt for tt in TESTS if _tab_for_category(tt["category"]) != t
-                and tt["test_type"] != "rsid_pgs_score"]
+               ]
         new_tests = kept + edited_tests
     else:
         new_tests = edited_tests
@@ -3132,6 +3233,7 @@ def get_status(request: Request, username: str = Depends(current_user)):
             tid for tid in running_tasks
             if task_results.get(tid, {}).get("username") == user_lc
         ]
+    _det_anc = _get_detected_ancestry(username, active_id) if active_id else None
     return {
         "active_file": active,
         "active_vcf": active["path"] if active else None,
@@ -3141,6 +3243,7 @@ def get_status(request: Request, username: str = Depends(current_user)):
         "running_tasks": running_snapshot,
         "current_task": running_snapshot[0] if running_snapshot else None,
         "results": results,
+        "detected_ancestry": _det_anc,
     }
 
 
@@ -8331,7 +8434,7 @@ let taskMap = {};     // test_id -> task_id (latest for the active file)
 // ── Curated Short List IDs ────────────────────────────────────────
 const CURATED_IDS = new Set([
   // Cancer
-  'pgs_breast_4153', 'pgs_prostate_662', 'pgs_colorectal_3979',
+  'pgs_breast_4153', 'pgs_colorectal_3979',
   'pgs_lung_078', 'pgs_pancreatic_794', 'pgs_melanoma_743',
   // Cardiovascular
   'pgs_coronary_5091', 'pgs_atrial_5168', 'pgs_hf_5097',
@@ -8350,6 +8453,10 @@ const CURATED_IDS = new Set([
   'pgs_glaucoma_1797', 'pgs_amd_4606',
   // Cognitive & Educational
   'pgs_edu_2012', 'pgs_intelligence_3723',
+  'custom_pgs002685', 'custom_pgs002135',
+  'pgs_intelligence_3510', 'pgs_atrial_3724',
+  // Physical Traits
+  'pgs_height_1229', 'custom_pgs002332', 'custom_pgs000297',
   // Lifestyle / Behavioral
   'pgs_longevity_906',
   // Validation (one each)
@@ -8368,7 +8475,7 @@ const TAB_DEFS = {
   polygenic: { label: 'Polygenic Scores', categories: [
     'PGS - Cancer', 'PGS - Cardiovascular', 'PGS - Metabolic',
     'PGS - Autoimmune', 'PGS - Neurological', 'PGS - Traits',
-    'PGS - Lifestyle', 'PGS - Custom', 'PGS - rsID Lists'] },
+    'PGS - Lifestyle', 'PGS - Custom'] },
   monogenic: { label: 'Monogenic & Variants', categories: [
     'Monogenic', 'Carrier Status', 'Single Variants',
     'Fun Traits', 'Nutrigenomics', 'Sports & Fitness', 'Sleep & Circadian'] },
@@ -8749,6 +8856,8 @@ async function selectFile(fileId) {
     return;
   }
   activeFileId = fileId;
+  // Update detected ancestry for the newly-selected file
+  window._detectedAncestry = data.detected_ancestry || null;
   // Wipe the per-file test view — pollStatus() will immediately rebuild it
   // from the newly-active file's reports on disk.
   testStatus = {};
@@ -9292,7 +9401,7 @@ function pgsTraitGroup(trait) {
 function testGroupLabel(t) {
   // Only PGS-style tests get sub-grouping; everything else is null
   // (renders flat under its parent category).
-  if (t.test_type === 'pgs_score' || t.test_type === 'rsid_pgs_score') {
+  if (t.test_type === 'pgs_score') {
     const p = t.params || {};
     return pgsTraitGroup(p.trait || p.title || '');
   }
@@ -9774,8 +9883,38 @@ async function stopTaskById(taskId, testId) {
 }
 
 async function clearSingleReport(testId) {
-  const taskId = taskMap[testId];
-  if (!taskId) return;
+  const taskId = taskMap[testId] || (testStatus[testId] || {}).task_id;
+  if (!taskId) {
+    // No task ID found — try clearing via the multi-status array
+    const multi = testMultiStatus[testId];
+    if (multi && multi.length > 0) {
+      let cleared = 0;
+      for (const entry of multi) {
+        const tid = entry.task_id;
+        if (!tid) continue;
+        try {
+          const r = await fetch(BASE + `/api/report/${tid}`, { method: 'DELETE' });
+          if (r.ok) cleared++;
+        } catch(e) {}
+      }
+      if (cleared > 0) {
+        delete testStatus[testId];
+        delete testMultiStatus[testId];
+        delete taskMap[testId];
+        updateRow(testId);
+        return;
+      }
+    }
+    return;
+  }
+  // Also clear any additional reports in multi-status
+  const multi = testMultiStatus[testId] || [];
+  for (const entry of multi) {
+    const tid = entry.task_id;
+    if (tid && tid !== taskId) {
+      try { await fetch(BASE + `/api/report/${tid}`, { method: 'DELETE' }); } catch(e) {}
+    }
+  }
   const resp = await fetch(BASE + `/api/report/${taskId}`, { method: 'DELETE' });
   if (!resp.ok) {
     alert('Failed to clear report');
@@ -9784,6 +9923,7 @@ async function clearSingleReport(testId) {
   // Wipe local state so the row snaps back to idle; the next poll will
   // confirm the report is gone server-side.
   delete testStatus[testId];
+  delete testMultiStatus[testId];
   delete taskMap[testId];
   updateRow(testId);
 }
@@ -9974,6 +10114,12 @@ async function pollStatus() {
     const resp = await fetch(BASE + '/api/status' + profileParam);
     const data = await resp.json();
 
+    // Keep detected ancestry in sync with the active file
+    if (data.detected_ancestry !== undefined) {
+      const prev = window._detectedAncestry;
+      window._detectedAncestry = data.detected_ancestry || null;
+      if (prev !== window._detectedAncestry) renderTests();
+    }
     const running = data.running_count != null
       ? data.running_count
       : (data.current_task ? 1 : 0);
@@ -10784,16 +10930,30 @@ function renderReportsView() {
   const scopeEl = document.getElementById('reportsScope');
   if (!list) return;
 
-  // Scope: active file filter. "All files" mode and "no selection"
-  // both show every report.
-  const scoped = (activeFileId && !isAllMode())
-    ? _allReports.filter(r => r.file_id === activeFileId)
-    : _allReports;
+  // Scope: active file/profile filter. "All files" mode and "no selection"
+  // both show every report.  Profile mode shows reports for ALL files
+  // in the selected profile.
+  let scoped;
+  if (activeProfileId) {
+    const prof = profiles.find(p => p.id === activeProfileId);
+    const profFileIds = prof ? new Set((prof.file_details || []).map(f => f.id)) : new Set();
+    scoped = profFileIds.size > 0
+      ? _allReports.filter(r => profFileIds.has(r.file_id))
+      : _allReports;
+  } else if (activeFileId && !isAllMode()) {
+    scoped = _allReports.filter(r => r.file_id === activeFileId);
+  } else {
+    scoped = _allReports;
+  }
 
   const activeFile = files.find(f => f.id === activeFileId);
   if (scopeEl) {
     if (isAllMode()) {
       scopeEl.textContent = `Showing reports for every file (All files mode, ${_allReports.length} total).`;
+    } else if (activeProfileId) {
+      const prof = profiles.find(p => p.id === activeProfileId);
+      const profName = prof ? prof.name : 'profile';
+      scopeEl.textContent = `Showing reports for profile "${profName}" (${scoped.length} of ${_allReports.length}). Pick "All files" to see every report.`;
     } else if (activeFile) {
       scopeEl.textContent = `Showing reports for ${activeFile.name} (${scoped.length} of ${_allReports.length}). Pick "All files" in the dropdown to see every report.`;
     } else {

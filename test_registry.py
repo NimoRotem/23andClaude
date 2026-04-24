@@ -3,7 +3,7 @@ Test registry — all genomic tests.
 Each test has: id, category, name, description, test_type, params.
 
 test_type determines which runner handles it:
-  - variant_lookup / vcf_stats / pgs_score / clinvar_screen / specialized / rsid_pgs_score
+  - variant_lookup / vcf_stats / pgs_score / clinvar_screen / specialized
 """
 
 TESTS = []
@@ -724,10 +724,6 @@ _t('pgs_uc_4253', 'PGS - Autoimmune / Inflammatory', 'Ulcerative colitis (PGS004
    '744,575 variants. OR 1.84, AUROC 0.66. Middha P et al., Nat Commun 2024',
    'pgs_score', {'pgs_id': 'PGS004253', 'trait': 'Ulcerative colitis'})
 
-_t('pgs_ms_4700', 'PGS - Autoimmune / Inflammatory', 'Multiple sclerosis (PGS004700)',
-   '12 variants. AUROC 0.76 (HLA-GRS). Loginovic P et al., Nat Commun 2024',
-   'pgs_score', {'pgs_id': 'PGS004700', 'trait': 'Multiple sclerosis'})
-
 _t('pgs_multiple_2726', 'PGS - Autoimmune / Inflammatory', 'Multiple sclerosis (HLA+genome-wide) (PGS002726)',
    '476,399 variants. AUROC 0.80, OR 15.0 (top 10%). Shams H et al., Brain 2022 (EUR)',
    'pgs_score', {'pgs_id': 'PGS002726', 'trait': 'Multiple sclerosis'})
@@ -1054,6 +1050,42 @@ _t('custom_pgs001929', 'PGS - Physical Traits', 'Standing height (PGS001929)',
    '156,514 variants. Privé F et al., 2022. Am J Hum Genet',
    'pgs_score', {'pgs_id': 'PGS001929', 'trait': 'Standing height'})
 
+_t('custom_pgs002965', 'PGS - Physical Traits', 'Body height (PGS002965)',
+   '34,284 variants. Ma Y et al., 2022. Am J Hum Genet',
+   'pgs_score', {'pgs_id': 'PGS002965', 'trait': 'Height'})
+
+_t('custom_pgs002972', 'PGS - Physical Traits', 'Body height (full genome) (PGS002972)',
+   '10,297,262 variants. Ma Y et al., 2022. Am J Hum Genet',
+   'pgs_score', {'pgs_id': 'PGS002972', 'trait': 'Height'})
+
+_t('custom_pgs002973', 'PGS - Physical Traits', 'Body height (PGS002973)',
+   '1,113,832 variants. Ma Y et al., 2022. Am J Hum Genet',
+   'pgs_score', {'pgs_id': 'PGS002973', 'trait': 'Height'})
+
+_t('custom_pgs003895', 'PGS - Physical Traits', 'Body height (PGS003895)',
+   '62,419 variants. Tanigawa Y, Kellis M., 2023. AJHG',
+   'pgs_score', {'pgs_id': 'PGS003895', 'trait': 'Height'})
+
+_t('custom_pgs004211', 'PGS - Physical Traits', 'Height (Ridge) (PGS004211)',
+   '21,950 variants. Raben TG et al., 2023. Sci Rep',
+   'pgs_score', {'pgs_id': 'PGS004211', 'trait': 'Height'})
+
+_t('custom_pgs004212', 'PGS - Physical Traits', 'Height (Elastic Net) (PGS004212)',
+   '27,779 variants. Raben TG et al., 2023. Sci Rep',
+   'pgs_score', {'pgs_id': 'PGS004212', 'trait': 'Height'})
+
+_t('custom_pgs004213', 'PGS - Physical Traits', 'Height (BOLT-LMM) (PGS004213)',
+   '21,984 variants. Raben TG et al., 2023. Sci Rep',
+   'pgs_score', {'pgs_id': 'PGS004213', 'trait': 'Height'})
+
+_t('custom_pgs004999', 'PGS - Physical Traits', 'Body height (multi-ancestry) (PGS004999)',
+   '1,286,612 variants. Gunn S et al., 2024. HGG Adv',
+   'pgs_score', {'pgs_id': 'PGS004999', 'trait': 'Height'})
+
+_t('custom_pgs005001', 'PGS - Physical Traits', 'Body height (multi-ancestry) (PGS005001)',
+   '1,273,897 variants. Gunn S et al., 2024. HGG Adv',
+   'pgs_score', {'pgs_id': 'PGS005001', 'trait': 'Height'})
+
 _t('custom_pgs002146', 'PGS - Physical Traits', 'Standing height (PGS002146)',
    '922,538 variants. Privé F et al., 2022. Am J Hum Genet',
    'pgs_score', {'pgs_id': 'PGS002146', 'trait': 'Standing height'})
@@ -1074,10 +1106,6 @@ _t('custom_pgs002453', 'PGS - Physical Traits', 'Height (PGS002453)',
    '103,911 variants. Weissbrod O et al., 2022. Nat Genet',
    'pgs_score', {'pgs_id': 'PGS002453', 'trait': 'Height'})
 
-_t('custom_pgs002600', 'PGS - Physical Traits', 'Height (PGS002600)',
-   '18,937 variants. Weissbrod O et al., 2022. Nat Genet',
-   'pgs_score', {'pgs_id': 'PGS002600', 'trait': 'Height'})
-
 _t('custom_pgs002502', 'PGS - Physical Traits', 'Height (PGS002502)',
    '262,080 variants. Weissbrod O et al., 2022. Nat Genet',
    'pgs_score', {'pgs_id': 'PGS002502', 'trait': 'Height'})
@@ -1093,10 +1121,6 @@ _t('custom_pgs002649', 'PGS - Physical Traits', 'Height (PGS002649)',
 _t('custom_pgs002698', 'PGS - Physical Traits', 'Height (PGS002698)',
    '986,966 variants. Weissbrod O et al., 2022. Nat Genet',
    'pgs_score', {'pgs_id': 'PGS002698', 'trait': 'Height'})
-
-_t('custom_pgs002748', 'PGS - Physical Traits', 'Height (PGS002748)',
-   '251 variants. Chiou JS et al., 2022. BMC Med',
-   'pgs_score', {'pgs_id': 'PGS002748', 'trait': 'Height'})
 
 _t('custom_pgs002800', 'PGS - Physical Traits', 'Height (PGS002800)',
    '1,156,741 variants. Yengo L et al., 2022. Nature',
@@ -1133,10 +1157,6 @@ _t('pgs_bodyfat_3899', 'PGS - Physical Traits', 'Body fat % (PGS003899)',
 _t('pgs_grip_1162', 'PGS - Physical Traits', 'Hip circumference (PGS001162)',
    '10,872 variants. R2=0.033. Tanigawa Y et al., PLoS Genet 2022',
    'pgs_score', {'pgs_id': 'PGS001162', 'trait': 'Hip circumference'})
-
-_t('pgs_age_1183', 'PGS - Physical Traits', 'Age at menarche (PGS001183)',
-   '25,172 variants. R2=0.10. Tanigawa Y et al., PLoS Genet 2022',
-   'pgs_score', {'pgs_id': 'PGS001183', 'trait': 'Age at menarche'})
 
 _t('pgs_hearing_762', 'PGS - Physical Traits', 'Hearing difficulty (PGS000762)',
    '100,325 variants. R2=0.091. Cherny SS et al., EJHG 2020',
@@ -1504,33 +1524,6 @@ _t('pgx_comt', 'Pharmacogenomics', 'COMT',
    'variant_lookup', {'variants': [{'rs': 'rs4680', 'gene': 'COMT', 'name': 'Val158Met'}], 'disease': 'COMT activity'})
 
 
-# ── PGS - rsID Lists (from rsid-list.md) ───────────────────
-try:
-    from rsid_list_pgs import RSID_PGS as _RSID_PGS_LIST
-except ImportError:
-    _RSID_PGS_LIST = []
-
-def _slug(s):
-    import re as _re
-    return _re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
-
-_seen_ids = set()
-for _idx, _pgs in enumerate(_RSID_PGS_LIST):
-    _title = _pgs["title"]
-    _citation = _pgs["citation"]
-    _author = _citation.split(",")[0].strip().lower() if _citation else f"v{_idx}"
-    _id = f"rsid_{_slug(_title)}_{_slug(_author)}"
-    _base = _id
-    _suffix = 2
-    while _id in _seen_ids:
-        _id = f"{_base}_{_suffix}"
-        _suffix += 1
-    _seen_ids.add(_id)
-    _name = f"{_title} ({_citation})" if _citation else _title
-    _desc = f"{len(_pgs['variants'])} variants from {_citation or 'rsid-list.md'}. " \
-            f"Score = sum(dosage × effect) across rsIDs."
-    _t(_id, "PGS - rsID Lists", _name, _desc,
-       "rsid_pgs_score", {"title": _title, "citation": _citation, "variants": _pgs["variants"]})
 
 TESTS_BY_ID = {t["id"]: t for t in TESTS}
 CATEGORIES = []

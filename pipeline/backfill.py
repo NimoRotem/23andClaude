@@ -6,6 +6,7 @@ Usage:
 Default: process all cached PGS IDs for all buildable populations.
 """
 import argparse
+import json
 import logging
 import os
 import sys
@@ -16,7 +17,7 @@ from typing import List
 # Add parent directory to path so we can import as a module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pipeline.config import PGS_CACHE, BUILDABLE_POPULATIONS, REF_STATS_DIR
+from pipeline.config import PGS_CACHE, BUILDABLE_POPULATIONS, REF_STATS_DIR, ref_stats_path
 from pipeline.ingest_pgs import ingest_pgs
 from pipeline.build_ref_stats import build_ref_stats
 from pipeline import db as pipeline_db
@@ -27,6 +28,76 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("pgs-backfill")
+
+# Persistent resume log — survives restarts
+RESUME_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backfill_log.jsonl")
+RESUME_LOG = os.path.normpath(RESUME_LOG)
+
+
+def _log_result(pgs_id: str, status: str, detail: str = ""):
+    """Append one line to the persistent resume log."""
+    entry = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "pgs_id": pgs_id,
+        "status": status,
+        "detail": detail[:500],
+    }
+    try:
+        with open(RESUME_LOG, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+def _load_completed_ids() -> set:
+    """Load PGS IDs that have already been fully processed from the resume log."""
+    done = set()
+    if not os.path.exists(RESUME_LOG):
+        return done
+    try:
+        with open(RESUME_LOG) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line.strip())
+                    if entry.get("status") == "ok":
+                        done.add(entry["pgs_id"])
+                except (json.JSONDecodeError, KeyError):
+                    continue
+    except Exception:
+        pass
+    return done
+
+
+def _verify_build(pgs_id: str, populations: List[str]) -> tuple:
+    """Post-build verification: check JSON exists, n>100, std>0.
+    Returns (ok: bool, issues: list[str])."""
+    issues = []
+    for pop in populations:
+        if pop == "MID":
+            continue
+        json_path = ref_stats_path(pgs_id, pop, "GRCh38")
+        if not os.path.exists(json_path):
+            issues.append(f"{pop}: JSON missing")
+            continue
+        try:
+            with open(json_path) as f:
+                stats = json.load(f)
+            n = stats.get("n_samples", 0)
+            std = stats.get("std", 0)
+            matched = stats.get("matched_variants", 0)
+            total = stats.get("total_variants", 1)
+            match_rate = matched / max(total, 1)
+
+            if n < 50:
+                issues.append(f"{pop}: n_samples={n} (too low)")
+            if std <= 0:
+                issues.append(f"{pop}: std={std} (zero or negative)")
+            if match_rate < 0.01:
+                issues.append(f"{pop}: match_rate={match_rate:.3f} (very low)")
+        except (json.JSONDecodeError, Exception) as e:
+            issues.append(f"{pop}: JSON parse error: {e}")
+
+    return len(issues) == 0, issues
 
 
 def get_all_cached_pgs_ids() -> List[str]:
@@ -61,12 +132,15 @@ def backfill_one(pgs_id: str, populations: List[str], force: bool = False) -> di
         ingest = ingest_pgs(pgs_id, force=force)
         result["ingest"] = "ok" if ingest.success else f"failed: {ingest.error}"
         if not ingest.success:
+            _log_result(pgs_id, "ingest_fail", str(ingest.error))
             return result
     except Exception as e:
         result["ingest"] = f"error: {e}"
+        _log_result(pgs_id, "ingest_error", str(e))
         return result
 
     # Step 2: Build ref stats for each population
+    all_ok = True
     for pop in populations:
         try:
             stats = build_ref_stats(pgs_id, pop, force=force)
@@ -74,8 +148,18 @@ def backfill_one(pgs_id: str, populations: List[str], force: bool = False) -> di
                 result["stats"][pop] = f"ok (n={stats.n_samples}, mean={stats.mean:.4g})"
             else:
                 result["stats"][pop] = f"failed: {stats.error}"
+                all_ok = False
         except Exception as e:
             result["stats"][pop] = f"error: {e}"
+            all_ok = False
+
+    # Step 3: Post-build verification
+    verified, issues = _verify_build(pgs_id, populations)
+    if not verified:
+        result["verify"] = issues
+        _log_result(pgs_id, "verify_fail", "; ".join(issues))
+    elif all_ok:
+        _log_result(pgs_id, "ok", f"{len(populations)} pops built")
 
     return result
 
@@ -94,6 +178,8 @@ def main():
                         help="Only process curated PGS IDs")
     parser.add_argument("--ingest-only", action="store_true",
                         help="Only run ingestion, skip ref stats")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Ignore resume log and process all IDs")
     args = parser.parse_args()
 
     # Determine PGS IDs
@@ -112,8 +198,32 @@ def main():
     else:
         populations = BUILDABLE_POPULATIONS
 
-    logger.info(f"Backfill: {len(pgs_ids)} PGS IDs × {len(populations)} populations "
+    # Resume: skip already-completed IDs (unless --force or --no-resume)
+    if not args.force and not args.no_resume:
+        completed = _load_completed_ids()
+        # Also treat IDs that already have all ref stat JSONs as done
+        for pgs_id in list(pgs_ids):
+            if pgs_id in completed:
+                continue
+            all_exist = all(
+                pop == "MID" or os.path.exists(ref_stats_path(pgs_id, pop, "GRCh38"))
+                for pop in populations
+            )
+            if all_exist:
+                completed.add(pgs_id)
+        before = len(pgs_ids)
+        pgs_ids = [p for p in pgs_ids if p not in completed]
+        skipped = before - len(pgs_ids)
+        if skipped > 0:
+            logger.info(f"Resume: skipping {skipped} already-completed IDs ({len(pgs_ids)} remaining)")
+
+    logger.info(f"Backfill: {len(pgs_ids)} PGS IDs x {len(populations)} populations "
                 f"({args.workers} workers, force={args.force})")
+    logger.info(f"Resume log: {RESUME_LOG}")
+
+    if not pgs_ids:
+        logger.info("Nothing to do — all IDs already completed!")
+        return
 
     # Init DB
     pipeline_db.init_db()
@@ -125,6 +235,7 @@ def main():
     t0 = time.time()
     ok = 0
     fail = 0
+    verify_fail = 0
 
     if args.workers <= 1:
         # Sequential
@@ -139,6 +250,9 @@ def main():
             for pop, status in result["stats"].items():
                 if "failed" in status or "error" in status:
                     logger.warning(f"  {pgs_id}/{pop}: {status}")
+            if result.get("verify"):
+                verify_fail += 1
+                logger.warning(f"  {pgs_id} VERIFY FAIL: {result['verify']}")
     else:
         # Parallel
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -158,13 +272,21 @@ def main():
                     for pop, status in result["stats"].items():
                         if "failed" in status or "error" in status:
                             logger.warning(f"  {pgs_id}/{pop}: {status}")
+                    if result.get("verify"):
+                        verify_fail += 1
+                        logger.warning(f"  {pgs_id} VERIFY FAIL: {result['verify']}")
                     logger.info(f"[{i}/{len(pgs_ids)}] {pgs_id}: ingest={result['ingest']}")
                 except Exception as e:
                     fail += 1
+                    _log_result(pgs_id, "exception", str(e))
                     logger.error(f"[{i}/{len(pgs_ids)}] {pgs_id}: exception: {e}")
 
     elapsed = time.time() - t0
-    logger.info(f"Done: {ok} ok, {fail} failed, {elapsed:.0f}s elapsed")
+    logger.info(f"Done: {ok} ok, {fail} failed, {verify_fail} verify warnings, {elapsed:.0f}s elapsed")
+
+    # Print summary of failures from resume log
+    if fail > 0 or verify_fail > 0:
+        logger.info(f"Check {RESUME_LOG} for failure details")
 
 
 if __name__ == "__main__":

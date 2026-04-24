@@ -71,9 +71,9 @@ POPULATIONS = {
         "min_n": 490,
     },
     "MIX": {
-        "label": "Mixed / Global",
-        "sample_file": None,  # Built dynamically by subsampling
-        "min_n": 2450,
+        "label": "Mixed (EUR+EAS)",
+        "sample_file": None,  # Built dynamically: 50% EUR + 50% EAS
+        "min_n": 1170,
     },
     "MID": {
         "label": "Middle Eastern",
@@ -88,9 +88,9 @@ BUILDABLE_POPULATIONS = ["EUR", "EAS", "AFR", "SAS", "AMR", "MIX"]
 # Populations shown as first-class in UI
 UI_POPULATIONS = ["EUR", "EAS", "MIX"]
 
-# MIX population config: balanced subsample from all 5 real pops
+# MIX population config: 50% EUR + 50% EAS (equal count from each)
 MIX_SEED = 42
-MIX_PER_POP_N = 490  # min of AMR
+MIX_PER_POP_N = 490  # legacy; MIX now uses min(EUR, EAS) from each
 
 # ── Helpers ──────────────────────────────────────────────────────────
 

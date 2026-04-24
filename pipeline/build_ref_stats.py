@@ -213,7 +213,7 @@ def build_ref_stats(pgs_id: str, population: str,
 def _build_keep_file(population: str, tmpdir: str) -> Optional[str]:
     """Build a plink2 --keep file for the given population.
 
-    For MIX: subsample MIX_PER_POP_N from each of the 5 real populations.
+    For MIX: 50%% EUR + 50%% EAS (equal count from each, seeded).
     For ALL: return None (no filtering).
     """
     if population == "ALL":
@@ -226,11 +226,12 @@ def _build_keep_file(population: str, tmpdir: str) -> Optional[str]:
     keep_path = os.path.join(tmpdir, f"keep_{population}.txt")
 
     if population == "MIX":
-        # Balanced subsample from all 5 real populations
+        # 50% EUR + 50% EAS — take min(EUR_count, EAS_count) from each
         rng = random.Random(MIX_SEED)
         all_samples = []
 
-        for pop_code in ["EUR", "EAS", "AFR", "SAS", "AMR"]:
+        pop_samples = {}
+        for pop_code in ["EUR", "EAS"]:
             pop_file = POPULATIONS[pop_code]["sample_file"]
             if not pop_file or not os.path.exists(pop_file):
                 logger.warning(f"MIX: sample file missing for {pop_code}")
@@ -243,18 +244,25 @@ def _build_keep_file(population: str, tmpdir: str) -> Optional[str]:
                     iid = line.strip().split('\t')[0] if '\t' in line else line.strip()
                     if iid:
                         samples.append(iid)
+            pop_samples[pop_code] = samples
 
-            # Subsample (or take all if fewer than MIX_PER_POP_N)
-            n_take = min(MIX_PER_POP_N, len(samples))
-            selected = rng.sample(samples, n_take)
+        if len(pop_samples) < 2:
+            logger.error("MIX: need both EUR and EAS sample files")
+            return None
+
+        # Equal count from each: min of the two population sizes
+        n_take = min(len(pop_samples["EUR"]), len(pop_samples["EAS"]))
+        for pop_code in ["EUR", "EAS"]:
+            selected = rng.sample(pop_samples[pop_code], n_take)
             all_samples.extend(selected)
+            logger.info(f"MIX: took {n_take} from {pop_code} (pool={len(pop_samples[pop_code])})")
 
         with open(keep_path, 'w') as f:
             f.write("#IID\n")
             for iid in all_samples:
                 f.write(f"{iid}\n")
 
-        logger.info(f"MIX keep-file: {len(all_samples)} samples from 5 pops")
+        logger.info(f"MIX keep-file: {len(all_samples)} samples (50%% EUR + 50%% EAS)")
         return keep_path
 
     # Standard single-population

@@ -334,8 +334,19 @@ def _load_legacy_stats(pgs_id: str) -> Optional[Dict]:
 
 
 def _get_expected_std(pgs_id: str) -> Optional[float]:
-    """Get expected std for sanity checking (from any available stats)."""
-    # Try legacy EUR stats first (broadest coverage)
+    """Get expected std for sanity checking (from same source as _load_stats)."""
+    # Try new multi-pop stats first (same scale as _load_stats)
+    for pop in ["EUR", "MIX"]:
+        new_path = ref_stats_path(pgs_id, pop, "GRCh38")
+        if os.path.exists(new_path):
+            try:
+                with open(new_path) as f:
+                    data = json.load(f)
+                if data.get("std", 0) > 0:
+                    return data["std"]
+            except (json.JSONDecodeError, KeyError):
+                pass
+    # Fall back to legacy
     stats = _load_legacy_stats(pgs_id)
     if stats:
         return stats.get("std")

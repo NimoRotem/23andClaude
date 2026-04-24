@@ -3723,7 +3723,7 @@ def _compute_percentile_multipop_wrapper(pgs_id, raw_score, scoring_file=None,
                         return_details=False, score_sum=None,
                         ancestry_result=None):
     """Wrapper that tries pipeline.scoring for multi-pop, falls back to legacy."""
-    if PIPELINE_SCORING_AVAILABLE and ancestry_result is not None:
+    if PIPELINE_SCORING_AVAILABLE:
         try:
             ref_sel = select_reference(ancestry_result, pgs_id)
             result = compute_percentile_multipop(
@@ -4199,146 +4199,6 @@ def _batch_lookup_variants(vcf_path, variants_in, has_chr_prefix):
 
     return result
 
-
-def run_rsid_pgs_score(vcf_path, params):
-    """Compute a small-panel polygenic score from a hand-curated list of
-    (rsID, effect, risk_allele) triples.
-
-    Unlike `run_pgs_score` (which uses plink2 against a PGS Catalog scoring
-    file), this runner looks up each rsID directly in the VCF, determines
-    the dosage of the *risk* allele from the genotype, and sums
-    `effect * dosage` across variants. It's aimed at short published
-    trait panels like those in `rsid-list.md` (typically 3-100 rsIDs).
-    """
-    vcf_path = _ensure_indexed(vcf_path)
-    has_chr = _detect_chr_prefix(vcf_path)
-
-    title = params.get("title", "Custom rsID PGS")
-    citation = params.get("citation", "")
-    variants_in = params.get("variants", [])
-
-    # Batch-resolve all variants in one bcftools query (huge speedup over
-    # one-query-per-variant). Returns dict rsid -> lookup record with the
-    # same shape as _lookup_variant.
-    lookups = _batch_lookup_variants(vcf_path, variants_in, has_chr)
-
-    per_variant = []
-    total = 0.0
-    matched = 0
-    unresolved = 0
-
-    for v in variants_in:
-        rs = v["rsid"]
-        effect = float(v["effect"])
-        risk = v["risk"]
-
-        look = lookups.get(rs, {"found": False, "source": "none"})
-        dosage = None
-        allele_source = look.get("source", "none")
-
-        if look.get("found"):
-            # We have REF, ALT, and a genotype like "0/1" or "0|1".
-            dosage = _risk_allele_dosage(look.get("ref", ""), look.get("alt", ""),
-                                         look.get("genotype", ""), risk)
-        elif allele_source == "position-inferred":
-            # Position known, but no variant called here → homozygous reference.
-            # dosage of risk allele = 2 if risk == ref, else 0.
-            ref = look.get("ref", "")
-            if ref and risk == ref:
-                dosage = 2
-            elif ref:
-                dosage = 0
-            # else leave as None (ref not known)
-
-        if dosage is None:
-            unresolved += 1
-            per_variant.append({
-                "rsid": rs,
-                "effect": effect,
-                "risk_allele": risk,
-                "genotype": look.get("genotype", "unresolved"),
-                "dosage": None,
-                "contribution": 0.0,
-                "source": allele_source,
-            })
-            continue
-
-        contribution = effect * dosage
-        total += contribution
-        matched += 1
-        per_variant.append({
-            "rsid": rs,
-            "effect": effect,
-            "risk_allele": risk,
-            "genotype": look.get("genotype", ""),
-            "dosage": dosage,
-            "contribution": round(contribution, 4),
-            "source": allele_source,
-        })
-
-    n = len(variants_in)
-    match_rate = (matched / n * 100) if n else 0.0
-
-    # Match rate too low (or nothing resolved) — bail out with a no_report
-    # failure stub so the UI hides the View button and just shows that
-    # the PGS failed.
-    if matched == 0 or match_rate < 60:
-        if matched == 0:
-            err = f"None of {n} variants could be resolved in the VCF"
-            headline = f"{title}: PGS failed (no variants resolved)"
-        else:
-            err = f"Match rate too low ({match_rate:.1f}%) — PGS failed"
-            headline = f"{title}: PGS failed (match rate {match_rate:.0f}% — too low)"
-        return {
-            "test_type": "rsid_pgs_score",
-            "title": title,
-            "citation": citation,
-            "n_variants": n,
-            "matched_variants": matched,
-            "unresolved_variants": unresolved,
-            "match_rate": f"{match_rate:.1f}%",
-            "match_rate_value": round(match_rate, 1),
-            "no_report": True,
-            "status": "failed",
-            "headline": headline,
-            "error": err,
-        }
-
-    # 60–85 → warning (still report); ≥85 → passed.
-    if match_rate < 85:
-        status = "warning"
-        err = f"Low match rate: {matched}/{n} variants resolved ({match_rate:.0f}%)"
-    else:
-        status = "passed"
-        err = None
-    headline = f"{title}: score={total:+.3f} ({matched}/{n} = {match_rate:.0f}%)"
-
-    summary_lines = [
-        f"{title} ({citation})" if citation else title,
-        f"Raw score: {total:+.4f}",
-        f"Resolved variants: {matched}/{n} ({match_rate:.0f}%)",
-    ]
-    if unresolved:
-        summary_lines.append(f"Unresolved: {unresolved}")
-
-    d = {
-        "test_type": "rsid_pgs_score",
-        "title": title,
-        "citation": citation,
-        "raw_score": round(total, 4),
-        "n_variants": n,
-        "matched_variants": matched,
-        "unresolved_variants": unresolved,
-        "match_rate": f"{match_rate:.1f}%",
-        "match_rate_value": round(match_rate, 1),
-        "per_variant": per_variant,
-        "summary": "\n".join(summary_lines),
-        "status": status,
-        "headline": headline,
-    }
-    if err:
-        d["error"] = err
-    return d
 
 
 def _risk_allele_dosage(ref, alt, genotype, risk):
@@ -6145,7 +6005,6 @@ def _run_roh(vcf_path):
 VCF_ONLY_TEST_TYPES = {
     "variant_lookup",
     "pgs_score",
-    "rsid_pgs_score",
     "clinvar_screen",
     # "specialized" is NOT listed here — some specialized methods (PCA) can
     # handle CRAM/BAM inputs internally via on-demand variant calling.
@@ -7118,6 +6977,7 @@ def _run_pgs_score_pileup(bam_path, params, progress_cb=None):
 
     pgs_id = params.get("pgs_id", "unknown")
     trait = params.get("trait", pgs_id)
+    ref_pop = params.get("ref_pop", "")
 
     if progress_cb:
         progress_cb(f"Pipeline E+: loading {pgs_id} scoring file...")
@@ -7403,13 +7263,18 @@ def _run_pgs_score_pileup(bam_path, params, progress_cb=None):
         # distribution (also AVG-based) is on the same scale.
         pgs_avg = pgs_sum / (2 * matched) if matched > 0 else 0.0
 
+        # Build ancestry hint from user-selected/auto-detected ref population
+        _ancestry_hint_pileup = None
+        if ref_pop:
+            _ancestry_hint_pileup = {ref_pop: 1.0}
         percentile, pctl_details = _compute_percentile(
             pgs_id, pgs_avg,
             scoring_file=scoring_file,
             matched_vars_path=matched_vars_file,
             tmpdir=_pctl_tmpdir,
             return_details=True,
-            score_sum=pgs_sum)
+            score_sum=pgs_sum,
+            ancestry_result=_ancestry_hint_pileup)
 
         # Clean up
         try:
@@ -7436,7 +7301,7 @@ def _run_pgs_score_pileup(bam_path, params, progress_cb=None):
         "scoring_file_build": scoring_build,
         "pgs_catalog_id": pgs_id,
         "pgs_catalog_url": f"https://www.pgscatalog.org/score/{pgs_id}/",
-        "reference_population": "EUR (European, n=503)",
+        "reference_population": pctl_details.get("selected_ref", "EUR") if pctl_details else "EUR",
         "reference_panel": "1000 Genomes Phase 3 (GRCh38, 3,202 samples)",
         "normalization": "direct BAM pileup at target positions (no VCF intermediate)",
         "scoring_file_source": _sf_source,
@@ -7495,7 +7360,7 @@ def run_test(vcf_path, test_def, progress_cb=None):
         # reads the BAM at the exact GRCh38 positions and avoids build-
         # mismatch issues that plague sibling-VCF substitution.
         # Sibling VCF is only used as fallback for test types Pipeline E+
-        # doesn't support (clinvar_screen, rsid_pgs_score).
+        # doesn't support (clinvar_screen).
 
         if test_type == "variant_lookup":
             logger.info(f"{test_def.get('id', '?')}: BAM input, using Pipeline E+ pileup")
@@ -7536,7 +7401,7 @@ def run_test(vcf_path, test_def, progress_cb=None):
                                  f"{e}\n{traceback.format_exc()[:500]}")
 
         else:
-            # clinvar_screen, rsid_pgs_score, etc. — need a VCF
+            # clinvar_screen, etc. — need a VCF
             sibling = _find_sibling_vcf(vcf_path)
             if sibling:
                 logger.info(
@@ -7562,8 +7427,7 @@ def run_test(vcf_path, test_def, progress_cb=None):
             result = run_vcf_stats(vcf_path, params)
         elif test_type == "pgs_score":
             result = run_pgs_score(vcf_path, params, progress_cb=progress_cb)
-        elif test_type == "rsid_pgs_score":
-            result = run_rsid_pgs_score(vcf_path, params)
+
         elif test_type == "clinvar_screen":
             result = run_clinvar_screen(vcf_path, params)
         elif test_type == "specialized":
