@@ -55,6 +55,19 @@ except Exception:  # pragma: no cover
     def attach_provenance(r): return r
     def check_interpretation_directional(r): return r
 # === RESULT_GUARDS_IMPORT_END ===
+# === PIPELINE_FINGERPRINT_IMPORT ===
+try:
+    from pipeline.fingerprint import attach_pipeline_fingerprint
+except Exception:  # pragma: no cover
+    def attach_pipeline_fingerprint(report, pgs_id=None, accept_drift=False):
+        return report
+# === PIPELINE_FINGERPRINT_IMPORT_END ===
+# Operator-supplied flag (env var) to keep emitting percentile when
+# pipeline_fingerprint fields are missing. Capped at MEDIUM confidence
+# per REMEDIATION_PLAN §0.1.
+_ACCEPT_FINGERPRINT_DRIFT = os.environ.get(
+    "ACCEPT_FINGERPRINT_DRIFT", "0",
+).lower() in ("1", "true", "yes")
 # === LIVE_PERCENTILE_IMPORT ===
 try:
     from pipeline.live_percentile import apply_live_overlay as _apply_live_pctl
@@ -1778,6 +1791,16 @@ def queue_worker(worker_id):
             try:
                 attach_provenance(report)
                 check_interpretation_directional(report)
+                # Phase 0.1: attach pipeline_fingerprint and refuse percentile
+                # (or downgrade to MEDIUM) if any required field is missing.
+                _pgs_id_for_fp = None
+                _res_for_fp = report.get("result") or {}
+                if isinstance(_res_for_fp, dict):
+                    _pgs_id_for_fp = _res_for_fp.get("pgs_id")
+                attach_pipeline_fingerprint(
+                    report, _pgs_id_for_fp,
+                    accept_drift=_ACCEPT_FINGERPRINT_DRIFT,
+                )
             except Exception as _guard_err:
                 logger.warning(f'result guards failed: {_guard_err!r}')
 

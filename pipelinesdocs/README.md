@@ -1,7 +1,7 @@
-# 23andclaude.com — Bioinformatics Pipeline Documentation
+# <APP_DOMAIN> — Bioinformatics Pipeline Documentation
 
 This documentation set describes the genomics and PGS (polygenic score)
-pipelines that run behind https://23andclaude.com. It is written for a
+pipelines that run behind https://<APP_DOMAIN>. It is written for a
 bioinformatics specialist reviewing the methodology end-to-end.
 
 The application accepts consumer-genomics files (23andMe / AncestryDNA
@@ -9,9 +9,9 @@ text dumps), VCF / gVCF, BAM, and CRAM. It runs variant lookups, PGS
 scoring, ancestry / PCA, Y / mtDNA haplogrouping, ClinVar screening,
 HLA typing, and a handful of repeat-expansion / specialized tests.
 
-Host: `genom-beast-gpu` (GCE, us-central1-c, n1-standard-32 + T4)
-Code: `/home/nimrod_rotem/simple-genomics/` (FastAPI app on port 8600)
-Data: `/data/pgs2/`, `/data/pgs_cache/`, `/data/ref_stats/`
+Host: `<PIPELINE_HOST>` (GCE, us-central1-c, n1-standard-32 + T4)
+Code: `<USER_HOME>/simple-genomics/` (FastAPI app on port <PORT>)
+Data: `<DATA_ROOT>/pgs2/`, `<CACHE_ROOT>/pgs_cache/`, `<CACHE_ROOT>/ref_stats/`
 Tooling: plink2, bcftools, samtools, liftOver, ExpansionHunter, T1K
 
 ## Reading order
@@ -22,7 +22,7 @@ Tooling: plink2, bcftools, samtools, liftOver, ExpansionHunter, T1K
 | 02  | [input-and-alignment.md](02-input-and-alignment.md) | Raw / 23andMe TSV / VCF / gVCF / BAM / CRAM ingestion, variant calling, indexing, build detection |
 | 03  | [pgs-ingestion.md](03-pgs-ingestion.md)       | PGS Catalog download, parsing, normalization, harmonization, liftover, eligibility QC |
 | 04  | [scoring-pipeline.md](04-scoring-pipeline.md) | plink2 scoring (fast-path, full-pgen-cache path), gVCF expansion, allele rewrite, match-rate gating |
-| 05  | [reference-panel.md](05-reference-panel.md)   | 1000 Genomes Phase 3 panel, population subsets, PCA cache, ancestry-aware ref selection |
+| 05  | [reference-panel.md](05-reference-panel.md)   | 1000G + NYGC high-coverage panel, population subsets, PCA cache, ancestry-aware ref selection |
 | 06  | [percentile-and-stats.md](06-percentile-and-stats.md) | Reference-stats schema contract, z-score & percentile formula, sanity gates, scale reconciliation |
 | 07  | [qa-and-validation.md](07-qa-and-validation.md) | Build validation, cohort sanity, in-batch control, nightly self-test, regression suite, live overlay |
 | 08  | [data-layout.md](08-data-layout.md)           | Directory inventory, cache schemas, DB tables, key file formats |
@@ -31,7 +31,7 @@ Tooling: plink2, bcftools, samtools, liftOver, ExpansionHunter, T1K
 
 ## TL;DR for the reviewer
 
-- **Reference**: GRCh38, 1000 Genomes Phase 3 (`/data/pgs2/ref_panel/GRCh38_1000G_ALL`), 6 super-populations (`EUR`, `EAS`, `AFR`, `SAS`, `AMR`, plus a built-in `MIX = 50% EUR + 50% EAS`).
+- **Reference**: GRCh38, 1000G + NYGC high-coverage (`<DATA_ROOT>/pgs2/ref_panel/GRCh38_1000G_ALL`), 5 super-populations (`EUR`, `EAS`, `AFR`, `SAS`, `AMR`). The legacy fixed `MIX = 50% EUR + 50% EAS` blend was removed in Phase 1.5 of the remediation plan; admixed samples now get a multi-population percentile array, with weights from supervised global-ancestry (not inverse-distance PCA).
 - **PGS source**: PGS Catalog harmonized files (`*_hmPOS_GRCh38.txt.gz`). GRCh37 files are lifted over to GRCh38 with UCSC `liftOver` before scoring.
 - **Scoring engine**: `plink2 --score ... cols=+scoresums no-mean-imputation list-variants` (canonical method, hashed into ref-stats as `scoring_method=plink2-nomi`, `imputation_policy=no-mean-imputation`).
 - **Percentile model**: parametric Φ((score − μ)/σ) against precomputed per-(PGS × population) μ/σ stored in a JSON with a hard contract (`schema_version=1`, `variant_ids_sha256`, n_samples, ref panel sha). Loaders **refuse** stats files whose live-pipeline fingerprint disagrees — no silent z-score against the wrong distribution.
@@ -50,7 +50,7 @@ simple-genomics/
 ├── runners.py                      # variant calling, scoring, ancestry; the heart
 ├── pipeline/
 │   ├── config.py                   # all paths, populations, plink2 args
-│   ├── ingest_pgs.py               # PGS Catalog → /data/pgs_cache normalization
+│   ├── ingest_pgs.py               # PGS Catalog → <CACHE_ROOT>/pgs_cache normalization
 │   ├── match_logic.py              # canonical PGS scoring-file parser
 │   ├── scoring.py                  # ancestry-aware percentile, schema contract
 │   ├── registry.py                 # resolves PGS+pop → current ref-stats file

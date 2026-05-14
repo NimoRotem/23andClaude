@@ -34,9 +34,9 @@ chrom naming:
 ```python
 _REF_CANDIDATES = [
     REF_FASTA,                                # from env
-    "/data/genom-nimo/reference_chr.fa",     # GRCh38, chr-prefixed
-    "/data/genom-nimo/reference.fasta",      # GRCh38, bare-chrom
-    "/data/refs/GRCh38.fa",
+    "<DATA_ROOT>/genom-nimo/reference_chr.fa",     # GRCh38, chr-prefixed
+    "<DATA_ROOT>/genom-nimo/reference.fasta",      # GRCh38, bare-chrom
+    "<DATA_ROOT>/refs/GRCh38.fa",
 ]
 ```
 
@@ -153,7 +153,7 @@ positions** (~7.34M sites):
 
 ```
 # 1. Build / refresh union positions file
-#    /data/pgs_cache/_all_pgs_pca_positions_{chr,bare}.tsv
+#    <CACHE_ROOT>/pgs_cache/_all_pgs_pca_positions_{chr,bare}.tsv
 #    Rebuilt automatically if any PGS scoring file (or PCA eigenvec) is
 #    newer than the cache. This is the bug that masked PGS002753 at 16% match.
 
@@ -241,7 +241,7 @@ positions. `_validate_genome_build(vcf_path, reference_build)`:
    GRCh38 (or vice versa), `_liftover_pgs_scoring(plink2_scoring,
    from_build, to_build, tmpdir)` rewrites the **scoring file** to the
    VCF's build using UCSC `liftOver` and the chain files in
-   `/data/ancestry_reference/hg19ToHg38.over.chain.gz` and
+   `<DATA_ROOT>/ancestry_reference/hg19ToHg38.over.chain.gz` and
    `simple-genomics/liftover/hg38ToHg19.over.chain.gz`. Lifting the
    scoring file is cheap (~thousands of lines); lifting the user's VCF
    is wasteful (millions of records, half of them irrelevant).

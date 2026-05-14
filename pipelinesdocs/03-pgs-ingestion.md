@@ -10,7 +10,7 @@ Code: `simple-genomics/pipeline/ingest_pgs.py` + `match_logic.py`.
 
 ## 3.1 The canonical cache layout
 
-For each PGS, `/data/pgs_cache/<PGS_ID>/` ends up containing:
+For each PGS, `<CACHE_ROOT>/pgs_cache/<PGS_ID>/` ends up containing:
 
 ```
 PGS000334/
@@ -34,7 +34,7 @@ the function returns immediately. `eligibility.json` is the canonical
 ```
  ┌─────────────────────────────────────────────────────────┐
  │ 1. Download                                             │
- │    PGS Catalog FTP → /data/pgs_cache/<id>/scoring_*.gz  │
+ │    PGS Catalog FTP → <CACHE_ROOT>/pgs_cache/<id>/scoring_*.gz  │
  │    (skipped if scoring_original.txt.gz already exists)  │
  ├─────────────────────────────────────────────────────────┤
  │ 2. Parse header                                         │
@@ -54,7 +54,7 @@ the function returns immediately. `eligibility.json` is the canonical
  │    positions_build = metadata['HmPOS_build']            │
  │                      or metadata['genome_build']        │
  │    If GRCh37 → run UCSC liftOver to GRCh38 with         │
- │    /data/ancestry_reference/hg19ToHg38.over.chain.gz    │
+ │    <DATA_ROOT>/ancestry_reference/hg19ToHg38.over.chain.gz    │
  │    Variants that fail to map are dropped; if <50%       │
  │    survive, ingest is marked rejected.                  │
  ├─────────────────────────────────────────────────────────┤
@@ -114,7 +114,7 @@ the chain. A liftover applied is recorded as
 We use UCSC `liftOver` against the canonical chain files:
 
 ```
-GRCh37 → GRCh38 : /data/ancestry_reference/hg19ToHg38.over.chain.gz
+GRCh37 → GRCh38 : <DATA_ROOT>/ancestry_reference/hg19ToHg38.over.chain.gz
 GRCh38 → GRCh37 : simple-genomics/liftover/hg38ToHg19.over.chain.gz
 ```
 
@@ -129,7 +129,7 @@ Two contexts trigger liftover:
    a different build than the (ingested) scoring file's
    `positions_build`. The scoring file is lifted to the VCF's build for
    that one run; the cached canonical scoring file in
-   `/data/pgs_cache/` is **not** modified.
+   `<CACHE_ROOT>/pgs_cache/` is **not** modified.
 
 We never lift the user's VCF on the fly. Lifting the scoring file
 (thousands of lines) is cheap; lifting a multi-GB VCF is wasteful and
@@ -185,7 +185,7 @@ spot-checks; the live source of truth remains the on-disk state.
 The app supports uploading a custom PGS scoring file via
 `/api/pgs/custom`. The uploaded file goes through the same
 `parse_pgs_scoring_file` parser and is cached at
-`/data/pgs_cache/<USER_ID>/` (no PGS Catalog round-trip). It does
+`<CACHE_ROOT>/pgs_cache/<USER_ID>/` (no PGS Catalog round-trip). It does
 **not** get a ref-stats file — percentile is unavailable for custom
 PGS until the user runs the runtime z-score against the matched-subset
 ref panel (`_score_ref_panel_matched`, used as a fallback in

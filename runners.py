@@ -3137,7 +3137,14 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
         pgen_prefix = os.path.join(tmpdir, "fast_pgen")
 
         gvcf_has_chr = _detect_chr_prefix(vcf_path)
-        var_id_template = "chr@:#"
+        # Phase 1.2: allele-specific variant IDs (chr@:#:$r:$a) when enabled.
+        # This makes the pgen ID unique per (chr, pos, ref, alt), letting us
+        # drop `--rm-dup force-first` from the scoring path: surviving dupes
+        # become explicit errors counted into `score_provenance.dup_aggregated`
+        # rather than silently collapsed. Old cache keys are invalidated by
+        # the template change.
+        _ALLELE_SPECIFIC_IDS = os.environ.get("PGS_ALLELE_SPECIFIC_IDS", "0") == "1"
+        var_id_template = "chr@:#:$r:$a" if _ALLELE_SPECIFIC_IDS else "chr@:#"
 
         # Write sex file
         samples = _vcf_sample_names(rewritten_vcf)
@@ -3147,17 +3154,44 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
             for iid in samples:
                 fh.write(iid + "\t0\n")
 
+        # Phase 1.2: pre-normalize to split multi-allelics and REF-check
+        # against the FASTA. Surviving duplicates are explicit, not collapsed.
+        norm_vcf = rewritten_vcf
+        if _ALLELE_SPECIFIC_IDS:
+            try:
+                _fasta = os.environ.get("REFERENCE_FASTA", "/data/refs/hs38DH.fa")
+                _norm_out = pgen_prefix + ".norm.vcf.gz"
+                _norm_proc = subprocess.run(
+                    [BCFTOOLS, "norm", "-f", _fasta, "-m-any", "-c", "x",
+                     "-Oz", "-o", _norm_out, rewritten_vcf],
+                    capture_output=True, text=True, timeout=900,
+                )
+                if _norm_proc.returncode == 0:
+                    _run([BCFTOOLS, "index", "-t", _norm_out], timeout=120)
+                    norm_vcf = _norm_out
+                else:
+                    logger.warning(
+                        f"bcftools norm failed in fast path; using un-normalized vcf: "
+                        f"{_norm_proc.stderr[-300:]}"
+                    )
+            except Exception as _norm_err:
+                logger.warning(f"bcftools norm errored in fast path: {_norm_err!r}")
+
         cmd_pgen = [
-            PLINK2, "--vcf", rewritten_vcf, "--make-pgen",
+            PLINK2, "--vcf", norm_vcf, "--make-pgen",
             "--allow-extra-chr", "--split-par", "b38",
             "--update-sex", sex_file, "--vcf-half-call", "m",
             "--set-all-var-ids", var_id_template,
             "--new-id-max-allele-len", "100", "missing",
-            "--rm-dup", "force-first",
             "--threads", str(PLINK_SCORE_THREADS),
             "--memory", str(PLINK_MEMORY_MB),
             "--out", pgen_prefix,
         ]
+        if not _ALLELE_SPECIFIC_IDS:
+            # Legacy path: keep the force-first dup collapse so the old
+            # `chr@:#` cache invariant holds. Phase 1.2 default migration
+            # will flip this; gate on PGS_ALLELE_SPECIFIC_IDS for now.
+            cmd_pgen.extend(["--rm-dup", "force-first"])
         _, stderr, rc = _run(cmd_pgen, timeout=120)
         if rc != 0:
             logger.warning(f"{pgs_id} fast path: plink2 pgen failed: {stderr[:200]}")
@@ -3330,6 +3364,74 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
                                       percentile, pipeline_info=pipeline_info),
             "headline": headline,
         }
+        # === SCORE_PROVENANCE_BUILD === (Phase 0.2)
+        # Capture exactly which variants the scoring step actually used so a
+        # reviewer can audit weighted_coverage and dup/multiallelic counters.
+        _sp_obj = None
+        try:
+            from pipeline.score_provenance import (
+                attach_score_provenance, build_score_provenance, parse_sscore_vars,
+            )
+            _matched_ids = parse_sscore_vars(vars_file) if os.path.exists(vars_file) else set()
+            _sp_obj = build_score_provenance(
+                pgs_id=pgs_id,
+                matched_ids=_matched_ids,
+                mask_tsv_path=plink2_scoring,
+                refpanel_pvar_zst="/data/pgs2/ref_panel/GRCh38_1000G_ALL.pvar.zst",
+                plink2_stderr=stderr or "",
+                score_stat_used="SUM",   # spec §1.1 default
+                dup_aggregated=int(rescue_info.get("n_palindromic_skipped", 0) or 0),
+                liftover_unmapped_frac=float(metadata.get("liftover_unmapped_frac", 0.0) or 0.0),
+                liftover_ambiguous_frac=float(metadata.get("liftover_ambiguous_frac", 0.0) or 0.0),
+                liftover_ref_mismatch_frac=float(metadata.get("liftover_ref_mismatch_frac", 0.0) or 0.0),
+            )
+            attach_score_provenance(_fast_result, _sp_obj)
+        except Exception as _sp_err:
+            logger.warning(f"score_provenance attach failed for {pgs_id}: {_sp_err!r}")
+        # === SCORE_PROVENANCE_BUILD_END ===
+
+        # === MATCHED_SUBSET_PCTL === (Phase 1.1)
+        # If weighted_coverage < 0.99 OR allele_skip_count > 0, the cached
+        # pooled stats are not the right null distribution for this user's
+        # exact matched variant set. Re-score the ref panel restricted to
+        # the matched set and percentile against THAT distribution. If
+        # weighted_coverage < 0.80 → refuse the percentile entirely.
+        try:
+            from pipeline.matched_subset_stats import (
+                coverage_gate_status, recompute_matched_subset_stats,
+                should_use_dynamic_subset,
+            )
+            _wc = (_sp_obj.weighted_coverage if _sp_obj else 0.0)
+            _skip = (_sp_obj.allele_skip_count if _sp_obj else 0)
+            _gate = coverage_gate_status(_wc)
+            if _gate:
+                _fast_result["percentile"] = None
+                _fast_result["status"] = "coverage_insufficient"
+                _fast_result.setdefault("scoring_diagnostics", {})[
+                    "weighted_coverage_refusal"] = _wc
+            elif should_use_dynamic_subset(_wc, _skip, input_class="wgs"):
+                _pop_for_subset = _fast_result.get("selected_ref") or "EUR"
+                _matched_set = _matched_ids if _matched_ids else set()
+                _mss = recompute_matched_subset_stats(
+                    pgs_id, _pop_for_subset, _matched_set,
+                    mask_path=plink2_scoring,
+                )
+                if _mss is not None and _score_sum is not None:
+                    _z_new, _ecdf_new = _mss.percentile(_score_sum)
+                    _fast_result["percentile"] = round(_ecdf_new, 1)
+                    _fast_result.setdefault("scoring_diagnostics", {}).update({
+                        "matched_subset_used": True,
+                        "matched_subset_sha": _mss.matched_set_sha256[:12],
+                        "matched_subset_n_variants": _mss.n_variants,
+                        "matched_subset_n_samples": _mss.n_samples,
+                        "matched_subset_sum_mean": _mss.sum_mean,
+                        "matched_subset_sum_std": _mss.sum_std,
+                        "weighted_coverage": _wc,
+                        "z_score": _z_new,
+                    })
+        except Exception as _mss_err:
+            logger.warning(f"matched-subset recompute skipped for {pgs_id}: {_mss_err!r}")
+        # === MATCHED_SUBSET_PCTL_END ===
         _conf, _conf_reasons = _compute_confidence(_fast_result, pctl_details, build_check)
         _fast_result["confidence"] = _conf
         _fast_result["confidence_reasons"] = _conf_reasons
@@ -3959,7 +4061,7 @@ def _build_pipeline_info(vcf_path, pgs_id, metadata, scoring_method,
         "pgs_catalog_id": pgs_id,
         "pgs_catalog_url": f"https://www.pgscatalog.org/score/{pgs_id}/",
         "reference_population": "EUR (European, n=503)",
-        "reference_panel": "1000 Genomes Phase 3 (GRCh38, 3,202 samples)",
+        "reference_panel": "1000G + NYGC high-coverage, GRCh38, 3,202 samples",
         "reference_panel_path": REF_PANEL,
         "percentile_details": percentile_details or {},
         "normalization": ("gVCF block expansion at target positions + "
@@ -4149,7 +4251,7 @@ def _compute_percentile_legacy(pgs_id, raw_score, scoring_file=None,
     details = {
         "method": None,
         "reference_population": "EUR (European, n=503)",
-        "reference_panel": "1000 Genomes Phase 3 (GRCh38)",
+        "reference_panel": "1000G + NYGC high-coverage, GRCh38",
         "formula": "percentile = Φ((score - μ_ref) / σ_ref) × 100",
         "ref_mean": None,
         "ref_std": None,
@@ -4703,7 +4805,7 @@ def _summarize_pgs(pgs_id, trait, result, matched, metadata, percentile,
         if pipeline_info.get('build_notes'):
             lines.append(f"Build notes: {pipeline_info['build_notes']}")
         lines.append(f"Reference population: {pipeline_info.get('reference_population', 'EUR')}")
-        lines.append(f"Reference panel: {pipeline_info.get('reference_panel', '1000 Genomes Phase 3')}")
+        lines.append(f"Reference panel: {pipeline_info.get('reference_panel', '1000G + NYGC high-coverage, GRCh38')}")
         pctl_info = pipeline_info.get("percentile_details", {})
         if pctl_info.get("method"):
             lines.append(f"Percentile method: {pctl_info['method']}")
@@ -6258,25 +6360,30 @@ def _run_mt_haplogroup(vcf_path):
 
 
 def _run_neanderthal(vcf_path):
-    """Estimate Neanderthal introgression from Y-DNA / ADMIXTURE context.
+    """Phase 2.4 — Neanderthal % is removed from production.
 
-    A first attempt used a hand-curated 20-SNV tag panel, but (a) the panel
-    was too small for statistical power (0/20 positive is consistent with
-    anything from 0% to ~10%) and (b) several of the hardcoded REF bases
-    didn't match the GRCh38 reference FASTA. Proper genome-wide Neanderthal
-    estimation requires tools like `admixfrog` or `S_star` with Altai /
-    Vindija / Chagyrskaya reference VCFs, which aren't installed.
+    Per REMEDIATION_PLAN §2.4: the population-mean fallback is a category
+    error (it surfaces a sample-level number that is not measured on the
+    sample). The test is gated behind the `PGS_RESEARCH_NEANDERTHAL=1`
+    env flag. With the flag set, we still emit a research-only result
+    accompanied by a clear caveat. Without the flag, we return a typed
+    skip rather than silently producing a number.
 
-    As a pragmatic fallback we report an expected-range estimate based on
-    the sample's ADMIXTURE-inferred super-population — 1000G and Prüfer et
-    al. populations have well-characterised mean Neanderthal fractions:
-      AFR ≈ 0.0-0.3%   (Yoruba baseline)
-      EUR ≈ 1.8-2.4%
-      EAS ≈ 1.8-2.6%
-      SAS ≈ 1.7-2.3%
-      AMR ≈ 1.5-2.0%
-    Clearly labelled as a population-based estimate, not a direct measurement.
+    A real Neanderthal estimator needs a curated archaic-informative
+    marker panel (Vernot/Prüfer-derived) and a calibrated estimator
+    (admixfrog / S_star). Document in 10-known-issues.md.
     """
+    if os.environ.get("PGS_RESEARCH_NEANDERTHAL", "0") != "1":
+        return _warn(
+            "Neanderthal %: removed from production (Phase 2.4)",
+            "Removed per REMEDIATION_PLAN §2.4: the previous population-mean "
+            "fallback is not a sample-level measurement and is unsuitable "
+            "as a production report. Set PGS_RESEARCH_NEANDERTHAL=1 to "
+            "enable the research-only path; install admixfrog or S_star "
+            "with archaic reference VCFs for a real estimator.",
+            test_type="specialized", method="Neanderthal %",
+            summary="Disabled in production; see PGS_RESEARCH_NEANDERTHAL.",
+        )
     # Delegate ancestry inference to the PCA runner so we get the same
     # closest-population call as the PCA / ADMIXTURE tests.
     pca_result = _run_pca_1000g(vcf_path)
@@ -6674,24 +6781,56 @@ def _run_admixture_from_pca(vcf_path):
 
 
 def _run_roh(vcf_path):
-    """Run ROH analysis using plink1.9 --homozyg (plink2 doesn't support --homozyg yet).
+    """Phase 2.4 — Run ROH analysis with strict input requirements.
 
-    For BAM/CRAM inputs, derives an autosomal VCF on demand by reusing the
-    PCA cache (calls genotypes at the ~106K LD-pruned PCA sites). The
-    resulting FROH is necessarily a coarse estimate from sparse data —
-    plink can still detect long ROH segments, but the absolute total ROH
-    length will be underestimated relative to a dense genome-wide callset.
+    Per REMEDIATION_PLAN §2.4: ROH requires a dense genome-wide SNP set
+    with MAF ≥ 0.05 and missingness ≤ 0.02, NO aggressive LD-pruning.
+    The 106K LD-pruned PCA projection set is explicitly NOT a valid ROH
+    input (assertion below). Targeted / chip inputs return
+    `roh=unavailable` rather than a coarse-estimate-with-caveat.
     """
     ftype = _detect_file_type(vcf_path)
     is_sparse_pca_callset = False
     if ftype in ("bam", "cram"):
-        derived, err = _derive_pca_vcf_from_cram(vcf_path)
-        if not derived:
-            return _fail("ROH: variant calling from CRAM failed",
-                         err or "unknown error",
-                         test_type="specialized", method="Runs of Homozygosity")
-        vcf_path = derived
-        is_sparse_pca_callset = True
+        # Spec §2.4 hard-block: do NOT derive ROH input from the 106K
+        # LD-pruned PCA cache. Tell the caller to provide a dense genome-
+        # wide VCF instead.
+        return _warn(
+            "ROH: unavailable for CRAM/BAM input (Phase 2.4)",
+            "Per REMEDIATION_PLAN §2.4, ROH requires a dense genome-wide "
+            "SNP set with MAF ≥ 0.05 and missingness ≤ 0.02 and NO "
+            "aggressive LD-pruning. The 106K LD-pruned PCA cache is "
+            "explicitly disallowed as ROH input (would produce a coarse, "
+            "biased FROH). Provide a dense VCF (full-genome WGS) for ROH.",
+            test_type="specialized", method="Runs of Homozygosity",
+            summary="ROH=unavailable (sparse PCA input disallowed).",
+        )
+    if ftype not in ("vcf", "gvcf"):
+        return _warn(
+            "ROH: unavailable for this input type (Phase 2.4)",
+            f"ROH requires a dense genome-wide VCF; got file type {ftype}.",
+            test_type="specialized", method="Runs of Homozygosity",
+            summary=f"ROH=unavailable for {ftype}.",
+        )
+    # Phase 2.4 assertion: refuse if the input variant set looks LD-pruned
+    # (proxy: ≤200K variants on autosomes is far too sparse for ROH).
+    try:
+        _proc = subprocess.run(
+            [BCFTOOLS, "view", "-H", "--no-version", vcf_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        _n_lines = sum(1 for _ in _proc.stdout.splitlines() if _) if _proc.returncode == 0 else None
+        if _n_lines is not None and _n_lines < 200_000:
+            return _warn(
+                "ROH: input too sparse (Phase 2.4)",
+                f"Input has only ~{_n_lines:,} variants; ROH requires dense "
+                f"genome-wide coverage (>200K variants, MAF ≥ 0.05). "
+                f"Likely an LD-pruned or targeted VCF — not a valid ROH input.",
+                test_type="specialized", method="Runs of Homozygosity",
+                summary=f"ROH=unavailable (only {_n_lines:,} variants).",
+            )
+    except Exception:
+        pass
 
     with tempfile.TemporaryDirectory(dir=SCRATCH, prefix="roh_") as tmpdir:
         vcf_path = _ensure_indexed(vcf_path)
@@ -8065,7 +8204,7 @@ def _run_pgs_score_pileup(bam_path, params, progress_cb=None):
         "pgs_catalog_id": pgs_id,
         "pgs_catalog_url": f"https://www.pgscatalog.org/score/{pgs_id}/",
         "reference_population": pctl_details.get("selected_ref", "EUR") if pctl_details else "EUR",
-        "reference_panel": "1000 Genomes Phase 3 (GRCh38, 3,202 samples)",
+        "reference_panel": "1000G + NYGC high-coverage, GRCh38, 3,202 samples",
         "normalization": "direct BAM pileup at target positions (no VCF intermediate)",
         "scoring_file_source": _sf_source,
         "build_notes": _build_notes,

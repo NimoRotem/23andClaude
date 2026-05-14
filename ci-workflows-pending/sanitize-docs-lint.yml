@@ -1,0 +1,19 @@
+name: docs-sanitization-lint
+
+on:
+  pull_request:
+    paths:
+      - "pipelinesdocs/**"
+      - "scripts/sanitize_docs.py"
+      - ".github/workflows/sanitize-docs-lint.yml"
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sanitization lint
+        run: |
+          python3 scripts/sanitize_docs.py --docs pipelinesdocs --lint-only

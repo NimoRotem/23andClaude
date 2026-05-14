@@ -51,7 +51,12 @@ THRESHOLD_HIGH_CUT       = 80.0
 THRESHOLD_LOW_FRAC       = 0.30  # <30% below 50%ile → trip
 THRESHOLD_LOW_CUT        = 50.0
 THRESHOLD_KS_P           = 0.01  # KS vs U(0,100) p < 0.01 → trip
+# Phase 2.5 (REMEDIATION_PLAN §2.5):
+#   - Below N_GATING_MIN we compute and store the metric but it is
+#     ADVISORY ONLY — cannot trigger `ref_panel_suspect` state.
+#   - Below MIN_SAMPLES_FOR_CHECK we don't even compute (too few).
 MIN_SAMPLES_FOR_CHECK    = 4     # below this, distribution check is meaningless
+N_GATING_MIN             = 30    # below this, metric is advisory only
 
 
 @dataclass
@@ -101,6 +106,8 @@ def check_cohort(samples: Iterable[dict], pgs_id: Optional[str] = None) -> Cohor
         flag.notes.append(f'n={n} below MIN_SAMPLES_FOR_CHECK={MIN_SAMPLES_FOR_CHECK}, '
                           'skipping check')
         return flag
+    # Phase 2.5: compute the metric below N_GATING_MIN but mark advisory.
+    advisory_only = n < N_GATING_MIN
 
     flag.frac_above_80 = sum(1 for p in pcts if p > THRESHOLD_HIGH_CUT) / n
     flag.frac_below_50 = sum(1 for p in pcts if p < THRESHOLD_LOW_CUT) / n
@@ -117,8 +124,19 @@ def check_cohort(samples: Iterable[dict], pgs_id: Optional[str] = None) -> Cohor
         reasons.append(f'KS vs U(0,100): D={flag.ks_stat:.3f}, p={flag.ks_p:.4f} '
                        f'(threshold p<{THRESHOLD_KS_P})')
     if reasons:
-        flag.tripped = True
-        flag.reason = ' | '.join(reasons)
+        # Phase 2.5: below N_GATING_MIN, the metric is advisory only and
+        # cannot trip `ref_panel_suspect`. We still record reasons and
+        # the values for UI display, but `tripped` stays False.
+        if advisory_only:
+            flag.notes.append(
+                f'advisory_only: n={n} below N_GATING_MIN={N_GATING_MIN}; '
+                f'metric NOT used to flag ref_panel_suspect'
+            )
+            flag.reason = ' | '.join(reasons) + ' [advisory_only]'
+            flag.tripped = False
+        else:
+            flag.tripped = True
+            flag.reason = ' | '.join(reasons)
     return flag
 
 

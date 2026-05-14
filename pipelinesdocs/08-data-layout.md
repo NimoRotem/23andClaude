@@ -3,24 +3,24 @@
 A consolidated map of every directory the pipeline reads or writes, the
 schema(s) inside, and the invalidation rules.
 
-## 8.1 Top-level directories on `genom-beast-gpu`
+## 8.1 Top-level directories on `<PIPELINE_HOST>`
 
 | Path                                           | Owner / role                                     |
 | ---------------------------------------------- | ------------------------------------------------ |
-| `/home/nimrod_rotem/simple-genomics/`          | application code, FastAPI on :8600               |
-| `/home/nimrod_rotem/bam-converter/`            | 23andMe → VCF converter (separate repo)          |
-| `/data/genom-nimo/`                            | reference fastas (`reference.fasta`, `reference_chr.fa`) + per-user BAMs |
-| `/data/pgs2/`                                  | 1000G panel + ref-stats + scoring CSVs           |
-| `/data/pgs_cache/`                             | per-PGS ingested scoring files + PCA cache       |
-| `/data/pgen_cache/`                            | per-user plink2 pgen cache                       |
-| `/data/ref_stats/`                             | new multi-pop ref-stats tree (PGS → pop → JSON)  |
-| `/data/ancestry_reference/`                    | chain files (`hg19ToHg38.over.chain.gz`)         |
-| `/scratch/simple-genomics/`                    | per-run temp dirs (under `SCRATCH`)              |
+| `<USER_HOME>/simple-genomics/`          | application code, FastAPI on :<PORT>               |
+| `<USER_HOME>/bam-converter/`            | 23andMe → VCF converter (separate repo)          |
+| `<DATA_ROOT>/genom-nimo/`                            | reference fastas (`reference.fasta`, `reference_chr.fa`) + per-user BAMs |
+| `<DATA_ROOT>/pgs2/`                                  | 1000G panel + ref-stats + scoring CSVs           |
+| `<CACHE_ROOT>/pgs_cache/`                             | per-PGS ingested scoring files + PCA cache       |
+| `<DATA_ROOT>/pgen_cache/`                            | per-user plink2 pgen cache                       |
+| `<CACHE_ROOT>/ref_stats/`                             | new multi-pop ref-stats tree (PGS → pop → JSON)  |
+| `<DATA_ROOT>/ancestry_reference/`                    | chain files (`hg19ToHg38.over.chain.gz`)         |
+| `<SCRATCH_ROOT>`                    | per-run temp dirs (under `SCRATCH`)              |
 
-## 8.2 `/data/pgs2/`
+## 8.2 `<DATA_ROOT>/pgs2/`
 
 ```
-/data/pgs2/
+<DATA_ROOT>/pgs2/
 ├── GRCh38_1000G_ALL.{pgen,pvar.zst,psam}    # 3,202 unrelated 1000G samples
 ├── GRCh37_1000G_ALL.{pgen,pvar.zst,psam}    # legacy, used only for liftover edge cases
 ├── ref_panel/
@@ -49,10 +49,10 @@ Note: `vcf_norm_split/family6norm_chr*.vcf.gz` are joint-called multi-sample
 VCFs from the family cohort, **not** per-sample gVCFs. Don't substitute them
 for missing gVCFs.
 
-## 8.3 `/data/pgs_cache/`
+## 8.3 `<CACHE_ROOT>/pgs_cache/`
 
 ```
-/data/pgs_cache/
+<CACHE_ROOT>/pgs_cache/
 ├── PGS000001/
 │   ├── PGS000001_hmPOS_GRCh38.txt.gz        # downloaded from PGS Catalog
 │   ├── scoring_original.txt.gz              # symlink
@@ -77,10 +77,10 @@ Union-positions files are rebuilt automatically when any scoring file
 mtime exceeds the cache's mtime. The allele-map pickle is rebuilt on the
 same trigger; it's loaded lazily during gVCF normalization (once per gVCF).
 
-## 8.4 `/data/ref_stats/` (new layout)
+## 8.4 `<CACHE_ROOT>/ref_stats/` (new layout)
 
 ```
-/data/ref_stats/
+<CACHE_ROOT>/ref_stats/
 ├── PGS000001/
 │   ├── EUR_GRCh38.json                       # filename in registry is canonical
 │   └── EUR_scores.npy                        # raw 633-sample scores (optional)
@@ -102,10 +102,10 @@ raw per-sample scores from the panel rescore. Stored only when
 `recompute_ref_stats.py --save-scores` is passed; useful for ECDF
 percentile experiments without re-running plink2.
 
-## 8.5 `/data/pgen_cache/`
+## 8.5 `<DATA_ROOT>/pgen_cache/`
 
 ```
-/data/pgen_cache/
+<DATA_ROOT>/pgen_cache/
 ├── <16-char user-vcf sha>_<8-char param sha>/
 │   ├── sample.pgen
 │   ├── sample.pvar
@@ -187,9 +187,9 @@ For a reviewer trying to find "where is the actual value used":
 
 | Question                                | Authoritative source |
 | --------------------------------------- | --- |
-| Which scoring file did this PGS use?    | `/data/pgs_cache/<PGS>/scoring_clean.tsv.gz` (canonical) |
-| Which ref-stats μ/σ are live?           | First non-stale match in `/data/ref_stats/<PGS>/<POP>_<BUILD>.json`, then `/data/pgs2/ref_panel_stats/` |
-| Which 1000G panel samples are EUR?      | `/data/pgs2/ref_panel/pop_samples/EUR.txt` |
+| Which scoring file did this PGS use?    | `<CACHE_ROOT>/pgs_cache/<PGS>/scoring_clean.tsv.gz` (canonical) |
+| Which ref-stats μ/σ are live?           | First non-stale match in `<CACHE_ROOT>/ref_stats/<PGS>/<POP>_<BUILD>.json`, then `<DATA_ROOT>/pgs2/ref_panel_stats/` |
+| Which 1000G panel samples are EUR?      | `<DATA_ROOT>/pgs2/ref_panel/pop_samples/EUR.txt` |
 | Which variant IDs were scored for run X? | `<scratch>/score_result.sscore.vars` (in the run's tmpdir, ephemeral) |
 | Which reference fasta was picked?       | not persisted in result — reproducible via `_pick_reference_for(vcf_path)` |
-| Latest pipeline commit                  | `git -C /home/nimrod_rotem/simple-genomics rev-parse HEAD` |
+| Latest pipeline commit                  | `git -C <USER_HOME>/simple-genomics rev-parse HEAD` |

@@ -1,13 +1,13 @@
 # 09 — End-to-End Examples
 
 Concrete worked examples per input type, with the exact commands and
-intermediate files. All examples use real paths on `genom-beast-gpu`.
+intermediate files. All examples use real paths on `<PIPELINE_HOST>`.
 
 ## 9.1 Example A — Score a 30× WGS gVCF against PGS000334 (CAD)
 
 Input:
 ```
-/data/user_data/<USER>/sample.g.vcf.gz   # GRCh38 gVCF, 30× WGS
+<DATA_ROOT>/user_data/<USER>/sample.g.vcf.gz   # GRCh38 gVCF, 30× WGS
 ```
 
 Step-by-step:
@@ -44,7 +44,7 @@ match_rate   = 100%
 #    → ref_selection: primary=EUR, secondary=[MIX], reason="single_cluster (EUR=95%)"
 
 # 7. Percentile (single-pop, EUR)
-stats = load(/data/ref_stats/PGS000334/EUR_GRCh38.json)
+stats = load(<CACHE_ROOT>/ref_stats/PGS000334/EUR_GRCh38.json)
 # schema_version=1, n_samples=633, n_variants=22, variant_ids_sha256 matches
 mean = 0.000124
 std  = 0.000891
@@ -84,8 +84,8 @@ Total wall time on the fast path: ~3 seconds.
 
 Input:
 ```
-/data/genom-nimo/<USER>/sample.cram          # GRCh38 CRAM
-/data/genom-nimo/<USER>/sample.cram.crai     # may need to be created
+<DATA_ROOT>/genom-nimo/<USER>/sample.cram          # GRCh38 CRAM
+<DATA_ROOT>/genom-nimo/<USER>/sample.cram.crai     # may need to be created
 ```
 
 ```python
@@ -93,19 +93,23 @@ Input:
 _detect_file_type(...)  # → 'cram'
 
 # 2. The PGS scoring runner ONLY accepts vcf/gvcf. For BAM/CRAM input,
-#    the user is asked to convert first, OR (for tests in _CRAM_OK_METHODS,
-#    not pgs_score) the test derives a VCF on demand.
+#    CRAM/BAM enters via a targeted-calling-at-PGS-sites step that
+#    produces a gVCF the runner then consumes. The UI "PGS-sites only"
+#    mode wraps this step transparently — the user never sees the
+#    intermediate gVCF. The other entry point (for non-PGS tests in
+#    _CRAM_OK_METHODS such as PCA/ancestry) derives a VCF on demand
+#    from the CRAM/BAM. Both call out to the same underlying tools.
 
 # For PGS scoring, the typical flow is to pre-convert:
 $ bash simple-genomics/scripts/cram_to_vcf.sh \
-       /data/genom-nimo/USER/sample.cram \
-       /data/vcfs/USER/sample.vcf.gz
+       <DATA_ROOT>/genom-nimo/USER/sample.cram \
+       <DATA_ROOT>/vcfs/USER/sample.vcf.gz
 
 # Or for fast PGS-positions-only scoring on a CRAM:
 $ bash simple-genomics/scripts/pgs_sites_call.sh \
-       /data/genom-nimo/USER/sample.cram \
-       /data/pgs_cache/_all_pgs_pca_positions_chr.tsv \
-       /data/vcfs/USER/sample.pgs_sites.vcf.gz
+       <DATA_ROOT>/genom-nimo/USER/sample.cram \
+       <CACHE_ROOT>/pgs_cache/_all_pgs_pca_positions_chr.tsv \
+       <DATA_ROOT>/vcfs/USER/sample.pgs_sites.vcf.gz
 
 # 3. The resulting VCF then enters the standard pipeline.
 #    PGS000018 has 1.74M variants → goes through the FULL path:
@@ -114,14 +118,14 @@ $ bash simple-genomics/scripts/pgs_sites_call.sh \
 #       - Source is a non-gVCF VCF (cram_to_vcf produced var-only VCF)
 #       - Stage 1: plink2 --vcf --make-pgen --split-par b38 ... --set-all-var-ids chr@:# --rm-dup
 #       - Stage 2: plink2 --pfile <stage1> --make-pgen --sort-vars
-#       - Cached at /data/pgen_cache/<sha>_<param>/
+#       - Cached at <DATA_ROOT>/pgen_cache/<sha>_<param>/
 #    c. plink2 --score with the canonical flags
 #    d. Parse: matched=1,468,512  total=1,735,924  match_rate=84.6%
 #    e. Build validation: PASS
 #    f. Ancestry: PCA → admixture (EUR 0.62, AMR 0.21, EAS 0.10, AFR 0.05, SAS 0.02)
 #       → top_prop < 0.80 → primary="MIX", secondary=["EUR","AMR"]
 #    g. Percentile against MIX ref-stats:
-#       stats = /data/ref_stats/PGS000018/MIX_GRCh38.json (n_samples=1170)
+#       stats = <CACHE_ROOT>/ref_stats/PGS000018/MIX_GRCh38.json (n_samples=1170)
 #       z = (raw_score - μ_MIX) / σ_MIX
 #       p ≈ 72.3
 #    h. Secondary percentiles against EUR and AMR
@@ -148,7 +152,7 @@ build_check = _validate_genome_build("/tmp/sample.GRCh37.vcf.gz", "GRCh38")
 # → status="FAIL", vcf_build="GRCh37", message="Build mismatch ..."
 
 # 2. Auto-liftover triggered
-_liftover_pgs_scoring(plink2_scoring="/data/pgs_cache/PGS000004/scoring_plink2.tsv",
+_liftover_pgs_scoring(plink2_scoring="<CACHE_ROOT>/pgs_cache/PGS000004/scoring_plink2.tsv",
                       from_build="GRCh38", to_build="GRCh37", tmpdir=...)
 # → writes a lifted scoring file in tmpdir; metadata.liftover="GRCh38→GRCh37"
 # build_check is downgraded to WARN, scoring proceeds.
@@ -160,12 +164,12 @@ _liftover_pgs_scoring(plink2_scoring="/data/pgs_cache/PGS000004/scoring_plink2.t
 ## 9.4 Example D — PCA / admixture for a CRAM (no PGS run)
 
 ```python
-# UI test: 'PCA projection onto 1000G' on /data/genom-nimo/USER/sample.cram
+# UI test: 'PCA projection onto 1000G' on <DATA_ROOT>/genom-nimo/USER/sample.cram
 
 # 1. ftype='cram' → method='pca_1000g' in _CRAM_OK_METHODS → proceed
 # 2. PCA reference cache present? if not, build (one-time ~10 min)
 # 3. _derive_pca_vcf_from_cram(sample.cram):
-#    - read 106K positions from /data/pgs_cache/pca_1000g/ref.eigenvec.allele
+#    - read 106K positions from <CACHE_ROOT>/pgs_cache/pca_1000g/ref.eigenvec.allele
 #    - samtools view --input-fmt-option ignore_md5=1 -T <ref> -b -L positions.bed
 #      sample.cram chr1 chr2 ... chr22  →  slice.bam (~hundreds of MB)
 #    - bcftools mpileup -f <ref> -R positions.tsv ... | bcftools call -m
@@ -212,7 +216,7 @@ python -c "from pipeline.ingest_pgs import ingest_pgs; ingest_pgs('PGS000016', f
 python scripts/recompute_ref_stats.py PGS000016 --pop ALL --apply
 
 # 4. Output files
-ls /data/pgs2/ref_panel_stats/PGS000016_*GRCh38*
+ls <DATA_ROOT>/pgs2/ref_panel_stats/PGS000016_*GRCh38*
 # → new: PGS000016_{EUR,EAS,AFR,SAS,AMR,MIX}_GRCh38_n6648373_plink2-nomi_sha-<new>.json
 #    old: PGS000016_{EUR,EAS,...}_GRCh38.stale-bias-20260514.json
 
@@ -238,13 +242,13 @@ Reviewer steps:
 
 ```bash
 # 1. Check the PGS in question
-ls /data/pgs_cache/PGS001229/
-cat /data/pgs_cache/PGS001229/metadata.json   # trait, original build
-cat /data/pgs_cache/PGS001229/eligibility.json
+ls <CACHE_ROOT>/pgs_cache/PGS001229/
+cat <CACHE_ROOT>/pgs_cache/PGS001229/metadata.json   # trait, original build
+cat <CACHE_ROOT>/pgs_cache/PGS001229/eligibility.json
 
 # 2. Look at the live ref-stats
-ls /data/pgs2/ref_panel_stats/PGS001229_*GRCh38*
-python -c "import json; print(json.load(open('/data/pgs2/ref_panel_stats/PGS001229_EUR_GRCh38_*.json')))"
+ls <DATA_ROOT>/pgs2/ref_panel_stats/PGS001229_*GRCh38*
+python -c "import json; print(json.load(open('<DATA_ROOT>/pgs2/ref_panel_stats/PGS001229_EUR_GRCh38_*.json')))"
 
 # 3. Re-run the self-test for just this PGS
 python scripts/ref_stats_selftest.py --pgs PGS001229 --n 200 --json

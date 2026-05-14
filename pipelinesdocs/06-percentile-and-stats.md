@@ -13,7 +13,7 @@ Code: `pipeline/scoring.py`, `pipeline/registry.py`,
 ## 6.1 Reference-stats JSON format
 
 One JSON per (PGS, population, genome_build) at
-`/data/pgs2/ref_panel_stats/` (legacy) or `/data/ref_stats/<PGS>/<POP>_<BUILD>.json`
+`<DATA_ROOT>/pgs2/ref_panel_stats/` (legacy) or `<CACHE_ROOT>/ref_stats/<PGS>/<POP>_<BUILD>.json`
 (new). Filename convention encodes the pipeline fingerprint:
 
 ```
@@ -221,12 +221,12 @@ Every report dict gets a `provenance` block:
 
 ```json
 {
-  "scoring_file_sha":  "sha256 of /data/pgs_cache/PGS000334/scoring_clean.tsv.gz",
+  "scoring_file_sha":  "sha256 of <CACHE_ROOT>/pgs_cache/PGS000334/scoring_clean.tsv.gz",
   "stats_file_sha":    "sha256 of the loaded ref-stats JSON",
   "ref_panel_sha":     "sha256 of (path,size,mtime) for .pgen/.pvar.zst/.psam",
   "pipeline_commit":   "git rev-parse HEAD at score time",
-  "stats_file_path":   "/data/ref_stats/PGS000334/EUR_GRCh38.json",
-  "scoring_file_path": "/data/pgs_cache/PGS000334/scoring_clean.tsv.gz"
+  "stats_file_path":   "<CACHE_ROOT>/ref_stats/PGS000334/EUR_GRCh38.json",
+  "scoring_file_path": "<CACHE_ROOT>/pgs_cache/PGS000334/scoring_clean.tsv.gz"
 }
 ```
 
@@ -268,8 +268,8 @@ hypothesis that they had been built from a partial reference subset.
 
 ## 6.9 The legacy stats dir
 
-`/data/pgs2/ref_panel_stats/` is the older flat directory with
-EUR-only files. The new `/data/ref_stats/<PGS>/<POP>_<BUILD>.json`
+`<DATA_ROOT>/pgs2/ref_panel_stats/` is the older flat directory with
+EUR-only files. The new `<CACHE_ROOT>/ref_stats/<PGS>/<POP>_<BUILD>.json`
 structure supersedes it. The loader checks the new path first and
 falls back to legacy for EUR PGS that haven't been migrated. Reviewers
 should treat both as authoritative for the populations they cover, but

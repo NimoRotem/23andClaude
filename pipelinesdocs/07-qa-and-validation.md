@@ -70,7 +70,7 @@ panel rescore.
 A fixed 1000G EUR sample (default `HG00096`) is scored end-to-end
 through the production pipeline against every PGS with an EUR ref-stats
 file. Its expected percentile per PGS is recorded once (the golden
-file at `/data/pgs2/ref_panel_stats/batch_control_golden.json`).
+file at `<DATA_ROOT>/pgs2/ref_panel_stats/batch_control_golden.json`).
 
 ```
 # One-time per pipeline change

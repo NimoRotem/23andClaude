@@ -92,7 +92,7 @@ experience makes us hold the bifurcation tight.
 input. Smaller PGS on the same gVCF matched 100%.
 
 **Root cause**: the union-of-positions file at
-`/data/pgs_cache/_all_pgs_pca_positions_chr.tsv` was older than the
+`<CACHE_ROOT>/pgs_cache/_all_pgs_pca_positions_chr.tsv` was older than the
 newly-ingested PGS002753 scoring file, so PGS002753's positions
 weren't in the union. `bcftools convert --gvcf2vcf -T <union>`
 therefore expanded nothing at those positions.

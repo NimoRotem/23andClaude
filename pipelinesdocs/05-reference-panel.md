@@ -1,7 +1,7 @@
 # 05 — Reference Panel and Ancestry-Aware Reference Selection
 
 The pipeline's percentile estimates and ancestry assignments are all
-anchored to a single 1000 Genomes Phase 3 (GRCh38) panel. This document
+anchored to a single 1000G + NYGC high-coverage GRCh38 panel. This document
 covers what's in that panel, how the population subsets are defined,
 how the PCA reference is built, and how the runtime ancestry call feeds
 back into ref-stats lookup.
@@ -9,7 +9,7 @@ back into ref-stats lookup.
 ## 5.1 The panel files
 
 ```
-/data/pgs2/ref_panel/
+<DATA_ROOT>/pgs2/ref_panel/
 ├── GRCh38_1000G_ALL.pgen    # 3,202 unrelated 1000G samples, GRCh38, all chromosomes
 ├── GRCh38_1000G_ALL.pvar.zst (compressed)
 ├── GRCh38_1000G_ALL.psam    # sample metadata: super_pop, pop, sex
@@ -68,7 +68,7 @@ shown in the report UI's "compare to" dropdown.
 ## 5.3 PCA cache
 
 `runners._build_pca_reference_cache(cache_dir)` builds, once,
-`/data/pgs_cache/pca_1000g/`:
+`<CACHE_ROOT>/pgs_cache/pca_1000g/`:
 
 ```
 pca_1000g/

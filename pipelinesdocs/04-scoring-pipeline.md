@@ -142,7 +142,7 @@ reviewer can audit silent drop counts without re-running.
 ## 4.3 The pgen cache (`_get_or_build_pgen`)
 
 ```
-/data/pgen_cache/
+<DATA_ROOT>/pgen_cache/
   <key>/
     sample.pgen
     sample.pvar

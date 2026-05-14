@@ -1,0 +1,24 @@
+name: toolchain-pinning-check
+
+on:
+  pull_request:
+    paths:
+      - "TOOLCHAIN.md"
+      - "requirements.txt"
+      - "pyproject.toml"
+      - ".github/workflows/toolchain-check.yml"
+      - "scripts/check_toolchain.py"
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Toolchain pin parity check
+        run: |
+          python3 scripts/check_toolchain.py

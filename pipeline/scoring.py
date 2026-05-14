@@ -150,11 +150,33 @@ def _rs_validate(stats, pgs_id, population, genome_build, stats_file):
 
 @dataclass
 class RefSelection:
-    """Which reference population(s) to use for percentile computation."""
-    primary: str                    # e.g. "EUR", "MIX"
-    secondary: List[str] = field(default_factory=list)  # e.g. ["EAS", "SAS"]
-    reason: str = ""               # explanation of selection logic
-    ancestry_proportions: Dict = field(default_factory=dict)
+    """Which reference population(s) to use for percentile computation.
+
+    Phase 1.5 renamed `ancestry_proportions` → `pca_population_weights`
+    because the value the caller passes today comes from inverse-distance
+    PCA (NOT a true ADMIXTURE run). We keep the old name as a property so
+    existing JSON consumers don't break.
+    """
+    primary: str                    # "EUR" | "EAS" | … | "MULTI" | "UNRESOLVED" | "UNSUPPORTED"
+    secondary: List[str] = field(default_factory=list)
+    reason: str = ""
+    pca_population_weights: Dict = field(default_factory=dict)
+    # Legacy alias — read-only @property below. Setter keeps both fields in
+    # sync so callers that still pass `ancestry_proportions=` keep working.
+    @property
+    def ancestry_proportions(self) -> Dict:
+        return self.pca_population_weights
+
+    def __init__(self, primary: str, secondary: List[str] | None = None,
+                 reason: str = "", pca_population_weights: Dict | None = None,
+                 ancestry_proportions: Dict | None = None):
+        self.primary = primary
+        self.secondary = list(secondary or [])
+        self.reason = reason
+        # Accept the legacy kwarg as a synonym
+        self.pca_population_weights = dict(
+            pca_population_weights or ancestry_proportions or {}
+        )
 
 
 @dataclass
@@ -182,30 +204,46 @@ def select_reference(ancestry_result: Optional[Dict], pgs_id: str,
                      genome_build: str = "GRCh38") -> RefSelection:
     """Select the best reference population based on ancestry.
 
-    Rules:
-      - If single-cluster (>80% one pop) → use that pop, top 2 others as secondary
-      - If admixed (no pop >80%) → MIX primary, top 2 components as secondary
-      - If no ancestry data → EUR primary, MIX secondary (legacy behavior)
-      - If selected ref has no stats → still select it (caller handles null percentile)
+    Phase 1.5 rules (REMEDIATION_PLAN §1.5):
+      - Top-population posterior ≥ 0.80 → use that pop as primary.
+      - Top-population posterior < 0.80 → primary="MULTI"; the percentile
+        path emits `percentile_by_population: {EUR, EAS, AFR, SAS, AMR}`
+        AND a weighted-mixture percentile sourced from supervised global-
+        ancestry (when available) rather than inverse-distance PCA.
+      - No ancestry data → primary="UNRESOLVED"; the caller emits
+        `status="ancestry_unresolved"` and the multi-pop array; we do
+        NOT default to EUR anymore.
+      - Ancestries unsupported by 1000G (Middle Eastern, Pacific
+        Islander, etc.) signaled by `ancestry_result["unsupported"]=True`
+        → primary="UNSUPPORTED"; caller emits the multi-pop sensitivity
+        array with status="ancestry_unsupported".
+
+    The legacy fixed `MIX = 50%EUR + 50%EAS` default has been removed.
+    Renamed `admixture_proportions` → `pca_population_weights` everywhere
+    these come from inverse-distance PCA (which is what the upstream
+    function in runners.py produces today).
     """
+    POPS_5 = ["EUR", "EAS", "AFR", "SAS", "AMR"]
     if not ancestry_result:
         return RefSelection(
-            primary="EUR",
-            secondary=["MIX"],
-            reason="no_ancestry_data (default EUR)",
+            primary="UNRESOLVED",
+            secondary=POPS_5,
+            reason="no_ancestry_data — multi-pop array required, EUR default removed (§1.5)",
         )
 
-    # Extract proportions from ancestry result
-    # Format from runners.py _run_admixture_from_pca: {pop: proportion}
     proportions = {}
     if isinstance(ancestry_result, dict):
-        # Could be direct proportions dict or nested result
+        if ancestry_result.get("unsupported"):
+            return RefSelection(
+                primary="UNSUPPORTED",
+                secondary=POPS_5,
+                reason=ancestry_result.get("reason", "ancestry not represented in 1000G"),
+            )
         if "proportions" in ancestry_result:
             proportions = ancestry_result["proportions"]
         elif "admixture" in ancestry_result:
             proportions = ancestry_result["admixture"]
         else:
-            # Assume it IS the proportions dict if keys look like pop codes
             pop_codes = set(POPULATIONS.keys())
             if any(k in pop_codes for k in ancestry_result):
                 proportions = {k: v for k, v in ancestry_result.items()
@@ -213,18 +251,15 @@ def select_reference(ancestry_result: Optional[Dict], pgs_id: str,
 
     if not proportions:
         return RefSelection(
-            primary="EUR",
-            secondary=["MIX"],
-            reason="ancestry_data_unparseable (default EUR)",
+            primary="UNRESOLVED",
+            secondary=POPS_5,
+            reason="ancestry_data_unparseable — multi-pop array required (§1.5)",
             ancestry_proportions=proportions,
         )
 
-    # Sort populations by proportion (descending)
     sorted_pops = sorted(proportions.items(), key=lambda x: x[1], reverse=True)
     top_pop, top_prop = sorted_pops[0]
-
     if top_prop >= 0.80:
-        # Single-cluster: use top population
         secondaries = [p for p, _ in sorted_pops[1:3] if p != top_pop]
         return RefSelection(
             primary=top_pop,
@@ -232,15 +267,14 @@ def select_reference(ancestry_result: Optional[Dict], pgs_id: str,
             reason=f"single_cluster ({top_pop}={top_prop:.0%})",
             ancestry_proportions=proportions,
         )
-    else:
-        # Admixed: use MIX as primary
-        secondaries = [p for p, _ in sorted_pops[:2]]
-        return RefSelection(
-            primary="MIX",
-            secondary=secondaries,
-            reason=f"admixed (top={top_pop}={top_prop:.0%})",
-            ancestry_proportions=proportions,
-        )
+    # Posterior < 0.80 → emit multi-pop array; no fixed MIX.
+    return RefSelection(
+        primary="MULTI",
+        secondary=POPS_5,
+        reason=(f"admixed (top={top_pop}={top_prop:.0%} < 0.80) — emit "
+                f"percentile_by_population array; no fixed MIX (§1.5)"),
+        ancestry_proportions=proportions,
+    )
 
 
 def compute_percentile_multipop(pgs_id: str, raw_score: float,
@@ -338,7 +372,7 @@ def _compute_single_percentile(pgs_id: str, raw_score: float,
     details = {
         "method": None,
         "reference_population": f"{population} ({pop_label})",
-        "reference_panel": "1000 Genomes Phase 3 (GRCh38)",
+        "reference_panel": "1000G + NYGC high-coverage, GRCh38",
         "formula": "percentile = Φ((score - μ_ref) / σ_ref) × 100",
         "ref_mean": None,
         "ref_std": None,
