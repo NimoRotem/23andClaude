@@ -1636,6 +1636,8 @@ def _vcf_to_pgen(vcf_path, output_prefix, var_id_template="chr@:#",
         "--vcf-half-call", "m",
         "--threads", str(PLINK_BUILD_THREADS),
         "--memory", str(PLINK_MEMORY_MB),
+        # # ITEM_2_CHR_FILTER: autosomes + X/Y/PAR only (pgsc_calc recipe)
+        "--chr", "1-22,X,Y,XY",
     ]
     if output_chr:
         cmd1 += ["--output-chr", output_chr]
@@ -1707,7 +1709,7 @@ def _vcf_to_pgen(vcf_path, output_prefix, var_id_template="chr@:#",
 #       this, plink2 --score variance-standardize barfs on records like
 #       1:16949:A:C-style PCA panel hits whose second allele has zero
 #       reference frequency, breaking PCA on gVCF input.
-PGEN_CACHE_SCHEMA = "v5"
+PGEN_CACHE_SCHEMA = "v6"  # # ITEM_2_CHR_FILTER: --chr 1-22,X,Y,XY filter
 
 
 def _pgen_cache_key(vcf_path, var_id_template, output_chr):
@@ -3179,6 +3181,8 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
 
         cmd_pgen = [
             PLINK2, "--vcf", norm_vcf, "--make-pgen",
+            # # ITEM_2_CHR_FILTER: autosomes + X/Y/PAR only
+            "--chr", "1-22,X,Y,XY",
             "--allow-extra-chr", "--split-par", "b38",
             "--update-sex", sex_file, "--vcf-half-call", "m",
             "--set-all-var-ids", var_id_template,
@@ -4226,6 +4230,44 @@ def _compute_percentile_multipop_wrapper(pgs_id, raw_score, scoring_file=None,
                         "ref_std": d.get("ref_std"),
                     }
                 details["per_pop_percentiles"] = full_per_pop
+
+                # # ITEM_4_WIRE_PC_NORM: PC-normalized percentile (Item 4).
+                # When ancestry_result carries numeric PCs and the PGS has
+                # fit coefficients in /data/pgs2/ref_panel_stats/_pcnorm/,
+                # compute the continuous-ancestry-adjusted percentile and
+                # attach as augmentation. Discrete-bucket percentile remains
+                # the primary number until the rollout decision.
+                try:
+                    from pipeline.pc_normalization import (
+                        pc_adjusted_percentile, has_pc_norm)
+                    user_pcs = None
+                    if isinstance(ancestry_result, dict):
+                        user_pcs = ancestry_result.get("pc1_through_pc5")
+                        if not user_pcs:
+                            user_pcs = ancestry_result.get("pcs")
+                    if user_pcs and has_pc_norm(pgs_id):
+                        r_mv = pc_adjusted_percentile(pgs_id, raw_score or 0,
+                                                       user_pcs, method="mean+var")
+                        r_em = pc_adjusted_percentile(pgs_id, raw_score or 0,
+                                                       user_pcs, method="empirical")
+                        if r_mv:
+                            details["pc_normalized_percentile_mean_var"] = r_mv.get("percentile")
+                            details["pc_normalized_predicted_mean"]       = r_mv.get("predicted_mean")
+                            details["pc_normalized_residual"]              = r_mv.get("residual")
+                            details["pc_normalized_z_score"]               = r_mv.get("z_score")
+                            details["pc_normalized_n_panel"]               = r_mv.get("n_panel_samples")
+                            details["pc_normalized_method_used"]           = r_mv.get("method")
+                        if r_em:
+                            details["pc_normalized_percentile_empirical"] = r_em.get("percentile")
+                        details["pc_normalized_status"] = "ok"
+                    elif not has_pc_norm(pgs_id):
+                        details["pc_normalized_status"] = "no_coeffs"
+                    else:
+                        details["pc_normalized_status"] = "no_user_pcs"
+                except Exception as _pcnorm_exc:
+                    logger.debug(f"{pgs_id}: pc_normalized augmentation failed: {_pcnorm_exc}")
+                    details["pc_normalized_status"] = "error"
+
                 return result.primary_percentile, details
             return result.primary_percentile
         except Exception as e:

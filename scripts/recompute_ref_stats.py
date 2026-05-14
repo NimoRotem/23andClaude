@@ -194,6 +194,7 @@ def run_score(work, score_file, pop):
     out_prefix = os.path.join(work, f'{pop}_score')
     subprocess.run(
         [PLINK2, '--pfile', PANEL, 'vzs', '--keep', keep,
+         '--threads', os.environ.get('RECOMPUTE_PLINK_THREADS', '4'),
          '--score', score_file, 'header-read', '1', '2', '3',
          'cols=+scoresums', 'no-mean-imputation',
          '--out', out_prefix],
@@ -201,11 +202,17 @@ def run_score(work, score_file, pop):
     )
 
     rows = []
+    iids = []   # # ITEM_1_SAVE_PER_SAMPLE_NPY: parallel sample IDs
     with open(out_prefix + '.sscore') as f:
         h = f.readline().rstrip('\n').split('\t')
         a_i = h.index('WEIGHT_AVG')
         s_i = h.index('WEIGHT_SUM')
         c_i = h.index('ALLELE_CT')
+        # IID column — plink2 .sscore uses '#IID' or 'IID' depending on flags
+        try:
+            iid_i = h.index('#IID')
+        except ValueError:
+            iid_i = h.index('IID')
         for line in f:
             parts = line.rstrip('\n').split('\t')
             if not parts[0]:
@@ -213,7 +220,8 @@ def run_score(work, score_file, pop):
             rows.append({'avg': float(parts[a_i]),
                          'sum': float(parts[s_i]),
                          'ct':  int(parts[c_i])})
-    return rows
+            iids.append(parts[iid_i])
+    return rows, iids
 
 
 def find_cached(pgs_id, pop):
@@ -342,7 +350,7 @@ def recompute_one(pgs_id, pops, apply_changes, log_fh=sys.stdout):
     today = datetime.datetime.now().strftime('%Y%m%d')
     results = []
     for pop in pops:
-        score_rows = run_score(work, sf, pop)
+        score_rows, _iids = run_score(work, sf, pop)
         payload = build_stats_payload(pgs_id, pop, score_rows, n_in_score, var_sha,
                                       scoring_path, scoring_sha)
 
@@ -374,6 +382,27 @@ def recompute_one(pgs_id, pops, apply_changes, log_fh=sys.stdout):
             with open(new_path, 'w') as fh:
                 json.dump(payload, fh, indent=2)
             print(f'    wrote {new_name}', file=log_fh)
+
+            # # ITEM_1_SAVE_PER_SAMPLE_NPY: dump per-sample arrays for ECDF /
+            # matched-subset / PC-regression downstream use.
+            try:
+                import numpy as _np
+                scores_dir = os.path.join(STATS_DIR, '_scores', pgs_id)
+                os.makedirs(scores_dir, exist_ok=True)
+                arr = _np.empty(len(score_rows),
+                                dtype=[('avg', 'f8'), ('sum', 'f8'), ('ct', 'i4')])
+                for i, r in enumerate(score_rows):
+                    arr[i] = (r['avg'], r['sum'], r['ct'])
+                npy_path = os.path.join(scores_dir, f'{pop}_scores.npy')
+                _np.save(npy_path, arr)
+                ids_path = os.path.join(scores_dir, f'{pop}_sample_ids.txt')
+                with open(ids_path, 'w') as fh:
+                    for iid in _iids:
+                        fh.write(iid + '\n')
+                print(f'    wrote {pop}_scores.npy + sample_ids.txt '
+                      f'(n={len(_iids)})', file=log_fh)
+            except Exception as _exc:
+                print(f'    WARN: npy dump failed: {_exc}', file=log_fh)
 
         results.append({
             'pgs_id': pgs_id, 'pop': pop,
