@@ -183,6 +183,10 @@ def main():
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--n-pcs", type=int, default=DEFAULT_N_PCS)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--resume", action="store_true", default=True,
+                    help="Skip PGSes that already have coeffs.json. " + '# ITEM_4_FIT_RESUME')
+    ap.add_argument("--force", action="store_false", dest="resume",
+                    help="Re-fit even if coeffs.json exists.")
     args = ap.parse_args()
 
     print(f"loading panel PCs ({args.n_pcs} PCs)…")
@@ -203,6 +207,8 @@ def main():
     ok = 0
     failed: list[tuple[str, str]] = []
     for pgs in pgs_list:
+        if args.resume and os.path.exists(coeffs_path(pgs)):
+            continue
         try:
             res = fit_one(pgs, args.n_pcs, panel_pcs)
             ok += 1
