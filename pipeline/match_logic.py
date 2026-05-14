@@ -43,7 +43,13 @@ def parse_pgs_scoring_file(path: str) -> Tuple[Dict, List[ScoringVariant]]:
                     metadata[key.strip()] = val.strip()
                 continue
 
-            parts = line.strip().split('\t')
+            # IMPORTANT: rstrip newline only — line.strip() removes leading/trailing
+            # empty tab fields, which silently corrupts harmonized PGS files where rsID
+            # is empty (column shifts → hm_chr/hm_pos read from the wrong cell, row
+            # dropped). Fixed 2026-05-14 — see PGS000327 incident.
+            parts = line.rstrip('\n').rstrip('\r').split('\t')
+            if col_names is not None and len(parts) < len(col_names):
+                parts = parts + [''] * (len(col_names) - len(parts))
             if col_names is None:
                 col_names = parts
                 continue

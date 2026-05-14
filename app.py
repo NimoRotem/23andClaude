@@ -32,10 +32,10 @@ from threading import Thread, Lock, Semaphore
 from cryptography.fernet import Fernet
 
 from fastapi import FastAPI, File, UploadFile, Form, Request, HTTPException, Depends, Cookie
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse, RedirectResponse, Response
 import uvicorn
 
-from test_registry import TESTS, TESTS_BY_ID, CATEGORIES, CURATED_IDS
+from test_registry import TESTS, TESTS_BY_ID, CATEGORIES, CURATED_IDS, COMMON_PGS_IDS
 
 # ── Pipeline DB (multi-pop percentile) ──
 try:
@@ -47,6 +47,47 @@ try:
     pipeline_db.init_db()
 except ImportError:
     _PIPELINE_DB_AVAILABLE = False
+# === RESULT_GUARDS_IMPORT ===
+try:
+    from pipeline.result_guards import (
+        attach_provenance, check_interpretation_directional)
+except Exception:  # pragma: no cover
+    def attach_provenance(r): return r
+    def check_interpretation_directional(r): return r
+# === RESULT_GUARDS_IMPORT_END ===
+# === LIVE_PERCENTILE_IMPORT ===
+try:
+    from pipeline.live_percentile import apply_live_overlay as _apply_live_pctl
+except Exception:  # pragma: no cover
+    def _apply_live_pctl(r): return r
+# === LIVE_PERCENTILE_IMPORT_END ===
+# === LIVE_PERCENTILE_WARMUP ===
+# Warm the catalog-sha cache used by ref-stats validation. The first
+# /api/status after restart would otherwise stream through 6M-variant
+# gzip+sort+sha for every PGS in the user's report set, taking 30-60s and
+# racing the queue-worker (button reverts to ready before the queued task
+# appears in results). A background thread amortises that cost.
+def _warm_live_percentile_cache():
+    try:
+        from pipeline.scoring import _rs_variant_set_sha_from_catalog
+        from pipeline import registry as _live_reg
+        reg = _live_reg._load() or {}
+        seen = set()
+        for e in reg.get("entries", []):
+            pid = e.get("pgs_id")
+            if pid and pid not in seen:
+                seen.add(pid)
+                try:
+                    _rs_variant_set_sha_from_catalog(pid)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+import threading as _live_pctl_threading
+_live_pctl_threading.Thread(target=_warm_live_percentile_cache, daemon=True).start()
+# === LIVE_PERCENTILE_WARMUP_END ===
+
 from runners import (set_task_context, clear_task_context, cancel_task,
                      is_task_cancelled, _uncancel_task, TaskCancelled,
                      _tracked_procs, _tracked_procs_lock)
@@ -89,6 +130,13 @@ PGS_CATALOG_API = "https://www.pgscatalog.org/rest"
 PGS_ENRICHMENT_FILE = SG_DATA_ROOT / "pgs_enrichment.json"
 _pgs_enrichment_lock = Lock()
 _pgs_refresh_status = {}  # category -> {status, progress, total, errors}
+
+# ── Performance caches ────────────────────────────────────────────
+_sys_stats_cache = {"data": None, "ts": 0.0}       # TTL cache for system stats
+_ref_coverage_cache = {"data": None, "ts": 0.0}     # TTL cache for ref_stats dir scan
+_reports_cache = {}   # (username, file_id) -> (dir_mtime, reports_dict)
+_detected_ancestry_cache = {}  # (username, file_id) -> (mtime, result)
+
 
 def _load_pgs_enrichment() -> dict:
     """Load PGS enrichment data from JSON. Returns {pgs_id: {...metadata...}}."""
@@ -400,6 +448,35 @@ def _set_interp_model(username: str, model: str):
     settings = _load_user_settings(username)
     settings["interp_model"] = model
     _save_user_settings(username, settings)
+
+
+def _get_show_vcf(username: str) -> bool:
+    """User preference: surface VCF files in the UI and consider them for
+    auto-selection. Default OFF — VCF (called-variants only) misses any
+    PGS position where the sample is homozygous-reference, so PGS match
+    rates against VCFs are typically 40-60% lower than gVCF or BAM. The
+    toggle exists so power users can still inspect a VCF when needed.
+    """
+    settings = _load_user_settings(username)
+    return bool(settings.get("show_vcf", False))
+
+
+def _set_show_vcf(username: str, val: bool):
+    settings = _load_user_settings(username)
+    settings["show_vcf"] = bool(val)
+    _save_user_settings(username, settings)
+
+
+def _is_plain_vcf_path(path: str) -> bool:
+    """True iff this path is a plain VCF (not gVCF). gVCF filenames end
+    with .g.vcf[.gz] or .gvcf[.gz]; plain VCFs end with .vcf[.gz] or .bcf.
+    Mirrors the logic in runners._is_gvcf at the path-string level so we
+    don't need to shell out to bcftools just to filter the file list.
+    """
+    p = (path or "").lower()
+    if p.endswith((".g.vcf.gz", ".g.vcf", ".gvcf.gz", ".gvcf")):
+        return False
+    return p.endswith((".vcf.gz", ".vcf", ".bcf"))
 
 
 
@@ -1038,6 +1115,13 @@ def _select_best_file(username, profile_id, test_key, test_cfg=None, exclude_fil
     if not pref_order:
         pref_order = FILE_PREFERENCE_DEFAULT
 
+    # When the user has hidden VCF via the show_vcf toggle, drop plain
+    # VCFs from auto-selection so tests pick BAM or gVCF instead.
+    # Skipping inside the loop (not by removing from prof["file_ids"])
+    # keeps the profile's saved file_ids intact for when the toggle
+    # is flipped back on.
+    skip_vcf = not _get_show_vcf(username)
+
     # Build map of file_type -> [(file_id, file_path)]
     type_map = {}  # e.g. "gvcf" -> [(fid, path), ...]
     with ctx.lock:
@@ -1048,8 +1132,11 @@ def _select_best_file(username, profile_id, test_key, test_cfg=None, exclude_fil
             if not fentry:
                 continue
             ft = _normalize_file_type(fentry.get("path", ""))
-            if ft:
-                type_map.setdefault(ft, []).append((fid, fentry["path"]))
+            if not ft:
+                continue
+            if skip_vcf and ft == "vcf":
+                continue
+            type_map.setdefault(ft, []).append((fid, fentry["path"]))
 
     # Walk preference order
     for ft in pref_order:
@@ -1594,6 +1681,10 @@ def queue_worker(worker_id):
                 logger.info(f"[{task_id}] Waiting for {_core_cost} cores ({test_def['name']})")
                 _acquire_cores(_core_cost, task_id)
                 task_results[task_id]["status"] = "running"
+                # Clear the stale "Waiting for N cores..." headline. The first
+                # progress_cb from the runner overwrites this; without it, the
+                # UI keeps showing "Waiting" for the whole run.
+                task_results[task_id]["headline"] = "Starting..."
 
             logger.info(f"Running [{username}]: {test_def['name']} ({test_id})")
             start = time.time()
@@ -1682,6 +1773,14 @@ def queue_worker(worker_id):
                 "attempt": task.get("attempt", 1),
                 "selection_reason": task.get("selection_reason", ""),
             }
+
+            # === RESULT_GUARDS_APPLIED ===
+            try:
+                attach_provenance(report)
+                check_interpretation_directional(report)
+            except Exception as _guard_err:
+                logger.warning(f'result guards failed: {_guard_err!r}')
+
 
             # Persist genome build to file entry if detected
             detected_build = result.get("genome_build")
@@ -2055,11 +2154,12 @@ def _probe_file_metadata(path):
 
             meta['n_contigs'] = n_contigs
 
-            # Estimate coverage from idxstats (fast, uses index)
-            if meta.get('indexed'):
+            # Estimate coverage from idxstats (fast for BAM, skip for CRAM
+            # because CRAM idxstats needs the reference FASTA and can hang)
+            if meta.get('indexed') and not p_lower.endswith('.cram'):
                 try:
                     r2 = subprocess.run(['samtools', 'idxstats', str(path)],
-                                        capture_output=True, text=True, timeout=30)
+                                        capture_output=True, text=True, timeout=10)
                     if r2.returncode == 0:
                         total_mapped = 0
                         genome_len = 0
@@ -2080,18 +2180,19 @@ def _probe_file_metadata(path):
                 except Exception:
                     pass
 
-            # Detect read length from first few reads
-            try:
-                r3 = subprocess.run(
-                    f'samtools view "{path}" | head -3 | cut -f10 | awk \'{{print length($0)}}\'',
-                    shell=True, capture_output=True, text=True, timeout=15)
-                if r3.returncode == 0 and r3.stdout.strip():
-                    lengths = [int(x) for x in r3.stdout.strip().split('\n') if x.strip().isdigit()]
-                    if lengths:
-                        avg_len = sum(lengths) // len(lengths)
-                        meta['read_length'] = f'{avg_len}bp'
-            except Exception:
-                pass
+            # Detect read length from first few reads (skip CRAM — needs ref)
+            if not p_lower.endswith('.cram'):
+                try:
+                    r3 = subprocess.run(
+                        f'samtools view "{path}" | head -3 | cut -f10 | awk \'{{print length($0)}}\'',
+                        shell=True, capture_output=True, text=True, timeout=5)
+                    if r3.returncode == 0 and r3.stdout.strip():
+                        lengths = [int(x) for x in r3.stdout.strip().split('\n') if x.strip().isdigit()]
+                        if lengths:
+                            avg_len = sum(lengths) // len(lengths)
+                            meta['read_length'] = f'{avg_len}bp'
+                except Exception:
+                    pass
 
         else:
             # --- VCF/gVCF: parse header ---
@@ -2172,12 +2273,17 @@ def _detect_chr_naming_from_header(path):
 # ── API Routes ────────────────────────────────────────────────────
 
 @app.get("/api/files")
-async def list_files(username: str = Depends(current_user)):
+def list_files(username: str = Depends(current_user)):
     """List the calling user's registered files + their active file id."""
     ctx = get_user_state(username)
     with ctx.lock:
         files = list(ctx.files_state["files"].values())
         active_id = ctx.files_state.get("active_file_id")
+    # show_vcf toggle: hide plain VCFs by default. gVCF / BAM / CRAM
+    # always pass. If the active file was a VCF that's now hidden, the
+    # UI will reset to the first remaining file on next render.
+    if not _get_show_vcf(username):
+        files = [f for f in files if not _is_plain_vcf_path(f.get("path", ""))]
     # Enrich with live pgen status (in-memory builds may have completed)
     for f in files:
         fid = f["id"]
@@ -2247,7 +2353,7 @@ async def list_files(username: str = Depends(current_user)):
 # ── Profile API endpoints ─────────────────────────────────────────
 
 @app.get("/api/profiles")
-async def list_profiles(username: str = Depends(current_user)):
+def list_profiles(username: str = Depends(current_user)):
     """List profiles + ungrouped files. Triggers lazy migration on first call."""
     _migrate_to_profiles(username)
     _scan_converter_outputs(username)
@@ -2563,6 +2669,17 @@ def _get_detected_ancestry(username, file_id):
     or any sibling file with the same sample_name."""
     import json as _json
 
+    # mtime-based cache: ancestry results change very rarely
+    _cache_key = (username, file_id)
+    _reports_dir = user_reports_root(username) / file_id
+    try:
+        _dir_mtime = _reports_dir.stat().st_mtime if _reports_dir.exists() else 0.0
+    except OSError:
+        _dir_mtime = 0.0
+    _cached = _detected_ancestry_cache.get(_cache_key)
+    if _cached and _cached[0] == _dir_mtime:
+        return _cached[1]
+
     def _scan_reports(reports_dir):
         """Scan a reports dir for ancestry results."""
         if not reports_dir.exists():
@@ -2584,6 +2701,7 @@ def _get_detected_ancestry(username, file_id):
         # First: check this file's own reports
         hit = _scan_reports(user_reports_root(username) / file_id)
         if hit:
+            _detected_ancestry_cache[_cache_key] = (_dir_mtime, hit)
             return hit
 
         # Second: find sibling files with the same sample_name and check theirs
@@ -2602,14 +2720,16 @@ def _get_detected_ancestry(username, file_id):
         for sib_id in sibling_ids:
             hit = _scan_reports(user_reports_root(username) / sib_id)
             if hit:
+                _detected_ancestry_cache[_cache_key] = (_dir_mtime, hit)
                 return hit
     except Exception:
         pass
+    _detected_ancestry_cache[_cache_key] = (_dir_mtime, None)
     return None
 
 
 @app.get("/api/tests")
-async def get_tests(username: str = Depends(current_user)):
+def get_tests(username: str = Depends(current_user)):
     """Return the global test catalog + the calling user's active file."""
     # Inject this user's custom PGS into the global TESTS list (idempotent
     # — duplicates are ignored).
@@ -2625,34 +2745,43 @@ async def get_tests(username: str = Depends(current_user)):
             _ref_coverage = pipeline_db.get_stats_coverage()
         except Exception:
             pass
-    # Scan /data/ref_stats/ for per-population JSON files
+    # Scan /data/ref_stats/ for per-population JSON files (cached 30s)
     import os as _os
-    _ref_stats_dir = "/data/ref_stats"
-    if _os.path.isdir(_ref_stats_dir):
-        for _pgs_dir in _os.listdir(_ref_stats_dir):
-            if not _pgs_dir.startswith("PGS"):
-                continue
-            _pgs_path = _os.path.join(_ref_stats_dir, _pgs_dir)
-            if not _os.path.isdir(_pgs_path):
-                continue
-            _pops = []
-            for _sf in _os.listdir(_pgs_path):
-                if _sf.endswith("_GRCh38.json") and not _sf.startswith("."):
-                    _pop = _sf.replace("_GRCh38.json", "")
-                    _pops.append(_pop)
-            if _pops:
-                # Merge with any existing DB-sourced coverage
-                existing = set(_ref_coverage.get(_pgs_dir, []))
-                existing.update(_pops)
-                _ref_coverage[_pgs_dir] = sorted(existing)
-    # Also check legacy stats for EUR
-    _legacy_dir = "/data/pgs2/ref_panel_stats"
-    if _os.path.isdir(_legacy_dir):
-        for _fname in _os.listdir(_legacy_dir):
-            if _fname.endswith(".json") and _fname.startswith("PGS"):
-                _pid = _fname.split("_")[0]
-                if _pid not in _ref_coverage:
-                    _ref_coverage[_pid] = ["EUR"]
+    _now = time.time()
+    if _ref_coverage_cache["data"] is not None and (_now - _ref_coverage_cache["ts"]) < 30.0:
+        _disk_coverage = _ref_coverage_cache["data"]
+    else:
+        _disk_coverage = {}
+        _ref_stats_dir = "/data/ref_stats"
+        if _os.path.isdir(_ref_stats_dir):
+            for _pgs_dir in _os.listdir(_ref_stats_dir):
+                if not _pgs_dir.startswith("PGS"):
+                    continue
+                _pgs_path = _os.path.join(_ref_stats_dir, _pgs_dir)
+                if not _os.path.isdir(_pgs_path):
+                    continue
+                _pops = []
+                for _sf in _os.listdir(_pgs_path):
+                    if _sf.endswith("_GRCh38.json") and not _sf.startswith("."):
+                        _pop = _sf.replace("_GRCh38.json", "")
+                        _pops.append(_pop)
+                if _pops:
+                    _disk_coverage[_pgs_dir] = sorted(_pops)
+        # Also check legacy stats for EUR
+        _legacy_dir = "/data/pgs2/ref_panel_stats"
+        if _os.path.isdir(_legacy_dir):
+            for _fname in _os.listdir(_legacy_dir):
+                if _fname.endswith(".json") and _fname.startswith("PGS"):
+                    _pid = _fname.split("_")[0]
+                    if _pid not in _disk_coverage:
+                        _disk_coverage[_pid] = ["EUR"]
+        _ref_coverage_cache["data"] = _disk_coverage
+        _ref_coverage_cache["ts"] = _now
+    # Merge disk coverage into DB-sourced coverage
+    for _pgs_dir, _pops in _disk_coverage.items():
+        existing = set(_ref_coverage.get(_pgs_dir, []))
+        existing.update(_pops)
+        _ref_coverage[_pgs_dir] = sorted(existing)
 
     enriched_tests = []
     for t in TESTS:
@@ -2715,8 +2844,12 @@ TAB_DEFS = {
         "label": "Curated Short List",
         "categories": [],  # uses CURATED_IDS instead of categories
     },
+    "common": {
+        "label": "Common PGS",
+        "categories": [],  # uses COMMON_PGS_IDS instead of categories
+    },
 }
-TAB_ORDER = ["curated", "polygenic", "monogenic", "pharmacogenomics", "validations"]
+TAB_ORDER = ["curated", "common", "polygenic", "monogenic", "pharmacogenomics", "validations"]
 
 def _tab_for_category(cat):
     """Return tab key for a category name."""
@@ -2736,6 +2869,9 @@ def _tests_to_markdown(tab=None):
     for t in TESTS:
         if tab == "curated":
             if t["id"] not in CURATED_IDS:
+                continue
+        elif tab == "common":
+            if t["id"] not in COMMON_PGS_IDS:
                 continue
         elif tab and _tab_for_category(t["category"]) != tab:
             continue
@@ -2881,7 +3017,7 @@ def _reload_tests_from_parsed(new_tests, username=None):
 
 
 @app.get("/api/tests/tabs")
-async def get_tests_tabs(username: str = Depends(current_user)):
+def get_tests_tabs(username: str = Depends(current_user)):
     """Return tab definitions with test counts."""
     _eager_inject_custom_pgs_for_user(username)
     result = []
@@ -2889,6 +3025,8 @@ async def get_tests_tabs(username: str = Depends(current_user)):
         td = TAB_DEFS[tk]
         if tk == "curated":
             count = sum(1 for t in TESTS if t["id"] in CURATED_IDS)
+        elif tk == "common":
+            count = sum(1 for t in TESTS if t["id"] in COMMON_PGS_IDS)
         else:
             count = sum(1 for t in TESTS if _tab_for_category(t["category"]) == tk)
         result.append({"key": tk, "label": td["label"], "count": count})
@@ -2896,13 +3034,15 @@ async def get_tests_tabs(username: str = Depends(current_user)):
 
 
 @app.get("/api/tests/markdown")
-async def get_tests_markdown(tab: str = "", username: str = Depends(current_user)):
+def get_tests_markdown(tab: str = "", username: str = Depends(current_user)):
     """Return test registry as markdown, optionally filtered by tab."""
     _eager_inject_custom_pgs_for_user(username)
     t = tab if tab in TAB_DEFS else None
     md = _tests_to_markdown(tab=t)
     if t == "curated":
         count = sum(1 for tt in TESTS if tt["id"] in CURATED_IDS)
+    elif t == "common":
+        count = sum(1 for tt in TESTS if tt["id"] in COMMON_PGS_IDS)
     else:
         count = sum(1 for tt in TESTS if (not t or _tab_for_category(tt["category"]) == t)
                    )
@@ -2926,6 +3066,9 @@ async def put_tests_markdown(request: Request, tab: str = "", username: str = De
     if t == "curated":
         # Curated tab is read-only (tests belong to other tabs)
         return JSONResponse({"ok": False, "error": "Curated tab cannot be edited directly. Edit tests in their original tabs."}, status_code=400)
+    elif t == "common":
+        # Common PGS tab is read-only (tests belong to PGS - X categories)
+        return JSONResponse({"ok": False, "error": "Common PGS tab cannot be edited directly. Edit tests in their original PGS categories."}, status_code=400)
     elif t:
         kept = [tt for tt in TESTS if _tab_for_category(tt["category"]) != t
                ]
@@ -3105,6 +3248,8 @@ async def run_all_tests(file_id: str = "", profile_id: str = "",
     if tab and tab in TAB_DEFS:
         if tab == "curated":
             run_tests = [t for t in TESTS if t["id"] in CURATED_IDS]
+        elif tab == "common":
+            run_tests = [t for t in TESTS if t["id"] in COMMON_PGS_IDS]
         else:
             run_tests = [t for t in TESTS if _tab_for_category(t["category"]) == tab]
     else:
@@ -3125,10 +3270,19 @@ async def run_all_tests(file_id: str = "", profile_id: str = "",
 
 def _load_reports_for_file(username, file_id):
     """Scan a user's per-file reports dir and return {test_id: latest_summary_dict}."""
-    latest = {}
     d = user_reports_root(username) / file_id
     if not d.exists():
         return {}
+    # mtime-based cache: skip re-reading if directory hasn't changed
+    try:
+        dir_mtime = d.stat().st_mtime
+    except OSError:
+        dir_mtime = 0.0
+    cache_key = (username, file_id)
+    cached = _reports_cache.get(cache_key)
+    if cached and cached[0] == dir_mtime:
+        return cached[1]
+    latest = {}
     for p in d.glob("*.json"):
         try:
             with open(p) as f:
@@ -3141,6 +3295,7 @@ def _load_reports_for_file(username, file_id):
         completed = rep.get("completed_at", "")
         if test_id in latest and latest[test_id][0] > completed:
             continue
+        _apply_live_pctl(rep)
         result = rep.get("result") or {}
         latest[test_id] = (completed, {
             "task_id": rep.get("task_id"),
@@ -3157,6 +3312,8 @@ def _load_reports_for_file(username, file_id):
             "match_rate": result.get("match_rate"),
             "match_rate_value": result.get("match_rate_value"),
             "percentile": result.get("percentile"),
+            "percentile_at_scoring": result.get("percentile_at_scoring"),
+            "percentile_recomputed_on_read": result.get("percentile_recomputed_on_read", False),
             "no_report": result.get("no_report", False),
             # Profile/file-selection fields
             "file_type": rep.get("file_type", ""),
@@ -3164,7 +3321,9 @@ def _load_reports_for_file(username, file_id):
             "selection_reason": rep.get("selection_reason", ""),
             "retried_as": rep.get("retried_as", ""),
         })
-    return {tid: entry for tid, (_, entry) in latest.items()}
+    result = {tid: entry for tid, (_, entry) in latest.items()}
+    _reports_cache[cache_key] = (dir_mtime, result)
+    return result
 
 
 @app.get("/api/status")
@@ -3247,6 +3406,238 @@ def get_status(request: Request, username: str = Depends(current_user)):
     }
 
 
+
+# ── Bundled init endpoint ─────────────────────────────────────────
+# Returns tests + files + profiles + status in a single response so the
+# frontend doesn't need 4 sequential round-trips on page load.
+@app.get("/api/init")
+def bundled_init(request: Request, username: str = Depends(current_user)):
+    """Single endpoint that returns everything the frontend needs on load."""
+    import concurrent.futures
+
+    # Run the heavy functions in parallel threads to avoid sequential blocking
+    def _get_tests_data():
+        _eager_inject_custom_pgs_for_user(username)
+        active = _get_active_file(username)
+        enrichment = _load_pgs_enrichment()
+        _ref_coverage = {}
+        if _PIPELINE_DB_AVAILABLE:
+            try:
+                _ref_coverage = pipeline_db.get_stats_coverage()
+            except Exception:
+                pass
+        import os as _os
+        _now = time.time()
+        if _ref_coverage_cache["data"] is not None and (_now - _ref_coverage_cache["ts"]) < 30.0:
+            _disk_coverage = _ref_coverage_cache["data"]
+        else:
+            _disk_coverage = {}
+            _ref_stats_dir = "/data/ref_stats"
+            if _os.path.isdir(_ref_stats_dir):
+                for _pgs_dir in _os.listdir(_ref_stats_dir):
+                    if not _pgs_dir.startswith("PGS"):
+                        continue
+                    _pgs_path = _os.path.join(_ref_stats_dir, _pgs_dir)
+                    if not _os.path.isdir(_pgs_path):
+                        continue
+                    _pops = []
+                    for _sf in _os.listdir(_pgs_path):
+                        if _sf.endswith("_GRCh38.json") and not _sf.startswith("."):
+                            _pop = _sf.replace("_GRCh38.json", "")
+                            _pops.append(_pop)
+                    if _pops:
+                        _disk_coverage[_pgs_dir] = sorted(_pops)
+            _legacy_dir = "/data/pgs2/ref_panel_stats"
+            if _os.path.isdir(_legacy_dir):
+                for _fname in _os.listdir(_legacy_dir):
+                    if _fname.endswith(".json") and _fname.startswith("PGS"):
+                        _pid = _fname.split("_")[0]
+                        if _pid not in _disk_coverage:
+                            _disk_coverage[_pid] = ["EUR"]
+            _ref_coverage_cache["data"] = _disk_coverage
+            _ref_coverage_cache["ts"] = _now
+        for _pgs_dir, _pops in _disk_coverage.items():
+            existing = set(_ref_coverage.get(_pgs_dir, []))
+            existing.update(_pops)
+            _ref_coverage[_pgs_dir] = sorted(existing)
+
+        enriched_tests = []
+        for t in TESTS:
+            if t.get("test_type") == "pgs_score" and t.get("params", {}).get("pgs_id"):
+                pgs_id = t["params"]["pgs_id"]
+                t_copy = dict(t)
+                e = enrichment.get(pgs_id)
+                if e:
+                    t_copy["enrichment"] = e
+                t_copy["available_refs"] = _ref_coverage.get(pgs_id, [])
+                enriched_tests.append(t_copy)
+                continue
+            enriched_tests.append(t)
+        _detected_ancestry = None
+        if active:
+            _detected_ancestry = _get_detected_ancestry(username, active["id"])
+        return {
+            "categories": CATEGORIES,
+            "tests": enriched_tests,
+            "active_file": active,
+            "detected_ancestry": _detected_ancestry,
+            "active_vcf": active["path"] if active else None,
+        }
+
+    def _get_files_data():
+        ctx = get_user_state(username)
+        with ctx.lock:
+            files_list = list(ctx.files_state["files"].values())
+            active_id = ctx.files_state.get("active_file_id")
+        for f in files_list:
+            fid = f["id"]
+            mem_status = _pgen_build_status.get(fid)
+            if mem_status == "building":
+                disk_status = _check_pgen_ready(f["path"])
+                if disk_status == "ready":
+                    _pgen_build_status[fid] = "ready"
+                    f["pgen_status"] = "ready"
+                else:
+                    f["pgen_status"] = "building"
+            elif mem_status:
+                f["pgen_status"] = mem_status
+            elif f.get("pgen_status") not in ("ready", "not_needed"):
+                f["pgen_status"] = _check_pgen_ready(f["path"])
+        needs_save = False
+        for f in files_list:
+            path = f.get("path", "")
+            p_lower = path.lower()
+            if p_lower.endswith(('.g.vcf.gz', '.gvcf.gz', '.gvcf')):
+                f["file_type"] = "gVCF"
+            elif p_lower.endswith(('.vcf.gz', '.vcf', '.bcf')):
+                f["file_type"] = "VCF"
+            elif p_lower.endswith('.bam'):
+                f["file_type"] = "BAM"
+            elif p_lower.endswith('.cram'):
+                f["file_type"] = "CRAM"
+            else:
+                f["file_type"] = ""
+            if os.path.exists(path):
+                meta = _probe_file_metadata(path)
+                meta_fields = [
+                    "genome_build", "chr_naming", "sample_name", "platform",
+                    "aligner", "variant_caller", "indexed", "variant_count",
+                    "est_coverage", "total_reads", "read_length", "n_contigs",
+                    "center", "library", "n_samples",
+                ]
+                for key in meta_fields:
+                    if meta.get(key) and not f.get(key):
+                        f[key] = meta[key]
+                        if key in ("genome_build", "chr_naming", "sample_name", "platform",
+                                   "aligner", "variant_caller", "est_coverage", "read_length"):
+                            with ctx.lock:
+                                fentry = ctx.files_state["files"].get(f["id"])
+                                if fentry and not fentry.get(key):
+                                    fentry[key] = meta[key]
+                                    needs_save = True
+            for key in ("genome_build", "chr_naming"):
+                if key not in f:
+                    f[key] = ""
+        if needs_save:
+            with ctx.lock:
+                ctx.save_files()
+        files_list.sort(key=lambda f: f.get("added_at", ""), reverse=True)
+        return {"files": files_list, "active_file_id": active_id}
+
+    def _get_profiles_data():
+        _migrate_to_profiles(username)
+        _scan_converter_outputs(username)
+        data = _load_profiles(username)
+        ctx = get_user_state(username)
+        profiles_out = []
+        with ctx.lock:
+            all_files = dict(ctx.files_state["files"])
+        for prof_id, prof in data["profiles"].items():
+            file_details = []
+            for fid in prof["file_ids"]:
+                fentry = all_files.get(fid)
+                if fentry:
+                    file_details.append({
+                        "id": fid,
+                        "name": fentry.get("name", ""),
+                        "path": fentry.get("path", ""),
+                        "file_type": _normalize_file_type(fentry.get("path", "")),
+                        "size": fentry.get("size", 0),
+                        "genome_build": fentry.get("genome_build", ""),
+                        "sample_name": fentry.get("sample_name", ""),
+                    })
+            profiles_out.append({
+                **prof,
+                "file_details": file_details,
+                "file_count": len(file_details),
+            })
+        ungrouped_details = []
+        for fid in data.get("ungrouped_files", []):
+            fentry = all_files.get(fid)
+            if fentry:
+                ungrouped_details.append({
+                    "id": fid,
+                    "name": fentry.get("name", ""),
+                    "path": fentry.get("path", ""),
+                    "file_type": _normalize_file_type(fentry.get("path", "")),
+                    "size": fentry.get("size", 0),
+                })
+        return {
+            "profiles": profiles_out,
+            "ungrouped_files": ungrouped_details,
+        }
+
+    def _get_status_data():
+        user_lc = _norm_username(username)
+        active = _get_active_file(username)
+        active_id = active["id"] if active else None
+        with queue_lock:
+            queued = [
+                {"id": t["id"], "test_id": t["test_id"], "file_id": t.get("file_id")}
+                for t in task_queue
+                if t.get("username") == user_lc and t.get("file_id") == active_id
+            ]
+        results = {}
+        if active_id:
+            latest_per_test = _load_reports_for_file(username, active_id)
+            for entry in latest_per_test.values():
+                results[entry["task_id"]] = entry
+        for task_id, res in task_results.items():
+            if res.get("username") == user_lc and res.get("file_id") == active_id:
+                results[task_id] = res
+        with queue_lock:
+            running_snapshot = [
+                tid for tid in running_tasks
+                if task_results.get(tid, {}).get("username") == user_lc
+            ]
+        _det_anc = _get_detected_ancestry(username, active_id) if active_id else None
+        return {
+            "active_file": active,
+            "active_vcf": active["path"] if active else None,
+            "queue_length": len(queued),
+            "queued_tasks": queued,
+            "running_count": len(running_snapshot),
+            "running_tasks": running_snapshot,
+            "current_task": running_snapshot[0] if running_snapshot else None,
+            "results": results,
+            "detected_ancestry": _det_anc,
+        }
+
+    # Run all four data-gathering functions in parallel threads
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        f_tests = executor.submit(_get_tests_data)
+        f_files = executor.submit(_get_files_data)
+        f_profiles = executor.submit(_get_profiles_data)
+        f_status = executor.submit(_get_status_data)
+
+    return {
+        "tests_data": f_tests.result(),
+        "files_data": f_files.result(),
+        "profiles_data": f_profiles.result(),
+        "status_data": f_status.result(),
+    }
+
+
 @app.get("/api/report/{task_id}")
 async def get_report(task_id: str, username: str = Depends(current_user)):
     """Get a completed report. Looks under the calling user's reports root."""
@@ -3256,11 +3647,11 @@ async def get_report(task_id: str, username: str = Depends(current_user)):
             candidate = d / f"{task_id}.json"
             if candidate.exists():
                 with open(candidate) as f:
-                    return json.load(f)
+                    return _apply_live_pctl(json.load(f))
     legacy = user_root / f"{task_id}.json"
     if legacy.exists():
         with open(legacy) as f:
-            return json.load(f)
+            return _apply_live_pctl(json.load(f))
 
     if task_id in task_results:
         return task_results[task_id]
@@ -3286,10 +3677,21 @@ async def download_report(task_id: str, username: str = Depends(current_user)):
     path = _find_report_file(username, task_id)
     if path is None:
         return JSONResponse({"error": "Report not found"}, status_code=404)
-    return FileResponse(
-        str(path),
-        filename=f"{task_id}.json",
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except Exception:
+        return FileResponse(
+            str(path),
+            filename=f"{task_id}.json",
+            media_type="application/json",
+        )
+    _apply_live_pctl(data)
+    body = json.dumps(data, indent=2, default=str).encode()
+    return Response(
+        content=body,
         media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{task_id}.json"'},
     )
 
 
@@ -3409,6 +3811,7 @@ def _collect_all_reports(username, file_ids=None):
                 data = json.loads(p.read_text())
             except Exception:
                 continue
+            _apply_live_pctl(data)
             result = data.get("result") or {}
             # Skip failed tests and ones with no report
             if result.get("no_report"):
@@ -3844,7 +4247,13 @@ def _gather_system_stats():
 
 @app.get("/api/system/stats")
 def system_stats():
-    return _gather_system_stats()
+    now = time.time()
+    if _sys_stats_cache["data"] is not None and (now - _sys_stats_cache["ts"]) < 5.0:
+        return _sys_stats_cache["data"]
+    result = _gather_system_stats()
+    _sys_stats_cache["data"] = result
+    _sys_stats_cache["ts"] = now
+    return result
 
 
 @app.post("/api/clear-queue")
@@ -4524,6 +4933,7 @@ async def get_settings(request: Request):
     claude_key = _get_provider_key(username, "claude") or _get_user_api_key(username)
     return {
         "interp_model": settings.get("interp_model", "gemini"),
+        "show_vcf": bool(settings.get("show_vcf", False)),
         "keys": {
             "openai": {
                 "has_key": openai_key is not None,
@@ -4537,6 +4947,18 @@ async def get_settings(request: Request):
         },
         "system": _gather_system_stats(),
     }
+
+
+@app.post("/api/settings/show-vcf")
+async def set_show_vcf_endpoint(request: Request):
+    sid = request.cookies.get(SESSION_COOKIE)
+    username = _resolve_session(sid)
+    if not username:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    data = await request.json()
+    val = bool(data.get("show_vcf"))
+    _set_show_vcf(username, val)
+    return {"ok": True, "show_vcf": val}
 
 @app.post("/api/settings/interp-model")
 async def set_interp_model_endpoint(request: Request):
@@ -6334,6 +6756,9 @@ input[type="file"] { display: none; }
   letter-spacing: 0.06em;
 }
 .subcategory:first-child .subcategory-header { border-top: none; }
+/* Common PGS tab renders one flat list (no per-category collapse). */
+.common-pgs-flat { border-top: 1px solid var(--border); }
+.common-pgs-flat .subcategory:first-child .subcategory-header { border-top: none; }
 .subcategory-header .sub-name { color: var(--accent2); }
 .subcategory-header .sub-count {
   font-size: 0.7rem;
@@ -8313,6 +8738,17 @@ input[type="file"] { display: none; }
         <div class="settings-model-note" id="settingsModelNote"></div>
       </div>
 
+      <!-- File visibility -->
+      <div class="settings-section">
+        <h3>Show VCF files</h3>
+        <p class="settings-desc">Plain VCFs only contain called variants — any PGS position where the sample is homozygous-reference is missing, which lowers PGS match rate by 40-60% vs. gVCF or BAM. Off by default; gVCF and BAM are used instead.</p>
+        <label class="settings-toggle-row" style="display:flex;align-items:center;gap:0.6em;">
+          <input type="checkbox" id="settingsShowVcf" onchange="saveShowVcf(this.checked)">
+          <span>Show VCF files in profiles and tests</span>
+        </label>
+        <div class="settings-model-note" id="settingsShowVcfNote"></div>
+      </div>
+
       <!-- OpenAI Key -->
       <div class="settings-section">
         <h3>OpenAI API Key</h3>
@@ -8431,6 +8867,58 @@ let categories = [];
 let testStatus = {};  // test_id -> { status, headline, error }
 let taskMap = {};     // test_id -> task_id (latest for the active file)
 
+// ── Common PGS IDs (Common PGS tab membership) ───────────────────
+// 23 PGS across 8 conditions, verified against the PGS Catalog REST API.
+// Mirrors COMMON_PGS_IDS in test_registry.py — keep both in sync.
+const COMMON_PGS_IDS = new Set([
+  // Alzheimer's disease (3)
+  'pgs_alzheimers_2280', 'pgs_alzheimers_2753', 'pgs_alzheimers_898',
+  // Bipolar disorder (3)
+  'pgs_bipolar_2786', 'pgs_bipolar_2787', 'pgs_bipolar_2788',
+  // Breast cancer (3)
+  'pgs_breast_004', 'pgs_breast_7', 'pgs_breast_15',
+  // Body mass index (3)
+  'pgs_bmi_5199', 'pgs_bmi_027', 'pgs_bmi_34',
+  // Coronary artery disease (3)
+  'pgs_cad_3725', 'pgs_coronary_18', 'pgs_coronary_296',
+  // Inflammatory bowel disease (3)
+  'pgs_ibd_4151', 'pgs_ibd_17', 'pgs_psoriasis_1288',
+  // Schizophrenia (3)
+  'pgs_schiz_2785', 'pgs_schiz_136', 'pgs_schiz_135',
+  // Type 2 diabetes (3)
+  'pgs_t2d_2771', 'pgs_type_3867', 'pgs_t2d_3443',
+  // Prostate cancer dropped 2026-05-14 — not in the curated 9-section layout.
+  // Atrial fibrillation (5 — methodological benchmarking set)
+  'pgs_atrial_5313', 'pgs_atrial_5168', 'pgs_atrial_2814',
+  'pgs_atrial_5072', 'pgs_afib_016',
+]);
+
+// ── Common PGS section order + titles ─────────────────────────────
+// Authoritative ordering and section headings for the Common PGS tab.
+// Renderer walks this list in order; any test in COMMON_PGS_IDS that
+// is not listed under one of these sections is hidden from the tab.
+const COMMON_PGS_SECTIONS = [
+  { title: "Alzheimer's Disease",
+    ids: ['pgs_alzheimers_2280', 'pgs_alzheimers_2753', 'pgs_alzheimers_898'] },
+  { title: 'Atrial Fibrillation',
+    ids: ['pgs_atrial_5313', 'pgs_atrial_5168', 'pgs_atrial_2814',
+          'pgs_atrial_5072', 'pgs_afib_016'] },
+  { title: 'Bipolar Disorder',
+    ids: ['pgs_bipolar_2786', 'pgs_bipolar_2787', 'pgs_bipolar_2788'] },
+  { title: 'Breast Cancer',
+    ids: ['pgs_breast_004', 'pgs_breast_7', 'pgs_breast_15'] },
+  { title: 'Class III Obesity',
+    ids: ['pgs_bmi_5199', 'pgs_bmi_027', 'pgs_bmi_34'] },
+  { title: 'Coronary Artery Disease',
+    ids: ['pgs_cad_3725', 'pgs_coronary_18', 'pgs_coronary_296'] },
+  { title: 'Inflammatory Bowel Disease',
+    ids: ['pgs_ibd_4151', 'pgs_ibd_17', 'pgs_psoriasis_1288'] },
+  { title: 'Schizophrenia',
+    ids: ['pgs_schiz_2785', 'pgs_schiz_136', 'pgs_schiz_135'] },
+  { title: 'Type 2 Diabetes',
+    ids: ['pgs_t2d_2771', 'pgs_type_3867', 'pgs_t2d_3443'] },
+];
+
 // ── Curated Short List IDs ────────────────────────────────────────
 const CURATED_IDS = new Set([
   // Cancer
@@ -8463,9 +8951,10 @@ const CURATED_IDS = new Set([
   'sex_xy_ratio', 'ancestry_pca',
 ]);
 
-// Helper: get tests for a given tab key, respecting curated
+// Helper: get tests for a given tab key, respecting curated/common
 function testsForTab(tk, testList) {
   if (tk === 'curated') return testList.filter(t => CURATED_IDS.has(t.id));
+  if (tk === 'common')  return testList.filter(t => COMMON_PGS_IDS.has(t.id));
   return testList.filter(t => tabForCategory(t.category) === tk);
 }
 
@@ -8481,8 +8970,9 @@ const TAB_DEFS = {
     'Fun Traits', 'Nutrigenomics', 'Sports & Fitness', 'Sleep & Circadian'] },
   pharmacogenomics: { label: 'Pharmacogenomics', categories: ['Pharmacogenomics'] },
   curated: { label: 'Curated Short List', categories: [] },
+  common:  { label: 'Common PGS', categories: [] },
 };
-const TAB_ORDER = ['curated', 'polygenic', 'monogenic', 'pharmacogenomics', 'validations'];
+const TAB_ORDER = ['curated', 'common', 'polygenic', 'monogenic', 'pharmacogenomics', 'validations'];
 let activeTab = 'curated';
 
 function tabForCategory(cat) {
@@ -8726,12 +9216,146 @@ function formatSize(n) {
   return n.toFixed(n < 10 && i > 0 ? 1 : 0) + ' ' + units[i];
 }
 
+// Helper: apply profiles data from bundled init or loadProfiles response
+function _applyProfilesData(pdata) {
+  profiles = pdata.profiles || [];
+  ungroupedFiles = pdata.ungrouped_files || [];
+  // Auto-select first profile if none active
+  if (!activeProfileId && profiles.length > 0) {
+    const prof = profiles[0];
+    activeProfileId = prof.id;
+    if (prof.file_details && prof.file_details.length) {
+      activeFileId = prof.file_details[0].id;
+      fetch(BASE + `/api/files/${activeFileId}/select`, { method: 'POST' }).catch(() => {});
+    }
+    testStatus = {};
+    testMultiStatus = {};
+    taskMap = {};
+  }
+  renderProfileSelect();
+  renderTests();
+  if (currentView() === 'data') renderDataFiles();
+}
+
+// Helper: apply status data from bundled init (same logic as pollStatus)
+function _applyStatusData(data) {
+  if (data.detected_ancestry !== undefined) {
+    window._detectedAncestry = data.detected_ancestry || null;
+  }
+  const running = data.running_count != null
+    ? data.running_count
+    : (data.current_task ? 1 : 0);
+  _lastQueueChip.queue_length = data.queue_length || 0;
+  _lastQueueChip.running_count = running;
+  _lastQueueChip.has_data = true;
+  paintQueueChip();
+
+  const results = data.results || {};
+  const allPerTest = {};
+  for (const [taskId, res] of Object.entries(results)) {
+    const testId = res.test_id;
+    if (!testId) continue;
+    const completed = res.completed_at || res.queued_at || res.started_at || '';
+    if (!allPerTest[testId]) allPerTest[testId] = [];
+    allPerTest[testId].push({ taskId, res, completed });
+  }
+  for (const testId of Object.keys(allPerTest)) {
+    allPerTest[testId].sort((a, b) => (b.completed || '').localeCompare(a.completed || ''));
+  }
+  for (const testId of Object.keys(allPerTest)) {
+    const seen_files = new Set();
+    allPerTest[testId] = allPerTest[testId].filter(entry => {
+      const fid = entry.res.file_id || '';
+      if (!fid || !seen_files.has(fid)) { seen_files.add(fid); return true; }
+      return false;
+    });
+  }
+
+  function _toInfo(res) {
+    return {
+      status: res.status,
+      headline: res.headline || (res.status === 'running' ? 'running\u2026' :
+                                 res.status === 'queued' ? 'queued' : ''),
+      error: res.error,
+      match_rate: res.match_rate,
+      match_rate_value: res.match_rate_value,
+      percentile: res.percentile,
+      no_report: res.no_report === true,
+      file_type: res.file_type || '',
+      file_id: res.file_id || '',
+      task_id: res.task_id || '',
+      retried_as: res.retried_as || '',
+      selection_reason: res.selection_reason || '',
+    };
+  }
+
+  const seen = new Set();
+  for (const [testId, entries] of Object.entries(allPerTest)) {
+    seen.add(testId);
+    const primary = entries[0];
+    const newInfo = _toInfo(primary.res);
+    newInfo.task_id = primary.taskId;
+    taskMap[testId] = primary.taskId;
+    const multiArr = entries.map(e => {
+      const info = _toInfo(e.res);
+      info.task_id = e.taskId;
+      return info;
+    });
+    testStatus[testId] = newInfo;
+    testMultiStatus[testId] = multiArr;
+    updateRow(testId);
+  }
+  for (const testId of Object.keys(testStatus)) {
+    if (!seen.has(testId)) {
+      delete testStatus[testId];
+      delete testMultiStatus[testId];
+      delete taskMap[testId];
+      updateRow(testId);
+    }
+  }
+}
+
 async function init() {
+  // Bundled init: fetch tests + files + profiles + status in a single call
+  try {
+    const resp = await fetch(BASE + '/api/init');
+    if (resp.ok) {
+      const bundle = await resp.json();
+
+      // Tests
+      const tdata = bundle.tests_data;
+      tests = tdata.tests;
+      categories = tdata.categories;
+      window._detectedAncestry = tdata.detected_ancestry || null;
+      renderTabs();
+      renderFilters();
+      renderTests();
+
+      // Files
+      const fdata = bundle.files_data;
+      files = fdata.files || [];
+      activeFileId = fdata.active_file_id;
+      renderFileSelect();
+      updateVcfBadge();
+
+      // Profiles
+      const pdata = bundle.profiles_data;
+      _applyProfilesData(pdata);
+
+      // Status (reuse pollStatus logic)
+      _applyStatusData(bundle.status_data);
+
+      pollStatus();
+      return;
+    }
+  } catch (e) {
+    console.warn('Bundled init failed, falling back to sequential:', e);
+  }
+  // Fallback: sequential init (for backwards compatibility)
   const resp = await fetch(BASE + '/api/tests');
   const data = await resp.json();
   tests = data.tests;
   categories = data.categories;
-  // If ancestry has been detected for this file, use it as default ref population
   window._detectedAncestry = data.detected_ancestry || null;
   renderTabs();
   renderFilters();
@@ -9419,8 +10043,39 @@ function renderTests() {
   document.querySelectorAll('.tests-body.open').forEach(b => wasOpen.add(b.dataset.cat));
   container.innerHTML = '';
 
-  let tabCats;
   const filteredTests = applyFilter(tests);
+
+  // Common PGS: explicit curated section order + titles defined in
+  // COMMON_PGS_SECTIONS. Sections render in array order (not alphabetical);
+  // tests in COMMON_PGS_IDS that don't appear in any section's `ids` list
+  // are hidden from this tab (still visible under Polygenic Scores).
+  if (activeTab === 'common') {
+    const commonTests = filteredTests.filter(t =>
+      COMMON_PGS_IDS.has(t.id) &&
+      (search === '' || t.name.toLowerCase().includes(search) ||
+       t.description.toLowerCase().includes(search)));
+    const byId = {};
+    for (const t of commonTests) byId[t.id] = t;
+    const flat = document.createElement('div');
+    flat.className = 'category common-pgs-flat';
+    flat.innerHTML = COMMON_PGS_SECTIONS.map(sec => {
+      const secTests = sec.ids.map(id => byId[id]).filter(Boolean);
+      if (secTests.length === 0) return '';
+      return `
+        <div class="subcategory">
+          <div class="subcategory-header">
+            <span class="sub-name">${escapeHtml(sec.title)}</span>
+            <span class="sub-count">${secTests.length}</span>
+          </div>
+          ${secTests.map(t => renderTestRow(t)).join('')}
+        </div>
+      `;
+    }).join('');
+    container.appendChild(flat);
+    return;
+  }
+
+  let tabCats;
   if (activeTab === 'curated') {
     // For curated tab, get categories of curated tests that pass the filter
     const curatedFiltered = filteredTests.filter(t => CURATED_IDS.has(t.id));
@@ -12156,6 +12811,10 @@ async function enrichAllPgs() {
     const sel = document.getElementById('settingsInterpModel');
     if (sel) sel.value = data.interp_model || 'gemini';
 
+    // ── Show VCF toggle ──
+    const showVcfCb = document.getElementById('settingsShowVcf');
+    if (showVcfCb) showVcfCb.checked = !!data.show_vcf;
+
     // ── Key status ──
     for (const provider of ['openai', 'claude']) {
       const info = (data.keys || {})[provider] || {};
@@ -12322,6 +12981,25 @@ async function saveInterpModel(model) {
     });
   } catch (e) {
     console.error('Failed to save model:', e);
+  }
+}
+
+async function saveShowVcf(show_vcf) {
+  const note = document.getElementById('settingsShowVcfNote');
+  try {
+    await fetch(BASE + '/api/settings/show-vcf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ show_vcf }),
+    });
+    if (note) {
+      note.textContent = show_vcf
+        ? 'VCF files will now appear in profiles and tests. Reload to refresh.'
+        : 'VCF files hidden. Profiles and tests will use gVCF / BAM only. Reload to refresh.';
+    }
+  } catch (e) {
+    console.error('Failed to save show_vcf:', e);
+    if (note) note.textContent = 'Failed to save — try again.';
   }
 }
 
@@ -12528,5 +13206,849 @@ setTimeout(function() {
 
 
 # ── Main ──────────────────────────────────────────────────────────
+
+# === COMPARE_PAGE_BLOCK_START — auto-inserted ===
+# ── Sample comparison page (auto-aggregates all PGS reports for the
+#    calling user, groups by trait, ranks samples, filters low quality). ──
+import statistics as _cmp_stats
+import time as _cmp_time
+from collections import defaultdict as _cmp_defaultdict
+
+# Cache up to a few filter combinations per user so toggling presets is cheap.
+_COMPARE_CACHE = {}            # key: (user, min_match, max_abs_z, high_conf) -> {ts, data}
+_COMPARE_TTL_S = 15.0
+_COMPARE_DEFAULT_MIN_MATCH = 90.0
+_COMPARE_DEFAULT_MAX_ABS_Z = 5.0
+
+
+def _compare_extract_z(res):
+    sd = res.get("scoring_diagnostics") or {}
+    z = sd.get("z_score")
+    if z is None:
+        z = ((res.get("pipeline_info") or {}).get("percentile_details") or {}).get("z_score")
+    if z is None:
+        z = (res.get("percentile_details") or {}).get("z_score")
+    try:
+        return float(z) if z is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _compare_extract_pct(res):
+    p = res.get("percentile")
+    try:
+        return float(p) if p is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _compare_extract_ancestry(res):
+    cand = res.get("selected_ref")
+    if not cand:
+        cand = (res.get("pipeline_info") or {}).get("reference_population") or ""
+    if not cand:
+        return "EUR"
+    s = str(cand).upper()
+    for tag in ("EUR", "EAS", "AFR", "AMR", "SAS", "MIX"):
+        if tag in s:
+            return tag
+    return s.split()[0][:6]
+
+
+def _compare_risk_labels(n):
+    if n <= 1:
+        return ["—"]
+    if n == 2:
+        return ["Lowest", "Highest"]
+    if n == 3:
+        return ["Lowest", "Average", "Highest"]
+    if n == 4:
+        return ["Lowest", "Below Avg", "Above Avg", "Highest"]
+    if n == 5:
+        return ["Lowest", "Below Avg", "Average", "Above Avg", "Highest"]
+    if n == 6:
+        return ["Lowest", "Below Avg", "Average", "Above Avg", "High", "Highest"]
+    return (["Lowest", "Below Avg"]
+            + ["Average"] * (n - 5)
+            + ["Above Avg", "High", "Highest"])
+
+
+def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
+    udir = user_dir(username)
+    files_data = {}
+    fpath = udir / "files.json"
+    if fpath.exists():
+        try:
+            files_data = (json.load(open(fpath)) or {}).get("files", {}) or {}
+        except Exception:
+            files_data = {}
+
+    def _sample_name(fid):
+        f = files_data.get(fid) or {}
+        return (f.get("sample_name")
+                or (f.get("name", "").split(".")[0])
+                or fid[:8])
+
+    def _file_label(fid):
+        f = files_data.get(fid) or {}
+        return f.get("name") or f.get("file_type") or fid[:8]
+
+    reports_root = udir / "reports"
+    if not reports_root.exists():
+        return [], {}
+
+    by_trait = _cmp_defaultdict(lambda: _cmp_defaultdict(list))
+    trait_meta = {}
+    all_categories = set()
+    all_samples = set()
+
+    for fid_dir in reports_root.iterdir():
+        if not fid_dir.is_dir():
+            continue
+        fid = fid_dir.name
+        sample = _sample_name(fid)
+        for jf in fid_dir.glob("pgs_*.json"):
+            if jf.suffix != ".json":
+                continue
+            try:
+                rep = json.load(open(jf))
+            except Exception:
+                continue
+            _apply_live_pctl(rep)
+            res = rep.get("result") or {}
+            status = (res.get("status") or rep.get("status") or "passed").lower()
+            if status not in ("passed", "ok", "success", "completed", ""):
+                continue
+            mr = res.get("match_rate_value")
+            try:
+                mr = float(mr) if mr is not None else None
+            except (TypeError, ValueError):
+                mr = None
+            if mr is None or mr < min_match:
+                continue
+            confidence = (res.get("confidence") or "unknown").lower()
+            if high_conf_only and confidence != "high":
+                continue
+            z = _compare_extract_z(res)
+            pct = _compare_extract_pct(res)
+            if z is None and pct is None:
+                continue
+            if z is not None and abs(z) > max_abs_z:
+                continue
+            trait = (res.get("trait")
+                     or (rep.get("test_name") or "").split(" (")[0]).strip()
+            if not trait:
+                continue
+            pgs_id = res.get("pgs_id")
+            entry = {
+                "task_id": rep.get("task_id"),
+                "pgs_id": pgs_id,
+                "test_name": rep.get("test_name") or trait,
+                "file_id": fid,
+                "file_label": _file_label(fid),
+                "match_rate": mr,
+                "percentile": pct,
+                "z_score": z,
+                "ancestry": _compare_extract_ancestry(res),
+                "confidence": confidence,
+                "completed_at": rep.get("completed_at"),
+            }
+            by_trait[trait][sample].append(entry)
+            all_samples.add(sample)
+            tm = trait_meta.setdefault(trait, {
+                "description": "", "category": "", "pgs_ids": set(),
+            })
+            if pgs_id:
+                tm["pgs_ids"].add(pgs_id)
+            cat = rep.get("category") or ""
+            if cat:
+                all_categories.add(cat)
+                if not tm["category"]:
+                    tm["category"] = cat
+            if not tm["description"]:
+                desc = (rep.get("description") or "").strip()
+                if desc:
+                    tm["description"] = desc[:400]
+
+    out = []
+    for trait, samples in by_trait.items():
+        sample_aggs = []
+        for sname, reps in samples.items():
+            zs = [r["z_score"] for r in reps if r["z_score"] is not None]
+            pcts = [r["percentile"] for r in reps if r["percentile"] is not None]
+            mrs = [r["match_rate"] for r in reps]
+            if not zs and not pcts:
+                continue
+            ancs = sorted({r["ancestry"] for r in reps if r["ancestry"]})
+            sample_aggs.append({
+                "sample": sname,
+                "mean_z": (_cmp_stats.fmean(zs) if zs else None),
+                "mean_pct": (_cmp_stats.fmean(pcts) if pcts else None),
+                "mean_match_rate": _cmp_stats.fmean(mrs),
+                "ancestry": "/".join(ancs) if ancs else "EUR",
+                "n_pgs": len({r["pgs_id"] for r in reps if r["pgs_id"]}),
+                "n_reports": len(reps),
+                "reports": reps,
+            })
+        if not sample_aggs:
+            continue
+
+        def _sort_key(s):
+            if s["mean_z"] is not None:
+                return s["mean_z"]
+            return ((s["mean_pct"] or 50.0) - 50.0) / 25.0
+
+        sample_aggs.sort(key=_sort_key, reverse=True)
+        n = len(sample_aggs)
+        labels = _compare_risk_labels(n)
+        zs_for_spread = [s["mean_z"] for s in sample_aggs if s["mean_z"] is not None]
+        spread = (max(zs_for_spread) - min(zs_for_spread)) if len(zs_for_spread) >= 2 else 0.0
+        for i, s in enumerate(sample_aggs):
+            s["rank"] = n - i
+            s["risk"] = labels[s["rank"] - 1] if 0 < s["rank"] <= len(labels) else "—"
+
+        meta = trait_meta.get(trait, {})
+        out.append({
+            "trait": trait,
+            "category": meta.get("category", ""),
+            "description": meta.get("description", ""),
+            "pgs_ids": sorted(meta.get("pgs_ids") or []),
+            "avg_match_rate": round(
+                _cmp_stats.fmean([s["mean_match_rate"] for s in sample_aggs]), 1),
+            "n_samples": len(sample_aggs),
+            "n_pgs": len(meta.get("pgs_ids") or []),
+            "spread_z": round(spread, 3),
+            "samples": sample_aggs,
+        })
+
+    out.sort(key=lambda t: ((t["category"] or "ZZZ").lower(), t["trait"].lower()))
+    facets = {
+        "categories": sorted(all_categories),
+        "samples": sorted(all_samples),
+    }
+    return out, facets
+
+
+def _compare_data_cached(username, min_match, max_abs_z, high_conf_only):
+    key = (username, round(min_match, 2), round(max_abs_z, 2), bool(high_conf_only))
+    now = _cmp_time.time()
+    hit = _COMPARE_CACHE.get(key)
+    if hit and now - hit["ts"] < _COMPARE_TTL_S:
+        return hit["data"], hit["facets"]
+    data, facets = _compare_build_for_user(username, min_match, max_abs_z, high_conf_only)
+    _COMPARE_CACHE[key] = {"ts": now, "data": data, "facets": facets}
+    # bound cache size
+    if len(_COMPARE_CACHE) > 32:
+        oldest = min(_COMPARE_CACHE.items(), key=lambda kv: kv[1]["ts"])[0]
+        _COMPARE_CACHE.pop(oldest, None)
+    return data, facets
+
+
+def _compare_parse_float(v, default):
+    try:
+        return float(v) if v is not None and v != "" else default
+    except (TypeError, ValueError):
+        return default
+
+
+@app.get("/api/compare")
+async def api_compare(request: Request, username: str = Depends(current_user)):
+    qp = request.query_params
+    min_match = _compare_parse_float(qp.get("min_match"), _COMPARE_DEFAULT_MIN_MATCH)
+    max_abs_z = _compare_parse_float(qp.get("max_abs_z"), _COMPARE_DEFAULT_MAX_ABS_Z)
+    high_conf = qp.get("high_conf", "").lower() in ("1", "true", "yes", "on")
+    # clamp
+    min_match = max(0.0, min(100.0, min_match))
+    max_abs_z = max(0.5, min(20.0, max_abs_z))
+    traits, facets = _compare_data_cached(username, min_match, max_abs_z, high_conf)
+    return {
+        "username": username,
+        "traits": traits,
+        "facets": facets,
+        "filters": {
+            "min_match_rate_pct": min_match,
+            "max_abs_z": max_abs_z,
+            "high_conf_only": high_conf,
+        },
+        "generated_at": _cmp_time.time(),
+    }
+
+
+@app.get("/compare", response_class=HTMLResponse)
+async def compare_page(request: Request):
+    sid = request.cookies.get(SESSION_COOKIE)
+    if not _resolve_session(sid):
+        return RedirectResponse(url="/sign-in?next=/compare", status_code=303)
+    return HTMLResponse(_COMPARE_PAGE_HTML)
+
+
+_COMPARE_PAGE_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sample Comparison &mdash; 23 &amp; Claude</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #1d2129;
+    --border: #2a2f3a; --border2: #3a4150;
+    --text: #e6e8ee; --muted: #8b93a7; --accent: #7aa2ff;
+    --good: #4ade80; --warn: #facc15; --bad: #f87171; --top: #f97316;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.45;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(15,17,21,.92); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px; display: flex; align-items: center; gap: 14px;
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 600; }
+  header .meta { color: var(--muted); font-size: 12.5px; }
+  header .spacer { flex: 1; }
+  header a, header button {
+    color: var(--text); background: transparent; border: 1px solid var(--border);
+    padding: 5px 11px; border-radius: 6px; font-size: 12.5px; cursor: pointer;
+    text-decoration: none;
+  }
+  header a:hover, header button:hover { border-color: var(--accent); color: var(--accent); }
+  header input[type=search] {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 5px 10px; border-radius: 6px; font-size: 12.5px; width: 220px;
+  }
+
+  .filterbar {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 10px 24px; display: flex; flex-wrap: wrap; gap: 14px 18px;
+    align-items: center;
+  }
+  .fgroup { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .flabel {
+    color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: .04em; margin-right: 2px;
+  }
+  .seg {
+    display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  }
+  .seg button {
+    background: transparent; border: 0; color: var(--text); padding: 4px 10px;
+    font-size: 12px; cursor: pointer; border-right: 1px solid var(--border);
+  }
+  .seg button:last-child { border-right: 0; }
+  .seg button.on { background: var(--accent); color: #0f1115; font-weight: 600; }
+  .seg button:hover:not(.on) { background: var(--panel2); }
+
+  .chip {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    padding: 3px 9px; border-radius: 999px; font-size: 11.5px; cursor: pointer;
+    transition: background .1s;
+  }
+  .chip:hover { border-color: var(--accent); }
+  .chip.on { background: var(--accent); color: #0f1115; border-color: var(--accent); font-weight: 600; }
+  .chip .x { margin-left: 4px; opacity: .7; }
+
+  .check {
+    display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+    color: var(--text); font-size: 12.5px;
+  }
+  .check input { accent-color: var(--accent); }
+
+  select.sortsel {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 10px; font-size: 12px;
+  }
+
+  main { max-width: 1180px; margin: 0 auto; padding: 22px 24px; }
+  .empty, .loading {
+    text-align: center; padding: 60px 24px; color: var(--muted);
+  }
+  .summary {
+    display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 16px;
+    color: var(--muted); font-size: 12.5px;
+  }
+  .summary span b { color: var(--text); font-weight: 600; }
+  .summary a { color: var(--accent); text-decoration: none; }
+  .reset {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--muted); padding: 3px 9px; border-radius: 6px; font-size: 11.5px;
+    cursor: pointer;
+  }
+  .reset:hover { color: var(--accent); border-color: var(--accent); }
+
+  .trait {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 20px; margin-bottom: 16px;
+  }
+  .trait h2 {
+    margin: 0 0 6px 0; font-size: 16.5px; font-weight: 600;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .trait h2 .cat {
+    font-size: 10.5px; font-weight: 500; color: var(--muted);
+    background: var(--panel2); padding: 2px 8px; border-radius: 4px;
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  .trait .stat-line {
+    color: var(--muted); font-size: 12px; margin-bottom: 8px;
+    display: flex; gap: 14px; flex-wrap: wrap;
+  }
+  .trait .stat-line b { color: var(--text); }
+  .trait .desc {
+    color: #c2c8d6; font-size: 13px; margin: 4px 0 12px 0;
+    border-left: 2px solid var(--border); padding-left: 10px;
+  }
+  table.cmp { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 13px; }
+  table.cmp th, table.cmp td {
+    padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border);
+  }
+  table.cmp th {
+    color: var(--muted); font-weight: 500; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  table.cmp td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.cmp td.sample { font-weight: 600; }
+  table.cmp td.rank   { color: var(--muted); width: 30px; }
+  .anc {
+    font-size: 11px; color: var(--muted);
+    background: var(--panel2); border-radius: 4px;
+    padding: 2px 7px; display: inline-block;
+  }
+  .risk {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600;
+  }
+  .risk-Highest   { background: rgba(249,115,22,.18);  color: #fdba74; }
+  .risk-High      { background: rgba(248,113,113,.16); color: #fca5a5; }
+  .risk-Above     { background: rgba(250,204,21,.16);  color: #fde68a; }
+  .risk-Average   { background: rgba(139,147,167,.16); color: #c2c8d6; }
+  .risk-Below     { background: rgba(74,222,128,.13);  color: #a7f3d0; }
+  .risk-Lowest    { background: rgba(74,222,128,.20);  color: #6ee7b7; }
+  .risk-None      { color: var(--muted); }
+  .pgs-list {
+    margin-top: 10px; font-size: 11.5px; color: var(--muted);
+    border-top: 1px dashed var(--border); padding-top: 8px;
+  }
+  .pgs-list a { color: var(--accent); text-decoration: none; margin-right: 4px; }
+  .pgs-list a:hover { text-decoration: underline; }
+  details { margin-top: 6px; }
+  details summary {
+    cursor: pointer; font-size: 11px; color: var(--muted);
+    list-style: none; padding: 2px 0;
+  }
+  details summary::before { content: "▸ "; }
+  details[open] summary::before { content: "▾ "; }
+  details ul { margin: 4px 0 0 16px; padding: 0; font-size: 11px; }
+  details li { color: var(--muted); margin: 2px 0; }
+  details li a { color: var(--accent); text-decoration: none; }
+  .footer-note {
+    color: var(--muted); font-size: 12px; padding: 22px 0; text-align: center;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sample Comparison</h1>
+  <span class="meta" id="meta"></span>
+  <span class="spacer"></span>
+  <input type="search" id="filter" placeholder="Search trait or category..." />
+  <a href="/app">← Dashboard</a>
+  <button id="refresh">Refresh</button>
+</header>
+
+<div class="filterbar" id="filterbar">
+  <div class="fgroup">
+    <span class="flabel">Min match</span>
+    <div class="seg" id="seg-match">
+      <button data-v="80">80%</button>
+      <button data-v="90" class="on">90%</button>
+      <button data-v="95">95%</button>
+      <button data-v="99">99%</button>
+    </div>
+  </div>
+  <div class="fgroup">
+    <span class="flabel">Max |z|</span>
+    <div class="seg" id="seg-z">
+      <button data-v="3">3</button>
+      <button data-v="5" class="on">5</button>
+      <button data-v="10">10</button>
+    </div>
+  </div>
+  <div class="fgroup">
+    <label class="check"><input type="checkbox" id="hi-conf" /> High-confidence only</label>
+  </div>
+  <div class="fgroup">
+    <span class="flabel">Min samples</span>
+    <div class="seg" id="seg-minsamp">
+      <button data-v="1" class="on">1+</button>
+      <button data-v="2">2+</button>
+      <button data-v="3">3+</button>
+      <button data-v="4">4+</button>
+    </div>
+  </div>
+  <div class="fgroup">
+    <span class="flabel">Min PGS</span>
+    <div class="seg" id="seg-minpgs">
+      <button data-v="1" class="on">1+</button>
+      <button data-v="2">2+</button>
+      <button data-v="3">3+</button>
+    </div>
+  </div>
+  <div class="fgroup">
+    <span class="flabel">Sort</span>
+    <select class="sortsel" id="sortsel">
+      <option value="cat">Category, then trait</option>
+      <option value="trait">Trait A→Z</option>
+      <option value="samples">Most samples</option>
+      <option value="pgs">Most PGS</option>
+      <option value="spread">Largest spread</option>
+      <option value="match">Highest match rate</option>
+    </select>
+  </div>
+  <div class="fgroup" id="cat-group">
+    <span class="flabel">Categories</span>
+    <span id="cat-chips"></span>
+  </div>
+  <div class="fgroup" id="samp-group">
+    <span class="flabel">Samples</span>
+    <span id="samp-chips"></span>
+  </div>
+  <button class="reset" id="reset">Reset filters</button>
+</div>
+
+<main id="root">
+  <div class="loading">Loading PGS comparison&hellip;</div>
+</main>
+
+<script>
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function fmtZ(z) {
+  if (z == null) return '—';
+  return (z >= 0 ? '+' : '') + z.toFixed(2);
+}
+function fmtPct(p) {
+  if (p == null) return '—';
+  return p.toFixed(1) + '%';
+}
+function riskClass(label) {
+  if (!label || label === '—') return 'risk risk-None';
+  return 'risk risk-' + label.split(' ')[0];
+}
+
+// ── State (also persisted in URL hash) ───────────────────────────
+const STATE = {
+  q: '',
+  minMatch: 90,
+  maxZ: 5,
+  highConf: false,
+  minSamples: 1,
+  minPgs: 1,
+  sort: 'cat',
+  cats: new Set(),       // active category filters (empty = all)
+  samples: new Set(),    // active sample filters (empty = all)
+};
+let DATA = null;
+
+function readHash() {
+  const h = (window.location.hash || '').replace(/^#/, '');
+  if (!h) return;
+  const qp = new URLSearchParams(h);
+  if (qp.has('q'))         STATE.q = qp.get('q');
+  if (qp.has('mm'))        STATE.minMatch = +qp.get('mm');
+  if (qp.has('mz'))        STATE.maxZ = +qp.get('mz');
+  if (qp.has('hc'))        STATE.highConf = qp.get('hc') === '1';
+  if (qp.has('ms'))        STATE.minSamples = +qp.get('ms');
+  if (qp.has('mp'))        STATE.minPgs = +qp.get('mp');
+  if (qp.has('s'))         STATE.sort = qp.get('s');
+  if (qp.has('cat'))       STATE.cats = new Set(qp.get('cat').split('|').filter(Boolean));
+  if (qp.has('samp'))      STATE.samples = new Set(qp.get('samp').split('|').filter(Boolean));
+}
+function writeHash() {
+  const qp = new URLSearchParams();
+  if (STATE.q) qp.set('q', STATE.q);
+  if (STATE.minMatch !== 90) qp.set('mm', STATE.minMatch);
+  if (STATE.maxZ !== 5)      qp.set('mz', STATE.maxZ);
+  if (STATE.highConf)        qp.set('hc', '1');
+  if (STATE.minSamples > 1)  qp.set('ms', STATE.minSamples);
+  if (STATE.minPgs > 1)      qp.set('mp', STATE.minPgs);
+  if (STATE.sort !== 'cat')  qp.set('s', STATE.sort);
+  if (STATE.cats.size)       qp.set('cat', [...STATE.cats].join('|'));
+  if (STATE.samples.size)    qp.set('samp', [...STATE.samples].join('|'));
+  const s = qp.toString();
+  history.replaceState(null, '', s ? '#' + s : window.location.pathname);
+}
+
+// ── Render filter bar ────────────────────────────────────────────
+function syncBar() {
+  document.getElementById('filter').value = STATE.q || '';
+  document.getElementById('hi-conf').checked = STATE.highConf;
+  document.getElementById('sortsel').value = STATE.sort;
+  for (const [id, val] of [['seg-match',STATE.minMatch],['seg-z',STATE.maxZ],
+                           ['seg-minsamp',STATE.minSamples],['seg-minpgs',STATE.minPgs]]) {
+    document.querySelectorAll('#'+id+' button').forEach(b => {
+      b.classList.toggle('on', +b.dataset.v === val);
+    });
+  }
+}
+function buildFacetChips() {
+  const facets = (DATA && DATA.facets) || {categories:[], samples:[]};
+  const catWrap = document.getElementById('cat-chips');
+  catWrap.innerHTML = facets.categories.map(c => {
+    const short = c.replace(/^PGS\s*-\s*/i, '');
+    const on = STATE.cats.has(c);
+    return `<button class="chip${on?' on':''}" data-cat="${escapeHtml(c)}">${escapeHtml(short)}${on?'<span class="x">×</span>':''}</button>`;
+  }).join(' ');
+  catWrap.querySelectorAll('button').forEach(b => {
+    b.onclick = () => {
+      const c = b.dataset.cat;
+      STATE.cats.has(c) ? STATE.cats.delete(c) : STATE.cats.add(c);
+      writeHash(); buildFacetChips(); render();
+    };
+  });
+  const sampWrap = document.getElementById('samp-chips');
+  sampWrap.innerHTML = facets.samples.map(s => {
+    const on = STATE.samples.has(s);
+    return `<button class="chip${on?' on':''}" data-samp="${escapeHtml(s)}">${escapeHtml(s)}${on?'<span class="x">×</span>':''}</button>`;
+  }).join(' ');
+  sampWrap.querySelectorAll('button').forEach(b => {
+    b.onclick = () => {
+      const s = b.dataset.samp;
+      STATE.samples.has(s) ? STATE.samples.delete(s) : STATE.samples.add(s);
+      writeHash(); buildFacetChips(); render();
+    };
+  });
+}
+
+// ── Sort + filter then render ────────────────────────────────────
+function visibleTraits() {
+  const traits = (DATA && DATA.traits) || [];
+  const q = (STATE.q || '').toLowerCase().trim();
+  const sortFns = {
+    cat:     (a,b) => (a.category||'ZZZ').localeCompare(b.category||'ZZZ') || a.trait.localeCompare(b.trait),
+    trait:   (a,b) => a.trait.localeCompare(b.trait),
+    samples: (a,b) => b.n_samples - a.n_samples || a.trait.localeCompare(b.trait),
+    pgs:     (a,b) => b.n_pgs - a.n_pgs || a.trait.localeCompare(b.trait),
+    spread:  (a,b) => b.spread_z - a.spread_z || a.trait.localeCompare(b.trait),
+    match:   (a,b) => b.avg_match_rate - a.avg_match_rate || a.trait.localeCompare(b.trait),
+  };
+  return traits
+    .filter(t => t.n_samples >= STATE.minSamples)
+    .filter(t => t.n_pgs >= STATE.minPgs)
+    .filter(t => !STATE.cats.size || STATE.cats.has(t.category))
+    .filter(t => {
+      if (!STATE.samples.size) return true;
+      const present = new Set(t.samples.map(s => s.sample));
+      // keep trait if EVERY selected sample is present
+      for (const s of STATE.samples) if (!present.has(s)) return false;
+      return true;
+    })
+    .filter(t => !q
+      || t.trait.toLowerCase().includes(q)
+      || (t.category||'').toLowerCase().includes(q)
+      || (t.description||'').toLowerCase().includes(q))
+    .sort(sortFns[STATE.sort] || sortFns.cat);
+}
+
+function render() {
+  const root = document.getElementById('root');
+  if (!DATA) { root.innerHTML = '<div class="loading">Loading…</div>'; return; }
+
+  const all = DATA.traits || [];
+  const visible = visibleTraits();
+  const allSamples = new Set();
+  let totalReports = 0;
+  for (const t of all) for (const s of t.samples) { allSamples.add(s.sample); totalReports += s.n_reports; }
+
+  document.getElementById('meta').textContent =
+    `${all.length} traits · ${allSamples.size} samples · ${totalReports} reports`;
+
+  let summary = `<div class="summary">`
+    + `<span><b>${visible.length}</b> of <b>${all.length}</b> traits shown</span>`
+    + `<span>match rate ≥ <b>${DATA.filters.min_match_rate_pct}%</b></span>`
+    + `<span>|z| ≤ <b>${DATA.filters.max_abs_z}</b></span>`
+    + (DATA.filters.high_conf_only ? `<span>· <b>high-confidence only</b></span>` : '')
+    + (STATE.minSamples > 1 ? `<span>· min <b>${STATE.minSamples}</b> samples</span>` : '')
+    + (STATE.minPgs > 1    ? `<span>· min <b>${STATE.minPgs}</b> PGS</span>` : '')
+    + (STATE.cats.size      ? `<span>· <b>${STATE.cats.size}</b> categories</span>` : '')
+    + (STATE.samples.size   ? `<span>· requires sample(s): <b>${[...STATE.samples].join(', ')}</b></span>` : '')
+    + `<span style="margin-left:auto"><a href="/api/compare">JSON</a></span>`
+    + `</div>`;
+
+  if (!visible.length) {
+    root.innerHTML = summary
+      + '<div class="empty">No traits match the current filters.<br>'
+      + '<small>Loosen quality thresholds or clear category/sample filters.</small></div>';
+    return;
+  }
+
+  root.innerHTML = summary
+    + visible.map(renderTrait).join('')
+    + '<div class="footer-note">Ranks compare averaged z-scores across all PGS run on each sample for that trait. Reports failing quality filters are excluded.</div>';
+}
+
+function renderTrait(t) {
+  const morePgs = t.pgs_ids.length > 5
+    ? t.pgs_ids.slice(0,5).map(linkPgs).join(', ') + ` <span style="color:var(--muted)">(+${t.pgs_ids.length-5} more)</span>`
+    : t.pgs_ids.map(linkPgs).join(', ');
+  const rows = t.samples.map(s => {
+    const reps = s.reports.map(r =>
+      `<li><a href="/api/report/${encodeURIComponent(r.task_id)}" target="_blank">${escapeHtml(r.pgs_id || r.task_id)}</a>`
+      + ` · ${escapeHtml(r.file_label || r.file_id)}`
+      + ` · match ${r.match_rate.toFixed(1)}%`
+      + (r.z_score != null ? ` · z=${fmtZ(r.z_score)}` : '')
+      + (r.percentile != null ? ` · ${r.percentile.toFixed(1)}%ile` : '')
+      + `</li>`
+    ).join('');
+    return `<tr>
+        <td class="sample">${escapeHtml(s.sample)}</td>
+        <td class="rank">${s.rank}</td>
+        <td class="num">${fmtZ(s.mean_z)}</td>
+        <td class="num">${fmtPct(s.mean_pct)}</td>
+        <td><span class="${riskClass(s.risk)}">${escapeHtml(s.risk)}</span></td>
+        <td><span class="anc">${escapeHtml(s.ancestry)}</span></td>
+        <td style="font-size:11px;color:var(--muted)">
+          ${s.n_pgs} PGS · ${s.n_reports} run${s.n_reports===1?'':'s'}
+          <details><summary>reports</summary><ul>${reps}</ul></details>
+        </td>
+      </tr>`;
+  }).join('');
+  return `
+    <section class="trait">
+      <h2>${escapeHtml(t.trait)}${t.category ? ` <span class="cat">${escapeHtml(t.category.replace(/^PGS\s*-\s*/i,''))}</span>` : ''}</h2>
+      <div class="stat-line">
+        <span><b>${t.n_pgs}</b> PGS</span>
+        <span>avg call rate <b>${t.avg_match_rate}%</b></span>
+        <span><b>${t.n_samples}</b> sample${t.n_samples===1?'':'s'}</span>
+        ${t.spread_z > 0 ? `<span>z-spread <b>${t.spread_z.toFixed(2)}</b></span>` : ''}
+      </div>
+      ${t.description ? `<div class="desc">${escapeHtml(t.description)}</div>` : ''}
+      <table class="cmp">
+        <thead><tr>
+          <th>Sample</th><th>Rank</th><th class="num">Z-score</th>
+          <th class="num">Percentile</th><th>Risk</th><th>Ancestry</th><th></th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      ${t.pgs_ids.length ? `<div class="pgs-list">PGS: ${morePgs}</div>` : ''}
+    </section>`;
+}
+
+function linkPgs(id) {
+  return `<a href="https://www.pgscatalog.org/score/${encodeURIComponent(id)}/" target="_blank" rel="noopener">${escapeHtml(id)}</a>`;
+}
+
+// ── Network ──────────────────────────────────────────────────────
+function load() {
+  const qp = new URLSearchParams();
+  if (STATE.minMatch !== 90)    qp.set('min_match', STATE.minMatch);
+  if (STATE.maxZ !== 5)         qp.set('max_abs_z', STATE.maxZ);
+  if (STATE.highConf)           qp.set('high_conf', '1');
+  fetch('/api/compare?' + qp.toString(), { credentials: 'same-origin' })
+    .then(r => {
+      if (r.status === 401) { window.location = '/sign-in?next=/compare'; return null; }
+      return r.json();
+    })
+    .then(d => { if (d) { DATA = d; buildFacetChips(); render(); } })
+    .catch(e => {
+      document.getElementById('root').innerHTML =
+        '<div class="empty">Failed to load: ' + escapeHtml(e.message) + '</div>';
+    });
+}
+
+// ── Wire UI ──────────────────────────────────────────────────────
+function bindSeg(id, key, isFloat) {
+  document.querySelectorAll('#'+id+' button').forEach(b => {
+    b.onclick = () => {
+      STATE[key] = isFloat ? parseFloat(b.dataset.v) : parseInt(b.dataset.v, 10);
+      syncBar(); writeHash();
+      // server-side filters need a refetch
+      if (key === 'minMatch' || key === 'maxZ') load();
+      else render();
+    };
+  });
+}
+bindSeg('seg-match', 'minMatch', true);
+bindSeg('seg-z',     'maxZ',     true);
+bindSeg('seg-minsamp', 'minSamples', false);
+bindSeg('seg-minpgs',  'minPgs',     false);
+
+document.getElementById('hi-conf').addEventListener('change', e => {
+  STATE.highConf = e.target.checked; writeHash(); load();
+});
+document.getElementById('sortsel').addEventListener('change', e => {
+  STATE.sort = e.target.value; writeHash(); render();
+});
+document.getElementById('filter').addEventListener('input', e => {
+  STATE.q = e.target.value; writeHash(); render();
+});
+document.getElementById('refresh').addEventListener('click', load);
+document.getElementById('reset').addEventListener('click', () => {
+  Object.assign(STATE, {
+    q:'', minMatch:90, maxZ:5, highConf:false,
+    minSamples:1, minPgs:1, sort:'cat',
+    cats:new Set(), samples:new Set()
+  });
+  syncBar(); writeHash(); load();
+});
+
+readHash();
+syncBar();
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>
+"""
+# === COMPARE_PAGE_BLOCK_END ===
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    import signal
+    import socket
+
+    def _kill_stale_port_holders(port):
+        """Kill any leftover processes holding our port (from a previous crash)."""
+        try:
+            result = subprocess.run(
+                f"fuser {port}/tcp 2>/dev/null",
+                shell=True, capture_output=True, text=True, timeout=5
+            )
+            pids = result.stdout.strip().split()
+            my_pid = os.getpid()
+            for pid_str in pids:
+                try:
+                    pid = int(pid_str)
+                    if pid != my_pid:
+                        os.kill(pid, signal.SIGKILL)
+                        logger.warning(f"Killed stale process {pid} holding port {port}")
+                except (ValueError, ProcessLookupError):
+                    pass
+        except Exception:
+            pass
+
+    # Clean up stale port holders before binding
+    _kill_stale_port_holders(PORT)
+    time.sleep(0.5)
+
+    # Create a socket with SO_REUSEADDR so we can bind immediately after
+    # a previous instance exits (avoids TIME_WAIT issues).
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", PORT))
+    sock.set_inheritable(True)
+
+    config = uvicorn.Config(app, host="0.0.0.0", port=PORT, log_level="info")
+    server = uvicorn.Server(config)
+
+    # Override uvicorn's socket setup to use our pre-bound socket
+    server.config.loaded = True
+    from uvicorn.config import Config as _UvConfig
+
+    # Use the fd approach: pass our socket's fd to uvicorn
+    sock.listen(128)
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info", fd=sock.fileno())

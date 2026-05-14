@@ -146,6 +146,31 @@ CLINVAR_ANNOTATED_CACHE = os.getenv(
 CLINVAR_VCF_CHR  = os.getenv("CLINVAR_VCF_CHR",  "/data/clinvar/clinvar_chr.vcf.gz")
 CLINVAR_VCF_BARE = os.getenv("CLINVAR_VCF_BARE", "/data/clinvar/clinvar.vcf.gz")
 
+# ClinVar annotation cache version — bump to invalidate old caches
+# (e.g. when adding bcftools norm or changing annotation columns).
+_CLINVAR_CACHE_VERSION = "v2_normed"
+
+# QC thresholds for ClinVar variant calls
+MIN_CLINVAR_DP = 10
+MIN_CLINVAR_GQ = 20
+
+# Gene inheritance models for cancer predisposition panel.
+# AR = autosomal recessive (two pathogenic alleles needed for disease).
+# AD = autosomal dominant (one pathogenic allele sufficient).
+_GENE_INHERITANCE = {
+    # Autosomal recessive — two pathogenic alleles needed
+    "MUTYH": "AR",
+    # Autosomal dominant — one pathogenic allele sufficient
+    "BRCA1": "AD", "BRCA2": "AD", "TP53": "AD", "MLH1": "AD",
+    "MSH2": "AD", "MSH6": "AD", "PMS2": "AD", "APC": "AD",
+    "CDH1": "AD", "PALB2": "AD", "CHEK2": "AD", "ATM": "AD",
+    "STK11": "AD", "PTEN": "AD", "RB1": "AD", "RET": "AD",
+    "VHL": "AD", "WT1": "AD", "MEN1": "AD", "NF1": "AD",
+    "NF2": "AD", "SMAD4": "AD", "BMPR1A": "AD",
+    "EPCAM": "AD", "RAD51C": "AD", "RAD51D": "AD",
+    "BARD1": "AD", "RAD50": "AD", "NBN": "AD", "MRE11": "AD",
+}
+
 # Thread budgets for 32-core machine. Each PGS scoring task uses 1 thread
 # so 8+ can run concurrently. BAM/CRAM Pipeline E+ uses ~23 cores (gated
 # by semaphore to 1 concurrent). Pgen build uses 4 threads (one-off).
@@ -333,12 +358,29 @@ def _detect_file_type(path):
 
 
 # ── Genome build validation ──────────────────────────────────────────
-# Spot-check variant: rs7412 (APOE e2) — well-characterized, common, on chr19.
-# GRCh38: chr19:44908822   GRCh37/hg19: chr19:45412079
+# Panel of well-characterized SNPs used to confirm a VCF's genome build
+# when the header doesn't declare it. Each entry has coordinates for both
+# GRCh38 and GRCh37; we query all of them at each candidate build and pick
+# the build with the most matches. A single-variant check (only rs7412)
+# is too weak — see the PGS000898 audit. With 3+ spot-checks we can also
+# emit a "WEAK" status (only one variant confirmed) so callers downgrade
+# confidence instead of silently trusting the build.
+_BUILD_SPOTCHECKS = [
+    # APOE rs7412 — chr19, very common in WGS
+    {"rsid": "rs7412",    "GRCh38": ("19",  44908822), "GRCh37": ("19", 45412079)},
+    # APOE rs429358 — chr19, adjacent to rs7412
+    {"rsid": "rs429358",  "GRCh38": ("19",  44908684), "GRCh37": ("19", 45411941)},
+    # MTHFR C677T — chr1, in nearly every consumer-genomics panel
+    {"rsid": "rs1801133", "GRCh38": ("1",   11796321), "GRCh37": ("1",  11856378)},
+]
+# Back-compat shim: a couple of places (and any external probes) read the
+# old single-variant constant. Map it to the first entry of the new panel.
 _BUILD_SPOTCHECK = {
-    "rsid": "rs7412",
-    "GRCh38": {"chrom": "19", "pos": 44908822},
-    "GRCh37": {"chrom": "19", "pos": 45412079},
+    "rsid": _BUILD_SPOTCHECKS[0]["rsid"],
+    "GRCh38": {"chrom": _BUILD_SPOTCHECKS[0]["GRCh38"][0],
+               "pos":   _BUILD_SPOTCHECKS[0]["GRCh38"][1]},
+    "GRCh37": {"chrom": _BUILD_SPOTCHECKS[0]["GRCh37"][0],
+               "pos":   _BUILD_SPOTCHECKS[0]["GRCh37"][1]},
 }
 
 BUILD_VALIDATION_LOG = os.path.join(SCRATCH, "build_validation.log")
@@ -403,32 +445,51 @@ def _validate_genome_build(vcf_path, reference_build="GRCh38"):
         return result
 
     if spot["status"] == "NOT_FOUND":
-        # Variant absent — can't confirm, but that's not a build mismatch.
+        # No spot-check variants present — can't confirm.
         if not vcf_build:
             result["status"] = "WARN"
             result["message"] += (
-                " Spot-check variant rs7412 not found in VCF — "
-                "cannot confirm build. Proceeding with caution."
+                f" None of {spot.get('n_spotchecks', 0)} spot-check SNPs "
+                f"present in the VCF — cannot validate build. "
+                f"Proceeding with caution."
             )
         else:
             result["status"] = "PASS"
             result["message"] = (
                 f"VCF declares {vcf_build} matching reference {reference_build}. "
-                f"rs7412 not present to spot-check (OK for non-WGS data)."
+                f"Spot-check SNPs not present (OK for non-WGS / targeted data)."
             )
+    elif spot["status"] == "WEAK":
+        # Only one of the spot-checks confirmed. Not enough to be sure;
+        # mark WARN so confidence is downgraded. Callers must treat this
+        # as "build inferred from a single position" — the very condition
+        # the PGS000898 audit flagged.
+        result["status"] = "WARN"
+        result["message"] = (
+            f"Weak build inference: only "
+            f"{spot.get('matches_expected', 0)}/{spot.get('n_spotchecks', 0)} "
+            f"spot-check SNPs confirmed at {reference_build} positions. "
+            f"VCF build is undeclared — single-position evidence is not "
+            f"sufficient to trust scoring without extra validation."
+        ) if not vcf_build else (
+            f"VCF declares {vcf_build}; only "
+            f"{spot.get('matches_expected', 0)}/{spot.get('n_spotchecks', 0)} "
+            f"spot-check SNPs confirmed — weak corroboration."
+        )
     else:
-        # Spot-check PASS
+        # Spot-check PASS (>= 2 SNPs confirmed)
+        ok = f"{spot.get('matches_expected', 0)}/{spot.get('n_spotchecks', 0)}"
         if not vcf_build:
             result["status"] = "PASS"
             result["message"] = (
-                f"VCF build undeclared but rs7412 position matches {reference_build}. "
-                f"Proceeding."
+                f"VCF build undeclared but {ok} spot-check SNPs confirm "
+                f"{reference_build}. Proceeding."
             )
         else:
             result["status"] = "PASS"
             result["message"] = (
                 f"Build validated: VCF declares {vcf_build}, "
-                f"rs7412 position confirmed at {reference_build} coordinate."
+                f"{ok} spot-check SNPs confirmed at {reference_build} coordinates."
             )
 
     _log_build_validation(vcf_path, result)
@@ -470,60 +531,116 @@ def _normalize_build_name(build):
 
 
 def _spot_check_variant(vcf_path, reference_build):
-    """Check if rs7412 is at the expected position for the given build.
+    """Query the multi-variant spot-check panel to confirm the VCF's build.
 
-    Returns {"status": "PASS"|"FAIL"|"NOT_FOUND", ...}
+    Returns:
+        {
+          "status": "PASS" | "FAIL" | "WEAK" | "NOT_FOUND",
+          "expected_build": str,
+          "matches_expected": int,   # how many panel SNPs hit the expected coords
+          "matches_wrong_build": int,
+          "n_spotchecks": int,
+          "per_variant": [ {rsid, status, pos|None}, ... ],
+          # legacy fields preserved so callers/log readers still work:
+          "expected_pos": int|None,  # first expected SNP coord
+          "found_pos": int|None,
+          "rsid": str|None,
+          "wrong_build": str|None,
+        }
+
+    Decision rules:
+      - matches_wrong_build > matches_expected → FAIL (wrong build)
+      - matches_expected >= 2                  → PASS
+      - matches_expected == 1                  → WEAK (caller should
+                                                  downgrade confidence)
+      - matches_expected == 0 and wrong == 0   → NOT_FOUND
     """
-    sc = _BUILD_SPOTCHECK
-    expected = sc.get(_normalize_build_name(reference_build) or reference_build)
-    if not expected:
-        return {"status": "NOT_FOUND", "reason": f"No spot-check data for {reference_build}"}
+    norm_ref = _normalize_build_name(reference_build) or reference_build
+    other_build = "GRCh37" if norm_ref == "GRCh38" else "GRCh38"
 
-    chrom = expected["chrom"]
-    pos = expected["pos"]
-    # Query the VCF at the expected position (try both chr-prefixed and bare)
-    for region in [f"chr{chrom}:{pos}-{pos}", f"{chrom}:{pos}-{pos}"]:
-        stdout, _, rc = _run(
-            [BCFTOOLS, "view", "-H", str(vcf_path), region], timeout=30
-        )
-        if rc == 0 and stdout.strip():
-            # Found variant(s) at expected position — check if rs7412 is among them
-            for line in stdout.strip().splitlines():
-                fields = line.split("\t")
-                if len(fields) >= 3:
-                    line_pos = int(fields[1])
-                    line_id = fields[2]
-                    if line_pos == pos:
-                        return {
-                            "status": "PASS",
-                            "expected_pos": pos,
-                            "found_pos": line_pos,
-                            "rsid": line_id,
-                        }
-
-    # Variant not found at expected position. Check if it's at the *other* build's position.
-    other_build = "GRCh37" if _normalize_build_name(reference_build) == "GRCh38" else "GRCh38"
-    wrong = sc.get(other_build)
-    if wrong:
-        wrong_pos = wrong["pos"]
-        wrong_chrom = wrong["chrom"]
-        for region in [f"chr{wrong_chrom}:{wrong_pos}-{wrong_pos}", f"{wrong_chrom}:{wrong_pos}-{wrong_pos}"]:
+    def _is_present_at(chrom, pos):
+        for region in (f"chr{chrom}:{pos}-{pos}", f"{chrom}:{pos}-{pos}"):
             stdout, _, rc = _run(
                 [BCFTOOLS, "view", "-H", str(vcf_path), region], timeout=30
             )
-            if rc == 0 and stdout.strip():
-                for line in stdout.strip().splitlines():
-                    fields = line.split("\t")
-                    if len(fields) >= 3 and int(fields[1]) == wrong_pos:
-                        return {
-                            "status": "FAIL",
-                            "expected_pos": pos,
-                            "found_pos": wrong_pos,
-                            "wrong_build": other_build,
-                            "rsid": fields[2],
-                        }
+            if rc != 0 or not stdout.strip():
+                continue
+            for line in stdout.strip().splitlines():
+                fields = line.split("\t")
+                if len(fields) >= 3:
+                    try:
+                        if int(fields[1]) == pos:
+                            return True, fields[2]
+                    except ValueError:
+                        pass
+        return False, None
 
-    return {"status": "NOT_FOUND", "reason": "rs7412 not present in VCF"}
+    per_variant = []
+    matches_expected = 0
+    matches_wrong = 0
+    first_expected_hit = None  # {"pos", "rsid"} of first PASS, for back-compat
+    first_wrong_hit = None     # for back-compat FAIL fields
+
+    for sc in _BUILD_SPOTCHECKS:
+        rsid = sc["rsid"]
+        exp = sc.get(norm_ref)
+        wro = sc.get(other_build)
+        if not exp:
+            continue
+        exp_chrom, exp_pos = exp
+        found_exp, found_id_exp = _is_present_at(exp_chrom, exp_pos)
+        if found_exp:
+            matches_expected += 1
+            per_variant.append({"rsid": rsid, "status": "found_expected",
+                                "pos": exp_pos})
+            if first_expected_hit is None:
+                first_expected_hit = {"pos": exp_pos, "rsid": found_id_exp or rsid}
+            continue
+        # Probe the wrong-build coords next
+        found_wrong = False
+        found_id_wrong = None
+        if wro:
+            wr_chrom, wr_pos = wro
+            found_wrong, found_id_wrong = _is_present_at(wr_chrom, wr_pos)
+            if found_wrong:
+                matches_wrong += 1
+                per_variant.append({"rsid": rsid, "status": "found_wrong_build",
+                                    "pos": wr_pos})
+                if first_wrong_hit is None:
+                    first_wrong_hit = {"pos": wr_pos, "rsid": found_id_wrong or rsid,
+                                       "expected_pos": exp_pos}
+                continue
+        per_variant.append({"rsid": rsid, "status": "not_found", "pos": None})
+
+    n = len(_BUILD_SPOTCHECKS)
+    out = {
+        "expected_build": norm_ref,
+        "matches_expected": matches_expected,
+        "matches_wrong_build": matches_wrong,
+        "n_spotchecks": n,
+        "per_variant": per_variant,
+        "expected_pos": (first_expected_hit or {}).get("pos"),
+        "found_pos": ((first_expected_hit or first_wrong_hit) or {}).get("pos"),
+        "rsid": ((first_expected_hit or first_wrong_hit) or {}).get("rsid"),
+        "wrong_build": (first_wrong_hit and other_build) or None,
+    }
+    if matches_wrong > matches_expected:
+        out["status"] = "FAIL"
+        out["reason"] = (f"{matches_wrong}/{n} spot-check SNPs found at "
+                         f"{other_build} coordinates vs {matches_expected}/{n} "
+                         f"at {norm_ref} — VCF appears to be on {other_build}.")
+    elif matches_expected >= 2:
+        out["status"] = "PASS"
+    elif matches_expected == 1:
+        out["status"] = "WEAK"
+        out["reason"] = (f"only {matches_expected}/{n} spot-check SNPs "
+                         f"confirmed at {norm_ref}; insufficient to validate "
+                         f"build with high confidence.")
+    else:
+        out["status"] = "NOT_FOUND"
+        out["reason"] = (f"none of the {n} spot-check SNPs were present at "
+                         f"either build's expected positions.")
+    return out
 
 
 def _log_build_validation(vcf_path, result):
@@ -846,6 +963,42 @@ def _vcf_sample_names(vcf_path):
     return [s.strip() for s in stdout.splitlines() if s.strip()]
 
 
+def _gvcf_normalized_is_complete(path):
+    """Return True if the cached normalized gVCF has records on all 22 autosomes.
+
+    The pre-fix `_normalize_gvcf` would silently write a truncated output
+    when SOME chromosomes' bcftools convert failed (it only refused if ALL
+    failed). A cached file is "complete" when its index lists 22 autosomes
+    AND the file size is consistent with a full normalization (we use 50MB
+    as a floor — partial outputs from observed failures were ~10MB or less).
+    """
+    try:
+        if os.path.getsize(path) < 50 * 1024 * 1024:
+            return False
+        idx = path + ".tbi"
+        if not os.path.exists(idx):
+            return False
+        # `bcftools index --stats` lists one row per contig with non-zero records.
+        # Require at least 20 of the 22 autosomes — small enough to allow the
+        # rare case where chrY/MT are absent without false-flagging.
+        proc = subprocess.run(
+            [BCFTOOLS, "index", "--stats", path],
+            capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            return False
+        autosomes_seen = 0
+        for line in proc.stdout.splitlines():
+            cols = line.split("\t")
+            if not cols:
+                continue
+            chrom = cols[0].lstrip("chr")
+            if chrom.isdigit() and 1 <= int(chrom) <= 22:
+                autosomes_seen += 1
+        return autosomes_seen >= 20
+    except Exception:
+        return False
+
+
 def _normalize_gvcf(vcf_path, out_path):
     """Convert a gVCF into a plink2-friendly VCF for PGS scoring + PCA.
 
@@ -884,8 +1037,30 @@ def _normalize_gvcf(vcf_path, out_path):
     expanded_vcf = out_path + ".expanded.vcf.gz"
 
     # 1. Build / re-use the union-of-positions TSV (PGS + PCA panel).
+    #    Rebuild if any PGS scoring file (or the PCA eigenvec) is newer
+    #    than the cached union — otherwise newly-added PGS positions are
+    #    silently absent and large scores like PGS002753 (1M variants)
+    #    return 16% match rate while small scores match 100%.
     union_positions_chr = "/data/pgs_cache/_all_pgs_pca_positions_chr.tsv"
-    if not os.path.exists(union_positions_chr):
+    _rebuild_union = not os.path.exists(union_positions_chr)
+    if not _rebuild_union:
+        try:
+            _union_mtime = os.path.getmtime(union_positions_chr)
+            _pgs_dir = Path(PGS_CACHE)
+            _newest_src = 0.0
+            for _sub in _pgs_dir.glob("PGS*"):
+                for _f in _sub.glob("*_hmPOS_GRCh38.txt.gz"):
+                    _newest_src = max(_newest_src, os.path.getmtime(_f))
+            _eigenvec = os.path.join(PGS_CACHE, "pca_1000g", "ref.eigenvec.allele")
+            if os.path.exists(_eigenvec):
+                _newest_src = max(_newest_src, os.path.getmtime(_eigenvec))
+            if _newest_src > _union_mtime:
+                logger.info("Union positions file is stale (newest source %.0f > "
+                            "cache %.0f); rebuilding", _newest_src, _union_mtime)
+                _rebuild_union = True
+        except OSError:
+            _rebuild_union = True
+    if _rebuild_union:
         logger.info(f"Building PGS+PCA union positions file at {union_positions_chr}...")
         _build_all_pgs_positions(union_positions_chr, include_pca_panel=True)
 
@@ -993,8 +1168,22 @@ def _normalize_gvcf(vcf_path, out_path):
                 f"total={total_stats['total']} kept={total_stats['kept']} "
                 f"rewritten={total_stats['rewritten']} dropped={total_stats['dropped']}")
 
-    if n_ok == 0:
-        raise RuntimeError("bcftools convert --gvcf2vcf failed for all chromosomes")
+    # Require ALL 22 chromosomes to succeed. Previously this only required
+    # n_ok > 0, which silently produced a truncated normalized VCF whenever
+    # any chromosome's bcftools convert failed — and that's the bug behind
+    # the "PGS001229 86%>80%ile, KS p=0.0001" cohort_sanity flag: hom-REF
+    # positions on the missing chromosomes were dropped instead of scored
+    # as dose=0, so plink2 only summed over the "informative" variants and
+    # the AVG was inflated 5×. Fail-closed: refuse to write a partial output.
+    failed_chroms = sorted([c for c, (ok, _) in chr_results.items() if not ok],
+                            key=lambda x: int(x))
+    if failed_chroms:
+        raise RuntimeError(
+            f"gVCF normalization incomplete: {len(failed_chroms)}/22 chromosomes "
+            f"failed (chr{','.join(failed_chroms)}). Refusing to write a "
+            f"truncated normalized VCF — would silently inflate PGS scores. "
+            f"Inspect per_chr_expand/ for partial outputs."
+        )
 
     # Concat per-chr rewritten files in chromosome order
     chr_files = []
@@ -1003,13 +1192,33 @@ def _normalize_gvcf(vcf_path, out_path):
         if ok:
             chr_files.append(detail)
 
-    _, stderr, rc = _run([
-        BCFTOOLS, "concat", "--naive",
-        "-Oz", "-o", out_path,
-    ] + chr_files, timeout=600)
-    if rc != 0:
-        raise RuntimeError(f"bcftools concat failed: {stderr[:500]}")
-    _run([BCFTOOLS, "index", "-t", out_path], timeout=600)
+    # Atomic write: concat into .tmp.{pid} and rename only on full success.
+    # Without this, a crash mid-concat (or mid-index) leaves a half-written
+    # out_path that the next call's `os.path.getsize() > 0` check accepts as
+    # valid cache → silent inflated scoring.
+    out_tmp = f"{out_path}.tmp.{os.getpid()}"
+    out_tmp_tbi = f"{out_tmp}.tbi"
+    try:
+        _, stderr, rc = _run([
+            BCFTOOLS, "concat", "--naive",
+            "-Oz", "-o", out_tmp,
+        ] + chr_files, timeout=600)
+        if rc != 0:
+            raise RuntimeError(f"bcftools concat failed: {stderr[:500]}")
+        _, stderr, rc = _run([BCFTOOLS, "index", "-t", out_tmp], timeout=600)
+        if rc != 0:
+            raise RuntimeError(f"bcftools index failed: {stderr[:500]}")
+        os.replace(out_tmp, out_path)
+        if os.path.exists(out_tmp_tbi):
+            os.replace(out_tmp_tbi, out_path + ".tbi")
+    except Exception:
+        for p in (out_tmp, out_tmp_tbi):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        raise
 
     # Clean up per-chr files
     for f in chr_files:
@@ -1383,7 +1592,20 @@ def _vcf_to_pgen(vcf_path, output_prefix, var_id_template="chr@:#",
         # the first worker does the build and the rest reuse the cache.
         norm_lock = _get_normgvcf_lock(norm_path)
         with norm_lock:
-            if not (os.path.exists(norm_path) and os.path.getsize(norm_path) > 0):
+            cached_ok = (os.path.exists(norm_path)
+                         and os.path.getsize(norm_path) > 0
+                         and _gvcf_normalized_is_complete(norm_path))
+            if not cached_ok:
+                # A pre-fix cache from before the atomic-write change might be
+                # present but truncated — validate before trusting it. If
+                # invalid, drop it and rebuild from scratch.
+                if os.path.exists(norm_path):
+                    logger.warning(f"Cached normalized gVCF failed completeness check; rebuilding: {norm_path}")
+                    for suffix in ("", ".tbi", ".csi"):
+                        try:
+                            os.remove(norm_path + suffix)
+                        except OSError:
+                            pass
                 logger.info(f"Normalizing gVCF (expanding ref blocks at PGS+PCA sites): {vcf_path} → {norm_path}")
                 _normalize_gvcf(vcf_path, norm_path)
             else:
@@ -1612,7 +1834,9 @@ def _ensure_clinvar_annotated(vcf_path):
             f"Set CLINVAR_VCF_CHR / CLINVAR_VCF_BARE env vars or install it."
         )
 
-    key = hashlib.sha1(os.path.realpath(vcf_path).encode()).hexdigest()[:16]
+    key = hashlib.sha1(
+        (os.path.realpath(vcf_path) + _CLINVAR_CACHE_VERSION).encode()
+    ).hexdigest()[:16]
     cache_dir = os.path.join(CLINVAR_ANNOTATED_CACHE, key)
     annotated = os.path.join(cache_dir, "sample.annotated.vcf.gz")
     stamp = os.path.join(cache_dir, ".vcf_mtime")
@@ -1689,13 +1913,14 @@ def _ensure_clinvar_annotated(vcf_path):
                     f"bcftools index (stripped) failed: {stderr[:500]}"
                 )
 
-            logger.info(f"Annotating stripped {stripped} → {annotated}")
+            # Normalize: split multiallelic sites into biallelic records
+            # so each ALT gets its own ClinVar annotation independently.
+            normalized = os.path.join(cache_dir, "normalized.vcf.gz")
+            logger.info(f"Normalizing (split multiallelics): {stripped} → {normalized}")
             stdout, stderr, rc = _run([
-                BCFTOOLS, "annotate",
+                BCFTOOLS, "norm", "-m", "-both", "-f", REF_FASTA,
                 "--threads", str(BCFTOOLS_THREADS),
-                "-a", clinvar_vcf,
-                "-c", "INFO/CLNSIG,INFO/GENEINFO",
-                "-Oz", "-o", annotated,
+                "-Oz", "-o", normalized,
                 stripped,
             ], timeout=3600)
             if rc != 0:
@@ -1704,24 +1929,86 @@ def _ensure_clinvar_annotated(vcf_path):
                 except OSError:
                     pass
                 raise RuntimeError(
-                    f"bcftools annotate (stripped) failed: {stderr[:500]}"
+                    f"bcftools norm (gVCF stripped) failed: {stderr[:500]}"
                 )
-
-            # Drop the intermediate; we only keep the final annotated cache.
-            for ext in ("", ".tbi", ".csi"):
+            stdout, stderr, rc = _run(
+                [BCFTOOLS, "index", "--threads", str(BCFTOOLS_THREADS), "-t", normalized],
+                timeout=600,
+            )
+            if rc != 0:
                 try:
-                    os.remove(stripped + ext)
+                    shutil.rmtree(cache_dir)
                 except OSError:
                     pass
-        else:
-            logger.info(f"Annotating {src} with ClinVar → {annotated}")
+                raise RuntimeError(
+                    f"bcftools index (normalized) failed: {stderr[:500]}"
+                )
+
+            logger.info(f"Annotating normalized {normalized} → {annotated}")
             stdout, stderr, rc = _run([
                 BCFTOOLS, "annotate",
                 "--threads", str(BCFTOOLS_THREADS),
                 "-a", clinvar_vcf,
                 "-c", "INFO/CLNSIG,INFO/GENEINFO",
                 "-Oz", "-o", annotated,
+                normalized,
+            ], timeout=3600)
+            if rc != 0:
+                try:
+                    shutil.rmtree(cache_dir)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"bcftools annotate (normalized) failed: {stderr[:500]}"
+                )
+
+            # Drop intermediates; we only keep the final annotated cache.
+            for tmp in (stripped, normalized):
+                for ext in ("", ".tbi", ".csi"):
+                    try:
+                        os.remove(tmp + ext)
+                    except OSError:
+                        pass
+        else:
+            # Normalize: split multiallelic sites into biallelic records
+            # so each ALT gets its own ClinVar annotation independently.
+            normalized = os.path.join(cache_dir, "normalized.vcf.gz")
+            logger.info(f"Normalizing (split multiallelics): {src} → {normalized}")
+            stdout, stderr, rc = _run([
+                BCFTOOLS, "norm", "-m", "-both", "-f", REF_FASTA,
+                "--threads", str(BCFTOOLS_THREADS),
+                "-Oz", "-o", normalized,
                 src,
+            ], timeout=3600)
+            if rc != 0:
+                try:
+                    shutil.rmtree(cache_dir)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"bcftools norm failed: {stderr[:500] or stdout[:500]}"
+                )
+            stdout, stderr, rc = _run(
+                [BCFTOOLS, "index", "--threads", str(BCFTOOLS_THREADS), "-t", normalized],
+                timeout=600,
+            )
+            if rc != 0:
+                try:
+                    shutil.rmtree(cache_dir)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"bcftools index (normalized) failed: {stderr[:500]}"
+                )
+
+            logger.info(f"Annotating {normalized} with ClinVar → {annotated}")
+            stdout, stderr, rc = _run([
+                BCFTOOLS, "annotate",
+                "--threads", str(BCFTOOLS_THREADS),
+                "-a", clinvar_vcf,
+                "-c", "INFO/CLNSIG,INFO/GENEINFO",
+                "-Oz", "-o", annotated,
+                normalized,
             ], timeout=3600)
             if rc != 0:
                 try:
@@ -1731,6 +2018,13 @@ def _ensure_clinvar_annotated(vcf_path):
                 raise RuntimeError(
                     f"bcftools annotate failed: {stderr[:500] or stdout[:500]}"
                 )
+
+            # Drop normalized intermediate
+            for ext in ("", ".tbi", ".csi"):
+                try:
+                    os.remove(normalized + ext)
+                except OSError:
+                    pass
 
         stdout, stderr, rc = _run(
             [BCFTOOLS, "index", "--threads", str(BCFTOOLS_THREADS), "-t", annotated],
@@ -2880,11 +3174,16 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
             "--memory", str(PLINK_MEMORY_MB),
             "--out", score_prefix,
         ]
-        _, stderr, rc = _run(cmd_score, timeout=120)
+        _stdout_score, stderr, rc = _run(cmd_score, timeout=120)
         sscore_path = score_prefix + ".sscore"
         if rc != 0 or not os.path.exists(sscore_path):
             logger.warning(f"{pgs_id} fast path: plink2 score failed: {stderr[:200]}")
             return None
+
+        # Parse plink2's "skipped due to ..." warnings — silently dropping
+        # mismatching-allele-code variants masks REF/ALT-orientation issues
+        # in the user pgen and biases the score. Surface the count.
+        plink2_warnings = _parse_plink2_score_warnings((stderr or "") + "\n" + (_stdout_score or ""), score_prefix + ".log")
 
         result = _parse_sscore(sscore_path)
         vars_file = score_prefix + ".sscore.vars"
@@ -2892,6 +3191,41 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
         if os.path.exists(vars_file):
             with open(vars_file) as f:
                 matched = sum(1 for _ in f)
+
+        # Strand-flip recovery: re-score variants plink2 silently dropped due
+        # to allele orientation mismatches (catalog used the opposite strand).
+        #
+        # IMPORTANT: opt-in only. Folding recovered scores into the user
+        # raw_score IS correct in isolation — but the ref-panel stats were
+        # built with the SAME plink2 invocation that drops these variants,
+        # so applying rescue only on the user side makes user scores
+        # systematically HIGHER than ref-panel samples → biases percentiles
+        # in the wrong direction. To enable, set PGS_STRAND_FLIP_RESCUE=1
+        # AND rebuild ref-panel stats with the same rescue applied
+        # (recompute_ref_stats.py would need the same logic added).
+        #
+        # We always RUN the rescue and log the count — the diagnostic value
+        # is high — but only fold it into raw_score when the env says so.
+        rescue_info = _recover_strand_flips(
+            plink2_scoring, vars_file, pgen_prefix, score_prefix, tmpdir)
+        rescue_applied = os.getenv("PGS_STRAND_FLIP_RESCUE") == "1"
+        if rescue_applied and rescue_info["n_recovered"] > 0:
+            orig_sum = result.get("score_sum") or 0.0
+            orig_allele_ct = result.get("allele_count") or 0
+            result["score_sum"] = float(orig_sum) + rescue_info["sum"]
+            new_allele_ct = orig_allele_ct + 2 * rescue_info["n_recovered"]
+            result["allele_count"] = new_allele_ct
+            if new_allele_ct:
+                result["raw_score"] = result["score_sum"] / new_allele_ct
+            matched += rescue_info["n_recovered"]
+        if rescue_info["n_recovered"] > 0 or rescue_info["n_palindromic_skipped"] > 0:
+            logger.info(f"{pgs_id} fast path: strand-flip rescue {'APPLIED' if rescue_applied else 'available (not applied)'} — "
+                        f"recoverable={rescue_info['n_recovered']} "
+                        f"sum={rescue_info['sum']:.4f}, palindromic_skipped={rescue_info['n_palindromic_skipped']}")
+        plink2_warnings["strand_flip_recoverable"] = rescue_info["n_recovered"]
+        plink2_warnings["strand_flip_recovered_sum"] = round(rescue_info["sum"], 4) if rescue_applied else 0.0
+        plink2_warnings["strand_flip_applied"] = rescue_applied
+        plink2_warnings["palindromic_skipped"] = rescue_info["n_palindromic_skipped"]
 
         # Adjust match count: plink2 lists variants found in the pgen in
         # .sscore.vars, but some may have missing genotypes (./.).
@@ -2960,6 +3294,7 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
             "method_cross_validated": pctl_details.get("cross_validated", False) if pctl_details else False,
             "sanity_gates_tripped": (pctl_details.get("sanity", {}).get("gates_tripped", [])
                                      if pctl_details else []),
+            **plink2_warnings,
         }
 
         _sf_source, _sf_note = _scoring_file_source(scoring_file)
@@ -3024,7 +3359,7 @@ def _score_pgs_fast(vcf_path, pgs_id, scoring_file, plink2_scoring, metadata, tm
             except Exception:
                 pass
 
-        return _fast_result
+        return _postprocess_pgs_result(_fast_result)
     except Exception as e:
         logger.warning(f"{pgs_id} fast path exception: {e}")
         return None  # fall back to full pgen path
@@ -3127,6 +3462,8 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
             "--out", score_prefix,
         ]
         stdout, stderr, rc = _run(cmd, timeout=600)
+        plink2_warnings = _parse_plink2_score_warnings(
+            (stderr or "") + "\n" + (stdout or ""), score_prefix + ".log")
 
         # Step 5: Parse results
         _progress(f"Computing percentile for {pgs_id}…")
@@ -3143,6 +3480,31 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
         if os.path.exists(vars_file):
             with open(vars_file) as f:
                 matched = sum(1 for _ in f)
+
+        # Strand-flip recovery (slow path) — opt-in via PGS_STRAND_FLIP_RESCUE.
+        # See fast-path block for the rationale (ref-panel side currently
+        # doesn't apply rescue → applying it only on user side biases
+        # comparisons). Always run for diagnostics, only fold when env says.
+        rescue_info = _recover_strand_flips(
+            plink2_scoring, vars_file, pgen_prefix, score_prefix, tmpdir)
+        rescue_applied = os.getenv("PGS_STRAND_FLIP_RESCUE") == "1"
+        if rescue_applied and rescue_info["n_recovered"] > 0:
+            orig_sum = result.get("score_sum") or 0.0
+            orig_allele_ct = result.get("allele_count") or 0
+            result["score_sum"] = float(orig_sum) + rescue_info["sum"]
+            new_allele_ct = orig_allele_ct + 2 * rescue_info["n_recovered"]
+            result["allele_count"] = new_allele_ct
+            if new_allele_ct:
+                result["raw_score"] = result["score_sum"] / new_allele_ct
+            matched += rescue_info["n_recovered"]
+        if rescue_info["n_recovered"] > 0 or rescue_info["n_palindromic_skipped"] > 0:
+            logger.info(f"{pgs_id} slow path: strand-flip rescue {'APPLIED' if rescue_applied else 'available (not applied)'} — "
+                        f"recoverable={rescue_info['n_recovered']} "
+                        f"sum={rescue_info['sum']:.4f}, palindromic_skipped={rescue_info['n_palindromic_skipped']}")
+        plink2_warnings["strand_flip_recoverable"] = rescue_info["n_recovered"]
+        plink2_warnings["strand_flip_recovered_sum"] = round(rescue_info["sum"], 4) if rescue_applied else 0.0
+        plink2_warnings["strand_flip_applied"] = rescue_applied
+        plink2_warnings["palindromic_skipped"] = rescue_info["n_palindromic_skipped"]
 
         # Adjust for missing genotypes: ALLELE_CT = 2 * (non-missing vars).
         # Variants with ./. in the pgen are listed in .sscore.vars but
@@ -3235,6 +3597,7 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
             "method_cross_validated": pctl_details.get("cross_validated", False) if pctl_details else False,
             "sanity_gates_tripped": (pctl_details.get("sanity", {}).get("gates_tripped", [])
                                      if pctl_details else []),
+            **plink2_warnings,
         }
 
         _sf_source, _sf_note = _scoring_file_source(scoring_file)
@@ -3303,7 +3666,7 @@ def run_pgs_score(vcf_path, params, progress_cb=None):
             except Exception:
                 pass
 
-        return d
+        return _postprocess_pgs_result(d)
 
 
 def _download_pgs_scoring_file(pgs_id, tmpdir):
@@ -3460,7 +3823,14 @@ def _prepare_plink2_scoring(scoring_file, output_path):
                     metadata[key.strip()] = val.strip()
                 continue
 
-            parts = line.strip().split('\t')
+            # IMPORTANT: rstrip newline only — line.strip() drops empty leading/
+            # trailing tab fields, which silently corrupts harmonized PGS files
+            # where rsID is empty (column shifts → hm_chr/hm_pos misread → row
+            # dropped). Pad short rows so column indexing stays in bounds.
+            # Fixed 2026-05-14 — see PGS000327 incident.
+            parts = line.rstrip('\n').rstrip('\r').split('\t')
+            if col_names is not None and len(parts) < len(col_names):
+                parts = parts + [''] * (len(col_names) - len(parts))
             if col_names is None:
                 col_names = parts
                 continue
@@ -3734,6 +4104,26 @@ def _compute_percentile_multipop_wrapper(pgs_id, raw_score, scoring_file=None,
                 details["selected_ref"] = result.selected_ref
                 details["secondary_percentiles"] = result.secondary_percentiles
                 details["ancestry_model"] = result.ancestry_model
+                # AF-match hint: best-fit population by raw_score-vs-pop_mean
+                # (often diverges from PCA-based selected_ref for under-
+                # represented ancestries — that's the signal users want).
+                details["af_match_ref"] = result.af_match_ref
+                details["af_match_distance_z"] = result.af_match_distance_z
+                # Per-pop percentiles for ALL pops we computed against —
+                # not just the picked secondaries — so the UI can show the
+                # full panel comparison. Each entry: pop -> {percentile, z}.
+                full_per_pop = {}
+                for pop, d in (result.all_details or {}).items():
+                    z = d.get("z_score")
+                    pop_pctl = (result.primary_percentile if pop == result.primary_ref
+                                else result.secondary_percentiles.get(pop))
+                    full_per_pop[pop] = {
+                        "percentile": pop_pctl,
+                        "z_score": z,
+                        "ref_mean": d.get("ref_mean"),
+                        "ref_std": d.get("ref_std"),
+                    }
+                details["per_pop_percentiles"] = full_per_pop
                 return result.primary_percentile, details
             return result.primary_percentile
         except Exception as e:
@@ -3848,13 +4238,98 @@ def _compute_confidence(result, pctl_details, build_check):
     build_status = (build_check or {}).get("status", "unknown")
     if build_status not in ("PASS",):
         reasons.append("build_validation_not_passed")
+    # WEAK status is reported as WARN by _validate_genome_build but we
+    # also surface a separate reason so the audit trail makes the cause
+    # of the downgrade explicit.
+    spot = (build_check or {}).get("spot_check") or {}
+    if spot.get("status") == "WEAK":
+        reasons.append("weak_build_inference")
 
     gates = (pctl_details or {}).get("sanity", {}).get("gates_tripped", [])
     if gates:
         reasons.append("sanity_gates_tripped")
 
+    # Cross-ancestry transfer warning. The 1000G EUR sub-panel (n=503) is
+    # used as the scoring reference panel for every PGS in this pipeline.
+    # When the percentile pipeline picks a non-EUR distribution for the
+    # sample's detected ancestry, the underlying score was still computed
+    # against an EUR-trained PRS — directional interpretation across
+    # ancestries is unreliable and must be flagged.
+    selected_ref = (pctl_details or {}).get("selected_ref")
+    if selected_ref and selected_ref != "EUR":
+        reasons.append("cross_ancestry_transfer")
+
     confidence = "high" if not reasons else "low"
     return confidence, reasons
+
+
+# ── Post-score guards ────────────────────────────────────────────────
+# Single chokepoint that finalizes a PGS result dict before it's returned
+# from any of the scoring paths (fast_direct, slow plink2, BAM pileup).
+# Centralizing the cleanup avoids drift between paths and gives us one
+# place to enforce the invariants the PGS000898 audit surfaced.
+def _postprocess_pgs_result(result):
+    """Standardize a PGS result dict before return.
+
+    1. Disambiguate field names. The scoring panel population
+       (`reference_population`, hardcoded "EUR (European, n=503)") used to
+       sit next to the percentile pipeline's `selected_ref` in the same
+       report — readers couldn't tell which one was "the" reference. The
+       panel one is renamed to `scoring_panel_population` here; the old
+       key is left in place as a deprecated alias so any external readers
+       still resolve.
+    2. Cross-ancestry warning. If `confidence_reasons` contains
+       `cross_ancestry_transfer` (set by _compute_confidence when
+       selected_ref != EUR), add a human-readable warning string at the
+       top of the result. The interpretation-guard in result_guards.py
+       will drop directional LLM phrases that lean on this score.
+    3. Propagate `vcf_build`. If the result-level field is None but
+       build_validation succeeded in reading one, copy it across — the
+       audit specifically complained about `vcf_build: null` even though
+       build_notes / pipeline_info.genome_build were populated.
+    4. `confidence_reason` (singular) as a one-shot summary for UIs that
+       don't iterate `confidence_reasons` (plural).
+    """
+    if not isinstance(result, dict):
+        return result
+
+    pi = result.get("pipeline_info") or {}
+    pd = pi.get("percentile_details") or {}
+
+    # (1) Rename pipeline_info.reference_population → scoring_panel_population
+    if "reference_population" in pi and "scoring_panel_population" not in pi:
+        pi["scoring_panel_population"] = pi["reference_population"]
+        # Leave reference_population in place for backward-compat reads,
+        # but tag it deprecated so future readers know to migrate.
+        pi["reference_population_deprecated"] = (
+            "alias of scoring_panel_population; the percentile pipeline's "
+            "reference population lives at percentile_details.selected_ref"
+        )
+
+    # (2) Cross-ancestry warning text
+    reasons = result.get("confidence_reasons") or []
+    selected_ref = pd.get("selected_ref")
+    panel = pi.get("scoring_panel_population") or pi.get("reference_population") or ""
+    if "cross_ancestry_transfer" in reasons and selected_ref and selected_ref != "EUR":
+        result.setdefault("cross_ancestry_warning", (
+            f"Sample classified as {selected_ref}; PGS scored against the "
+            f"EUR 1000G reference panel ({panel}). PRS performance across "
+            f"ancestries is unreliable — interpret directional risk with "
+            f"caution and validate against same-ancestry data before "
+            f"acting on this number."
+        ))
+
+    # (3) Propagate vcf_build from build_validation
+    if result.get("vcf_build") is None:
+        bv = result.get("build_validation") or {}
+        if bv.get("vcf_build"):
+            result["vcf_build"] = bv["vcf_build"]
+
+    # (4) confidence_reason singular convenience field
+    if not result.get("confidence_reason") and reasons:
+        result["confidence_reason"] = reasons[0]
+
+    return result
 
 
 def _parse_plink2_score_match_count(log_path):
@@ -3879,6 +4354,162 @@ def _parse_plink2_score_match_count(log_path):
     except OSError:
         pass
     return None
+
+
+def _recover_strand_flips(plink2_scoring, scored_vars_path, pgen_prefix,
+                           score_prefix, tmpdir):
+    """Re-score variants plink2 silently dropped because of strand flips.
+
+    plink2 --score doesn't auto-handle strand flips: a scoring entry with
+    effect_allele=G whose pgen variant has alleles (T, C) is skipped (G
+    isn't in {T,C}), even though the COMPLEMENT of G (=C) is. For
+    palindromic SNPs (A/T or C/G) we can't tell from alleles alone whether
+    the catalog used the opposite strand, but for non-palindromic SNPs
+    (where the complement of the catalog allele uniquely identifies one
+    of the pgen alleles) we can.
+
+    Builds a "rescue" scoring file with effect alleles complemented for
+    such mismatches, runs --score on just those, and returns the recovered
+    sum + count. Returns dict with: sum (float), n_recovered (int),
+    n_palindromic_skipped (int — non-recoverable A/T C/G).
+    """
+    out = {"sum": 0.0, "n_recovered": 0, "n_palindromic_skipped": 0,
+           "n_attempted": 0}
+
+    # Read what was already scored
+    scored = set()
+    if os.path.exists(scored_vars_path):
+        with open(scored_vars_path) as f:
+            for line in f:
+                scored.add(line.strip())
+
+    # Read user pgen alleles
+    pvar = pgen_prefix + ".pvar"
+    if not os.path.exists(pvar):
+        return out
+    pgen_alleles = {}
+    with open(pvar) as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            cols = line.rstrip("\n").split("\t")
+            if len(cols) >= 5:
+                ref = cols[3]
+                alts = cols[4].split(",")
+                pgen_alleles[cols[2]] = (ref, alts)
+
+    COMP = str.maketrans("ACGT", "TGCA")
+    PALINDROMIC = {("A", "T"), ("T", "A"), ("C", "G"), ("G", "C")}
+    rescue_lines = []
+    with open(plink2_scoring) as f:
+        header = f.readline()
+        for line in f:
+            cols = line.rstrip("\n").split("\t")
+            if len(cols) < 3:
+                continue
+            vid, ea, w = cols[0], cols[1].upper(), cols[2]
+            if vid in scored:
+                continue
+            entry = pgen_alleles.get(vid)
+            if not entry:
+                continue
+            ref, alts = entry
+            ref = ref.upper()
+            alts_u = [a.upper() for a in alts]
+            # Skip indels in pgen
+            if len(ref) > 1 or any(len(a) > 1 for a in alts_u):
+                continue
+            # Skip indels in scoring
+            if len(ea) > 1:
+                continue
+            allele_set = {ref} | set(alts_u)
+            if ea in allele_set:
+                # Already matchable — must have been skipped for another reason
+                # (multi-allelic dup, etc.). Don't try to flip.
+                continue
+            ea_c = ea.translate(COMP)
+            if ea_c not in allele_set:
+                # Neither orientation matches — true allele mismatch
+                continue
+            # Palindromic SNP: ea + complement both look like valid pgen alleles
+            # only when pgen alleles themselves are A/T or C/G — we cannot tell
+            # which strand without AF data. Skip to avoid introducing bias.
+            if (ref, alts_u[0]) in PALINDROMIC if alts_u else False:
+                out["n_palindromic_skipped"] += 1
+                continue
+            # Non-palindromic: complement uniquely matches → safe to flip
+            rescue_lines.append(f"{vid}\t{ea_c}\t{w}\n")
+            out["n_attempted"] += 1
+
+    if not rescue_lines:
+        return out
+
+    rescue_score_file = os.path.join(tmpdir, "rescue_score.tsv")
+    with open(rescue_score_file, "w") as f:
+        f.write(header)
+        f.writelines(rescue_lines)
+
+    rescue_prefix = os.path.join(tmpdir, "rescue_out")
+    cmd = [
+        PLINK2, "--pfile", pgen_prefix,
+        "--score", rescue_score_file, "header-read", "1", "2", "3",
+        "cols=+scoresums", "no-mean-imputation", "list-variants",
+        "--allow-extra-chr",
+        "--threads", str(PLINK_SCORE_THREADS),
+        "--memory", str(PLINK_MEMORY_MB),
+        "--out", rescue_prefix,
+    ]
+    _, stderr, rc = _run(cmd, timeout=120)
+    rescue_sscore = rescue_prefix + ".sscore"
+    if rc != 0 or not os.path.exists(rescue_sscore):
+        logger.warning(f"strand-flip rescue plink2 failed: {stderr[:200]}")
+        return out
+    parsed = _parse_sscore(rescue_sscore)
+    if parsed and parsed.get("score_sum") is not None:
+        out["sum"] = float(parsed["score_sum"])
+    rescue_vars = rescue_prefix + ".sscore.vars"
+    if os.path.exists(rescue_vars):
+        with open(rescue_vars) as f:
+            out["n_recovered"] = sum(1 for _ in f)
+    return out
+
+
+def _parse_plink2_score_warnings(text, log_path=None):
+    """Extract plink2 --score skip counts from stderr/stdout/log text.
+
+    Returns a dict with whatever is found:
+      {"skipped_missing_var_id": N, "skipped_allele_mismatch": N,
+       "skipped_dup_var_id": N}
+
+    plink2's warning line is:
+      "Warning: --score: N entries in <file> were skipped due to missing
+       variant IDs, and M were skipped due to mismatching allele codes."
+
+    Allele-mismatch skips are the ones that matter for PGS bias — a variant
+    silently dropped here means the user pgen has REF/ALT alleles that don't
+    match the PGS catalog, and the contribution at that locus (which would
+    be dose × weight, possibly zero) is missing entirely. If thousands are
+    dropped, the AVG score is computed over a biased subset.
+    """
+    out = {}
+    blob = text or ""
+    if log_path:
+        try:
+            with open(log_path) as f:
+                blob += "\n" + f.read()
+        except OSError:
+            pass
+    m = re.search(r'(\d+)\s+entries\s+in\s+\S+\s+were\s+skipped\s+due\s+to\s+missing\s+variant\s+IDs',
+                  blob)
+    if m:
+        out["skipped_missing_var_id"] = int(m.group(1))
+    m = re.search(r'(\d+)\s+were\s+skipped\s+due\s+to\s+mismatching\s+allele\s+codes', blob)
+    if m:
+        out["skipped_allele_mismatch"] = int(m.group(1))
+    m = re.search(r'(\d+)\s+were\s+skipped\s+due\s+to\s+duplicate\s+variant', blob)
+    if m:
+        out["skipped_dup_var_id"] = int(m.group(1))
+    return out
 
 
 def _score_ref_panel_matched(pgs_id, scoring_file, matched_vars_path, tmpdir):
@@ -4239,19 +4870,91 @@ def _risk_allele_dosage(ref, alt, genotype, risk):
 
 # ─── ClinVar Screening Runner ───────────────────────────────────
 
+
+def _get_gt_zygosity(gt):
+    """Classify a biallelic GT as hom_alt, het, hom_ref, or missing."""
+    if not gt or gt in (".", "./.", ".|."):
+        return "missing"
+    alleles = gt.replace("|", "/").split("/")
+    nums = [int(a) for a in alleles if a.isdigit()]
+    if not nums:
+        return "missing"
+    if all(n > 0 for n in nums):
+        return "hom_alt"
+    if any(n > 0 for n in nums):
+        return "het"
+    return "hom_ref"
+
+
+def _classify_clinvar_findings(results):
+    """Group ClinVar hits by gene, apply inheritance logic.
+
+    Returns (classified, carrier_only) where classified are actionable
+    findings and carrier_only are heterozygous hits in recessive genes.
+    """
+    from collections import defaultdict
+    by_gene = defaultdict(list)
+    for r in results:
+        by_gene[r["gene"]].append(r)
+
+    classified = []
+    carrier_only = []
+    for gene, variants in by_gene.items():
+        inh = _GENE_INHERITANCE.get(gene, "AD")
+        if inh == "AD":
+            # Autosomal dominant: any pathogenic allele is a finding
+            for v in variants:
+                v["interpretation"] = f"Pathogenic ({v['zygosity']})"
+                classified.append(v)
+        else:  # AR
+            hom_alts = [v for v in variants if v["zygosity"] == "hom_alt"]
+            hets = [v for v in variants if v["zygosity"] == "het"]
+            if hom_alts:
+                for v in hom_alts:
+                    v["interpretation"] = "Pathogenic (homozygous)"
+                    classified.append(v)
+            elif len(hets) >= 2:
+                # Multiple het pathogenic — possible compound het,
+                # but without phasing we can't confirm different haplotypes.
+                positions = set(v["pos"] for v in hets)
+                if len(positions) >= 2:
+                    for v in hets:
+                        v["interpretation"] = "Possible compound het (unphased — needs confirmation)"
+                        classified.append(v)
+                else:
+                    # Same position, different records from norm split —
+                    # still just het carrier
+                    for v in hets:
+                        v["interpretation"] = "Carrier (heterozygous)"
+                        carrier_only.append(v)
+            else:
+                # Single het in AR gene — carrier only
+                for v in hets:
+                    v["interpretation"] = "Carrier (heterozygous)"
+                    carrier_only.append(v)
+
+    return classified, carrier_only
+
+
 def run_clinvar_screen(vcf_path, params):
     """Screen VCF for pathogenic/likely pathogenic variants in specified genes.
 
     Transparently ensures the VCF is annotated with CLNSIG/GENEINFO — if
-    it isn't, we run `bcftools annotate` against the pre-built ClinVar VCF
-    once per file and cache the result.
+    it isn't, we run `bcftools norm -m -both` (split multiallelics) then
+    `bcftools annotate` against the pre-built ClinVar VCF once per file
+    and cache the result.
+
+    After normalization each record is biallelic, so GT is 0/0, 0/1, or
+    1/1. We classify zygosity per variant, then apply inheritance-model
+    logic (AD vs AR) to distinguish true findings from carrier status.
     """
     genes = params.get("genes", [])
     panel = params.get("panel", "Unknown")
     vcf_path = _ensure_indexed(vcf_path)
 
-    # Auto-annotate if needed. The helper is a no-op on VCFs that already
-    # carry CLNSIG+GENEINFO (fast path).
+    # Auto-annotate if needed (now includes bcftools norm for multiallelic
+    # splitting). The helper is a no-op on VCFs that already carry
+    # CLNSIG+GENEINFO (fast path).
     try:
         vcf_path = _ensure_clinvar_annotated(vcf_path)
     except RuntimeError as e:
@@ -4259,15 +4962,13 @@ def run_clinvar_screen(vcf_path, params):
                      test_type="clinvar_screen", panel=panel,
                      genes_screened=len(genes))
 
-    # Do a single query for *all* Pathogenic/Likely_pathogenic variants and
-    # filter to the panel genes in Python. This turns N separate VCF scans
-    # (one per gene, ~20 s each on a 9 M-record VCF) into a single scan
-    # that runs in a few seconds, cutting the ACMG panels from ~10 min to
-    # ~15 s.
+    # Single query for *all* Pathogenic/Likely_pathogenic variants with
+    # DP and GQ for quality filtering. After bcftools norm, records are
+    # biallelic so per-allele annotation is correct.
     gene_set = set(genes)
     q_stdout, q_stderr, q_rc = _run([
         BCFTOOLS, "query",
-        "-f", "%CHROM\t%POS\t%ID\t%REF\t%ALT\t%INFO/CLNSIG\t%INFO/GENEINFO\t[%GT]\n",
+        "-f", "%CHROM\t%POS\t%ID\t%REF\t%ALT\t%INFO/CLNSIG\t%INFO/GENEINFO\t[%GT]\t[%DP]\t[%GQ]\n",
         "-i", '(INFO/CLNSIG~"Pathogenic" || INFO/CLNSIG~"Likely_pathogenic")',
         vcf_path,
     ], timeout=600)
@@ -4276,11 +4977,10 @@ def run_clinvar_screen(vcf_path, params):
     if q_rc == 0 and q_stdout.strip():
         for line in q_stdout.strip().split('\n'):
             parts = line.split('\t')
-            if len(parts) < 8:
+            if len(parts) < 10:
                 continue
             geneinfo = parts[6]
-            # GENEINFO format: "GENE1:ID1|GENE2:ID2|...". Extract all gene
-            # symbols and keep the record if any overlaps the panel.
+            # GENEINFO format: "GENE1:ID1|GENE2:ID2|..."
             variant_genes = set()
             for entry in geneinfo.split('|'):
                 sym = entry.split(':', 1)[0].strip()
@@ -4289,12 +4989,37 @@ def run_clinvar_screen(vcf_path, params):
             matched = variant_genes & gene_set
             if not matched:
                 continue
-            # Only count hom-ref (sample doesn't actually carry it) skips —
-            # we preserve het and hom-alt findings.
+
             gt = parts[7]
-            if not _has_alt_allele(gt):
+            zyg = _get_gt_zygosity(gt)
+            if zyg in ("hom_ref", "missing"):
                 continue
+
+            # QC gate: skip low-quality calls
+            try:
+                dp_val = int(parts[8]) if parts[8] not in (".", "") else 0
+            except (ValueError, IndexError):
+                dp_val = 0
+            try:
+                gq_val = int(parts[9]) if parts[9] not in (".", "") else 0
+            except (ValueError, IndexError):
+                gq_val = 0
+
+            if dp_val < MIN_CLINVAR_DP:
+                logger.info(
+                    f"ClinVar skip low DP: {parts[0]}:{parts[1]} "
+                    f"{parts[3]}>{parts[4]} DP={dp_val}<{MIN_CLINVAR_DP}"
+                )
+                continue
+            if gq_val < MIN_CLINVAR_GQ:
+                logger.info(
+                    f"ClinVar skip low GQ: {parts[0]}:{parts[1]} "
+                    f"{parts[3]}>{parts[4]} GQ={gq_val}<{MIN_CLINVAR_GQ}"
+                )
+                continue
+
             for gene in sorted(matched):
+                inh = _GENE_INHERITANCE.get(gene, "AD")
                 results.append({
                     "gene": gene,
                     "chrom": parts[0],
@@ -4304,14 +5029,31 @@ def run_clinvar_screen(vcf_path, params):
                     "alt": parts[4],
                     "clnsig": parts[5],
                     "genotype": gt,
+                    "zygosity": zyg,
+                    "dp": dp_val,
+                    "gq": gq_val,
+                    "inheritance": inh,
                 })
 
-    found_genes = set(r["gene"] for r in results)
-    clean_genes = [g for g in genes if g not in found_genes]
+    # Apply inheritance-model logic to separate true findings from carriers
+    classified, carrier_only = _classify_clinvar_findings(results)
 
-    if results:
-        headline = f"{len(results)} pathogenic finding(s) in {len(found_genes)} gene(s): " + \
-                   ", ".join(sorted(found_genes)[:5])
+    finding_genes = set(r["gene"] for r in classified)
+    all_hit_genes = finding_genes | set(c["gene"] for c in carrier_only)
+    clean_genes = [g for g in genes if g not in all_hit_genes]
+
+    if classified:
+        headline = (
+            f"{len(classified)} pathogenic finding(s) in "
+            f"{len(finding_genes)} gene(s): "
+            + ", ".join(sorted(finding_genes)[:5])
+        )
+    elif carrier_only:
+        carrier_genes = set(c["gene"] for c in carrier_only)
+        headline = (
+            f"Carrier status in {len(carrier_genes)} recessive gene(s): "
+            + ", ".join(sorted(carrier_genes)[:5])
+        )
     else:
         headline = f"No pathogenic variants in {len(genes)} {panel.lower()} genes"
 
@@ -4319,23 +5061,38 @@ def run_clinvar_screen(vcf_path, params):
                  test_type="clinvar_screen",
                  panel=panel,
                  genes_screened=len(genes),
-                 genes_with_findings=len(found_genes),
-                 findings=results,
+                 genes_with_findings=len(finding_genes),
+                 findings=classified,
+                 carrier_findings=carrier_only,
                  clean_genes=clean_genes,
-                 summary=_summarize_clinvar(panel, genes, results, clean_genes))
+                 summary=_summarize_clinvar(panel, genes, classified,
+                                            carrier_only, clean_genes))
 
 
-def _summarize_clinvar(panel, genes, findings, clean_genes):
+def _summarize_clinvar(panel, genes, findings, carrier_only, clean_genes):
     lines = [f"Monogenic Screening: {panel} Panel"]
     lines.append(f"Genes screened: {len(genes)}")
     if findings:
-        lines.append(f"FINDINGS: {len(findings)} pathogenic/likely pathogenic variant(s) found!")
+        lines.append(f"FINDINGS: {len(findings)} pathogenic variant(s)")
         for f in findings:
-            lines.append(f"  {f['gene']}: {f['chrom']}:{f['pos']} {f['ref']}>{f['alt']} [{f['clnsig']}] GT={f['genotype']}")
-    else:
-        lines.append("No pathogenic/likely pathogenic variants found in screened genes.")
-        lines.append("Note: VCF must have ClinVar annotations for this screen to work. " +
-                      "Run with an annotated VCF for complete results.")
+            lines.append(
+                f"  {f['gene']}: {f['chrom']}:{f['pos']} "
+                f"{f['ref']}>{f['alt']} [{f['clnsig']}] "
+                f"GT={f['genotype']} — {f['interpretation']}"
+            )
+    if carrier_only:
+        lines.append(
+            f"CARRIERS: {len(carrier_only)} heterozygous carrier "
+            f"finding(s) in recessive gene(s)"
+        )
+        for c in carrier_only:
+            lines.append(
+                f"  {c['gene']}: {c['chrom']}:{c['pos']} "
+                f"{c['ref']}>{c['alt']} [{c['clnsig']}] "
+                f"GT={c['genotype']} — {c['interpretation']}"
+            )
+    if not findings and not carrier_only:
+        lines.append("No pathogenic/likely pathogenic variants found.")
     return "\n".join(lines)
 
 
@@ -7006,14 +7763,20 @@ def _run_pgs_score_pileup(bam_path, params, progress_cb=None):
         for line in f:
             if line.startswith("#"):
                 continue
+            # IMPORTANT: rstrip newline only — line.strip() drops empty
+            # leading/trailing tab fields and silently corrupts harmonized
+            # PGS files where rsID is empty. See PGS000327 incident
+            # (2026-05-14). Pad short rows so column indexing stays safe.
             if not header_done:
-                cols = line.strip().split("\t")
+                cols = line.rstrip('\n').rstrip('\r').split('\t')
                 for i, c in enumerate(cols):
                     col_map[c.lower()] = i
                 header_done = True
                 continue
 
-            parts = line.strip().split("\t")
+            parts = line.rstrip('\n').rstrip('\r').split('\t')
+            if 'col_map' in dir() and parts and len(parts) < len(col_map):
+                parts = parts + [''] * (len(col_map) - len(parts))
             if len(parts) < 3:
                 continue
 
@@ -7308,7 +8071,7 @@ def _run_pgs_score_pileup(bam_path, params, progress_cb=None):
         "build_notes": _build_notes,
     }
 
-    return {
+    _eplus_result = {
         "status": status,
         "headline": headline,
         "method": "pileup (Pipeline E+)",
@@ -7316,6 +8079,7 @@ def _run_pgs_score_pileup(bam_path, params, progress_cb=None):
         "trait": trait,
         "score": pgs_sum,
         "raw_score": pgs_avg,
+        "score_sum": pgs_sum,
         "percentile": percentile,
         "variants_matched": matched,
         "variants_total": total,
@@ -7336,6 +8100,29 @@ def _run_pgs_score_pileup(bam_path, params, progress_cb=None):
         },
         "summary": headline,
     }
+    # Mirror the multi-pop ref selection into the result root so the UI
+    # (and live_percentile overlay) can find selected_ref / available_refs
+    # without digging through pipeline_info. Previously these fields were
+    # only in pipeline_info, leaving result.selected_ref=None and the live
+    # overlay defaulted to EUR even when ancestry was correctly detected.
+    if pctl_details:
+        _eplus_result["selected_ref"] = pctl_details.get("selected_ref", "EUR")
+        _eplus_result["available_refs"] = pctl_details.get("available_refs", ["EUR"])
+        _eplus_result["secondary_percentiles"] = pctl_details.get("secondary_percentiles", {})
+        _eplus_result["ancestry_model"] = pctl_details.get("ancestry_model")
+    else:
+        _eplus_result["selected_ref"] = "EUR"
+        _eplus_result["available_refs"] = ["EUR"]
+        _eplus_result["secondary_percentiles"] = {}
+        _eplus_result["ancestry_model"] = None
+    # BAM pileup doesn't run _validate_genome_build (BAM coordinates are
+    # implicit in the aligner reference), so pass build_check=None. We
+    # still want confidence + cross-ancestry warnings so the gating is
+    # symmetric with the VCF / gVCF paths.
+    _conf, _conf_reasons = _compute_confidence(_eplus_result, pctl_details, None)
+    _eplus_result["confidence"] = _conf
+    _eplus_result["confidence_reasons"] = _conf_reasons
+    return _postprocess_pgs_result(_eplus_result)
 
 
 

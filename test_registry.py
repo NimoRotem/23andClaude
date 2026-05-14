@@ -420,6 +420,14 @@ _t('pgs_atrial_5313', 'PGS - Cardiovascular', 'Atrial fibrillation (PRS-CSx) (PG
    '1,271,239 variants. OR 1.82, AUROC 0.78. Yuan S et al., Nat Commun 2025 (Multi)',
    'pgs_score', {'pgs_id': 'PGS005313', 'trait': 'Atrial fibrillation'})
 
+_t('pgs_atrial_2814', 'PGS - Cardiovascular', 'Atrial fibrillation (Miyazawa) (PGS002814)',
+   '4,520 variants. Largest dedicated EAS GWAS validation (n=24,147). Miyazawa K et al., Nat Genet 2023 (EAS+EUR)',
+   'pgs_score', {'pgs_id': 'PGS002814', 'trait': 'Atrial fibrillation'})
+
+_t('pgs_atrial_5072', 'PGS - Cardiovascular', 'Atrial fibrillation (PRS-CSx diverse) (PGS005072)',
+   '1,273,891 variants. PRS-CSx multi-ancestry construction. Gunn S et al., HGG Adv 2024 (AFR+EUR+AMR)',
+   'pgs_score', {'pgs_id': 'PGS005072', 'trait': 'Atrial fibrillation'})
+
 _t('pgs_atrial_4878', 'PGS - Cardiovascular', 'Atrial fibrillation (INTERVENE) (PGS004878)',
    '785,779 variants. HR 1.56-1.68 (7 biobanks). Jermy B et al., Nat Commun 2024 (EUR)',
    'pgs_score', {'pgs_id': 'PGS004878', 'trait': 'Atrial fibrillation'})
@@ -1523,6 +1531,123 @@ _t('pgx_comt', 'Pharmacogenomics', 'COMT',
    'Val158Met (rs4680). Pain meds, dopaminergic drugs. CPIC Level B',
    'variant_lookup', {'variants': [{'rs': 'rs4680', 'gene': 'COMT', 'name': 'Val158Met'}], 'disease': 'COMT activity'})
 
+
+# ── Common PGS additions ──────────────────────────────────────────
+# Twelve entries surfaced in the Common PGS tab (alongside eleven existing
+# tests). Variant counts, methods and citations verified against the PGS
+# Catalog REST API on 2026-05-11. See COMMON_PGS_IDS below for the full
+# tab membership list.
+
+_t('pgs_alzheimers_2753', 'PGS - Neurological / Mental Health',
+   "Alzheimer's disease (genome-wide PRS-CS) (PGS002753)",
+   "1,092,011 variants. Top-performing AD score in Mars/FinnGen benchmarks. Mars N et al., Am J Hum Genet 2022 (EUR)",
+   'pgs_score', {'pgs_id': 'PGS002753', 'trait': "Alzheimer's disease"})
+
+_t('pgs_alzheimers_898', 'PGS - Neurological / Mental Health',
+   "Alzheimer's disease (PRS39_AD) (PGS000898)",
+   "40 variants. Widely-validated genome-wide significant variant score. de Rojas I et al., Nat Commun 2021 (EUR)",
+   'pgs_score', {'pgs_id': 'PGS000898', 'trait': "Alzheimer's disease"})
+
+_t('pgs_schiz_136', 'PGS - Neurological / Mental Health',
+   'Schizophrenia (PRS-CS) (PGS000136)',
+   '833,502 variants. PRS-CS Bayesian score, AUROC 0.64. Zheutlin AB et al., Am J Psychiatry 2019 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000136', 'trait': 'Schizophrenia'})
+
+_t('pgs_breast_7', 'PGS - Cancer', 'Breast cancer (PRS3820_BC) (PGS000007)',
+   '3,820 variants. Mavaddat LASSO score; modest AUC improvement over PRS_313. Mavaddat N et al., Am J Hum Genet 2018 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000007', 'trait': 'Breast cancer'})
+
+_t('pgs_breast_15', 'PGS - Cancer', 'Breast cancer (GPS_BC) (PGS000015)',
+   '5,218 variants. Khera LDpred-based genome-wide score. Khera AV et al., Nat Genet 2018 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000015', 'trait': 'Breast cancer'})
+
+_t('pgs_prostate_30', 'PGS - Cancer', 'Prostate cancer (Schumacher) (PGS000030)',
+   '147 variants. Schumacher PrCa GWAS-significant score. Schumacher FR et al., Nat Genet 2018 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000030', 'trait': 'Prostate cancer'})
+
+_t('pgs_coronary_296', 'PGS - Cardiovascular',
+   'Coronary artery disease (Wang LDpred) (PGS000296)',
+   '6,630,150 variants. LDpred genome-wide CAD score. Wang M et al., J Am Coll Cardiol 2020 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000296', 'trait': 'Coronary artery disease'})
+
+_t('pgs_bmi_5199', 'PGS - Metabolic / Endocrine',
+   'Body mass index (multi-ancestry PRS-CSx) (PGS005199)',
+   "1,296,245 variants. Multi-ancestry GWAS of 5.12M people; explains 17.6% of BMI variance in EUR UKBB. Smit RAJ et al., Nat Med 2025 (Multi)",
+   'pgs_score', {'pgs_id': 'PGS005199', 'trait': 'Body mass index'})
+
+_t('pgs_bmi_34', 'PGS - Metabolic / Endocrine',
+   'Body mass index (adult, GW-sig) (PGS000034)',
+   '97 variants. Genome-wide significant variants from Yengo/GIANT summary stats. Song M et al., Diabetes 2017 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000034', 'trait': 'Body mass index'})
+
+_t('pgs_t2d_2771', 'PGS - Metabolic / Endocrine',
+   'Type 2 diabetes (PRS-CS) (PGS002771)',
+   '1,091,608 variants. Top-AUROC T2D score in Latvian benchmark (AUROC 0.669). Mars N et al., Am J Hum Genet 2022 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS002771', 'trait': 'Type 2 diabetes'})
+
+_t('pgs_t2d_3443', 'PGS - Metabolic / Endocrine',
+   'Type 2 diabetes (multi-ancestry PRS-CSx) (PGS003443)',
+   '1,092,496 variants. Highest reported OR (1.899) in Latvian benchmark of 102 T2D PGSs. Huerta-Chagoya A et al., Diabetologia 2023 (Multi)',
+   'pgs_score', {'pgs_id': 'PGS003443', 'trait': 'Type 2 diabetes'})
+
+_t('pgs_ibd_17', 'PGS - Autoimmune / Inflammatory',
+   'Inflammatory bowel disease (GPS_IBD) (PGS000017)',
+   '6,907,112 variants. Khera LDpred genome-wide score. Khera AV et al., Nat Genet 2018 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS000017', 'trait': 'Inflammatory bowel disease'})
+
+_t('pgs_bipolar_2786', 'PGS - Neurological / Mental Health',
+   'Bipolar disorder (SDPR) (PGS002786)',
+   '948,996 variants. Genome-wide SDPR Bayesian score. Gui Y et al., Transl Psychiatry 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002786', 'trait': 'Bipolar disorder'})
+
+_t('pgs_bipolar_2788', 'PGS - Neurological / Mental Health',
+   'Bipolar disorder (Type 2, SDPR) (PGS002788)',
+   '935,292 variants. Genome-wide SDPR Bayesian score for Type 2 BD. Gui Y et al., Transl Psychiatry 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002788', 'trait': 'Bipolar disorder'})
+
+_t('pgs_schiz_2785', 'PGS - Neurological / Mental Health',
+   'Schizophrenia (SDPR) (PGS002785)',
+   '964,422 variants. Genome-wide SDPR Bayesian score. Gui Y et al., Transl Psychiatry 2022 (EUR)',
+   'pgs_score', {'pgs_id': 'PGS002785', 'trait': 'Schizophrenia'})
+
+
+# ── Common PGS membership (23 tests across 8 conditions) ──────────
+# Surfaced in the "Common PGS" tab between Curated Short List and
+# Polygenic Scores. Each test ID below also belongs to its native
+# PGS - X category (so it still appears under Polygenic Scores).
+COMMON_PGS_IDS = {
+    # Alzheimer's disease (3)
+    'pgs_alzheimers_2280', 'pgs_alzheimers_2753', 'pgs_alzheimers_898',
+    # Bipolar disorder (3 — all from Gui 2022 SDPR family;
+    # markdown's PGS000148 and PGS002754 are mis-labelled — colorectal
+    # cancer and asthma respectively — and stay out)
+    'pgs_bipolar_2786', 'pgs_bipolar_2787', 'pgs_bipolar_2788',
+    # Breast cancer (3)
+    'pgs_breast_004', 'pgs_breast_7', 'pgs_breast_15',
+    # Body mass index (3)
+    'pgs_bmi_5199', 'pgs_bmi_027', 'pgs_bmi_34',
+    # Coronary artery disease (3)
+    'pgs_cad_3725', 'pgs_coronary_18', 'pgs_coronary_296',
+    # Inflammatory bowel disease (3 — 'pgs_psoriasis_1288' is mis-named
+    # in the registry but its params target PGS001288 which IS the IBD PRS)
+    'pgs_ibd_4151', 'pgs_ibd_17', 'pgs_psoriasis_1288',
+    # Schizophrenia (3 — PGS002785 added; markdown's PGS002756 is
+    # mis-labelled atrial fibrillation and stays out)
+    'pgs_schiz_2785', 'pgs_schiz_136', 'pgs_schiz_135',
+    # Type 2 diabetes (3)
+    'pgs_t2d_2771', 'pgs_type_3867', 'pgs_t2d_3443',
+    # Prostate cancer (DROPPED 2026-05-14 — not in the curated 9-section
+    # Common PGS layout. Tests still exist under Polygenic Scores.)
+    # 'pgs_prostate_662', 'pgs_prostate_30',
+    # Atrial fibrillation (5 — methodological benchmarking set across
+    # different PRS construction approaches and ancestry compositions:
+    # Yuan 2025 PRS-CSx multi-ancestry, Roselli 2025 largest GWAS w/
+    # 17.1% EAS training, Miyazawa 2023 dedicated EAS validation,
+    # Gunn 2024 PRS-CSx diverse comparator, Khera 2018 historical
+    # benchmark.)
+    'pgs_atrial_5313', 'pgs_atrial_5168', 'pgs_atrial_2814',
+    'pgs_atrial_5072', 'pgs_afib_016',
+}
 
 
 TESTS_BY_ID = {t["id"]: t for t in TESTS}

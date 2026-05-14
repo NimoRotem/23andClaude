@@ -47,3 +47,11 @@ pgs_enrichment.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Runtime outputs / staging
+logs/
+reports/
+_*-deleted-*/
+backfill_log.jsonl
+backfill_output.log
+*.backup-*

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>23andclaude — Pipeline Documentation</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --border: #262a34;
+    --text: #e6e8ee;
+    --muted: #9aa0ad;
+    --link: #6ea8ff;
+    --link-hover: #a5c6ff;
+    --code-bg: #0b0d12;
+    --code-border: #2a2f3a;
+    --hl: #ffd166;
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .layout { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
+  aside { background: var(--panel); border-right: 1px solid var(--border); padding: 22px 18px; overflow-y: auto; position: sticky; top: 0; max-height: 100vh; }
+  aside h1 { font-size: 16px; margin: 0 0 4px; }
+  aside .sub { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+  aside ol { list-style: none; padding: 0; margin: 0; }
+  aside li { margin: 4px 0; }
+  aside a { color: var(--text); text-decoration: none; display: block; padding: 8px 10px; border-radius: 6px; font-size: 13.5px; }
+  aside a:hover { background: rgba(255,255,255,0.06); color: var(--link-hover); }
+  aside a.active { background: rgba(110,168,255,0.12); color: var(--link); }
+  aside .num { color: var(--muted); margin-right: 6px; font-variant-numeric: tabular-nums; font-size: 11.5px; }
+  aside .footer { color: var(--muted); font-size: 11.5px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+  aside .footer a { color: var(--link); padding: 0; display: inline; }
+  main { padding: 28px 36px 80px; max-width: 920px; }
+  main h1 { font-size: 28px; margin: 0 0 8px; }
+  main h2 { margin-top: 32px; padding-top: 8px; border-top: 1px solid var(--border); }
+  main h3 { margin-top: 26px; }
+  main h2:first-of-type, main h3:first-of-type { border: none; padding: 0; }
+  main a { color: var(--link); }
+  main a:hover { color: var(--link-hover); }
+  main code { background: var(--code-bg); border: 1px solid var(--code-border); border-radius: 4px; padding: 1.5px 5px; font-size: 13px; font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace; }
+  main pre { background: var(--code-bg); border: 1px solid var(--code-border); border-radius: 6px; padding: 12px 14px; overflow-x: auto; font-size: 12.5px; line-height: 1.5; }
+  main pre code { background: none; border: none; padding: 0; }
+  main blockquote { border-left: 3px solid var(--hl); margin: 12px 0; padding: 4px 14px; color: var(--muted); }
+  main table { border-collapse: collapse; margin: 10px 0; font-size: 13.5px; }
+  main th, main td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  main th { background: var(--panel); }
+  main hr { border: 0; border-top: 1px solid var(--border); margin: 28px 0; }
+  .raw-link { display: inline-block; margin-top: 12px; font-size: 12px; color: var(--muted); }
+  .raw-link a { color: var(--muted); }
+  .loading, .error { color: var(--muted); padding: 24px 0; }
+  .error { color: #ff8080; }
+  @media (max-width: 880px) {
+    .layout { grid-template-columns: 1fr; }
+    aside { position: static; max-height: none; border-right: none; border-bottom: 1px solid var(--border); }
+    main { padding: 22px 18px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <h1>Pipeline Docs</h1>
+    <div class="sub">23andclaude.com — bioinformatics review</div>
+    <ol id="nav">
+      <li><a data-file="README.md"                  href="#README"><span class="num">00</span>Index &amp; TL;DR</a></li>
+      <li><a data-file="01-overview.md"             href="#01"><span class="num">01</span>System overview</a></li>
+      <li><a data-file="02-input-and-alignment.md"  href="#02"><span class="num">02</span>Input &amp; alignment</a></li>
+      <li><a data-file="03-pgs-ingestion.md"        href="#03"><span class="num">03</span>PGS ingestion</a></li>
+      <li><a data-file="04-scoring-pipeline.md"     href="#04"><span class="num">04</span>Scoring pipeline</a></li>
+      <li><a data-file="05-reference-panel.md"      href="#05"><span class="num">05</span>Reference panel</a></li>
+      <li><a data-file="06-percentile-and-stats.md" href="#06"><span class="num">06</span>Percentile &amp; stats</a></li>
+      <li><a data-file="07-qa-and-validation.md"    href="#07"><span class="num">07</span>QA &amp; validation</a></li>
+      <li><a data-file="08-data-layout.md"          href="#08"><span class="num">08</span>Data layout</a></li>
+      <li><a data-file="09-examples.md"             href="#09"><span class="num">09</span>Worked examples</a></li>
+      <li><a data-file="10-known-issues.md"         href="#10"><span class="num">10</span>Known issues</a></li>
+    </ol>
+    <div class="footer">
+      All docs are also served as raw <code>.md</code> at this URL.<br>
+      Source: <a href="README.md">README.md</a>
+    </div>
+  </aside>
+  <main>
+    <div id="content"><div class="loading">Loading…</div></div>
+    <div class="raw-link"><a id="raw-link" href="README.md" target="_blank">View raw markdown ↗</a></div>
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script>
+  const HASH_TO_FILE = {
+    '':         'README.md',
+    'README':   'README.md',
+    '01':       '01-overview.md',
+    '02':       '02-input-and-alignment.md',
+    '03':       '03-pgs-ingestion.md',
+    '04':       '04-scoring-pipeline.md',
+    '05':       '05-reference-panel.md',
+    '06':       '06-percentile-and-stats.md',
+    '07':       '07-qa-and-validation.md',
+    '08':       '08-data-layout.md',
+    '09':       '09-examples.md',
+    '10':       '10-known-issues.md',
+  };
+
+  function setActive(file) {
+    document.querySelectorAll('#nav a').forEach(a => {
+      a.classList.toggle('active', a.dataset.file === file);
+    });
+    document.getElementById('raw-link').href = file;
+  }
+
+  async function load() {
+    const hash = location.hash.replace(/^#/, '');
+    const file = HASH_TO_FILE[hash] || 'README.md';
+    setActive(file);
+    const content = document.getElementById('content');
+    content.innerHTML = '<div class="loading">Loading ' + file + '…</div>';
+    try {
+      const r = await fetch(file + '?cb=' + Date.now());
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const md = await r.text();
+      // Rewrite relative .md links to hash navigation
+      const rewritten = md.replace(/\]\((\d{2}-[\w-]+)\.md\)/g, (m, p1) => {
+        const num = p1.slice(0,2);
+        return '](#' + num + ')';
+      }).replace(/\]\(README\.md\)/g, '](#README)');
+      content.innerHTML = marked.parse(rewritten, { breaks: false, gfm: true });
+      window.scrollTo(0, 0);
+    } catch (e) {
+      content.innerHTML = '<div class="error">Failed to load ' + file + ': ' + e.message + '</div>';
+    }
+  }
+
+  window.addEventListener('hashchange', load);
+  document.addEventListener('DOMContentLoaded', load);
+</script>
+</body>
+</html>
