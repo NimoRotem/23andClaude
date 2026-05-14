@@ -1373,6 +1373,21 @@ def _interpret_result(test_def: dict, result: dict, username: str = None) -> tup
     Returns (interpretation_text, error_message).
     Uses semaphore to limit concurrency and retries on transient errors."""
 
+    # # GATE_W0_4_LLM_LOCK: PGS results that the deterministic gate has
+    # decided are NOT interpretable get the templated failure prose,
+    # NOT a free-form LLM rewrite. Per advisor recommendation and
+    # remediation plan W0.4.
+    try:
+        status = result.get("interpretability_status")
+        if status and status != "INTERPRETABLE":
+            human = result.get("failure_reason_human")
+            code = result.get("failure_reason_code") or status
+            if human:
+                return human, None
+            return f"No interpretation rendered — reason: {code}.", None
+    except Exception:
+        pass
+
     # Determine which model to use
     model_choice = "gemini"
     if username:
@@ -2751,6 +2766,29 @@ def _get_detected_ancestry(username, file_id):
     return None
 
 
+# # GATE_W0_7_HIDE_SENSITIVE: sensitive PGSes withheld from public listings.
+# These are scored if a user explicitly requests them by id, but
+# the curated/common test catalogues filter them out. Per W0.7.
+_SENSITIVE_PGS_IDS = {
+    "PGS001232", "PGS001919", "PGS002135",
+    "PGS003510", "PGS003723", "PGS003724", "PGS004427",
+}
+_SENSITIVE_TRAIT_KEYWORDS = (
+    "intelligence", "fluid intelligence", "cognitive ability",
+    "cognitive performance", "educational attainment", "income",
+    "iq score", "verbal-numerical reasoning",
+)
+def _is_sensitive_test(t):
+    try:
+        params = (t.get("params") or {}) if isinstance(t, dict) else {}
+        pgs_id = (params.get("pgs_id") or "").upper().strip()
+        if pgs_id in _SENSITIVE_PGS_IDS:
+            return True
+        trait = (params.get("trait") or t.get("name") or "").lower()
+        return any(k in trait for k in _SENSITIVE_TRAIT_KEYWORDS)
+    except Exception:
+        return False
+
 @app.get("/api/tests")
 def get_tests(username: str = Depends(current_user)):
     """Return the global test catalog + the calling user's active file."""
@@ -3047,11 +3085,17 @@ def get_tests_tabs(username: str = Depends(current_user)):
     for tk in TAB_ORDER:
         td = TAB_DEFS[tk]
         if tk == "curated":
-            count = sum(1 for t in TESTS if t["id"] in CURATED_IDS)
+            count = sum(1 for t in TESTS
+                        if t["id"] in CURATED_IDS
+                        and not _is_sensitive_test(t))
         elif tk == "common":
-            count = sum(1 for t in TESTS if t["id"] in COMMON_PGS_IDS)
+            count = sum(1 for t in TESTS
+                        if t["id"] in COMMON_PGS_IDS
+                        and not _is_sensitive_test(t))
         else:
-            count = sum(1 for t in TESTS if _tab_for_category(t["category"]) == tk)
+            count = sum(1 for t in TESTS
+                        if _tab_for_category(t["category"]) == tk
+                        and not _is_sensitive_test(t))
         result.append({"key": tk, "label": td["label"], "count": count})
     return {"ok": True, "tabs": result}
 
@@ -13324,6 +13368,7 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
     trait_meta = {}
     all_categories = set()
     all_samples = set()
+    excluded: dict = {}  # GATE_W0_5: trait → list of {sample, file_id, reason_code, ...}
 
     for fid_dir in reports_root.iterdir():
         if not fid_dir.is_dir():
@@ -13339,8 +13384,32 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
                 continue
             _apply_live_pctl(rep)
             res = rep.get("result") or {}
+            # # GATE_W0_5_COMPARE_EXCLUDED: record-not-silently-drop. Per W0.5.
+            _trait_for_excl = (res.get("trait") or
+                                (rep.get("test_name") or "").split(" (")[0]).strip()
+            def _excl(reason_code):
+                if not _trait_for_excl:
+                    return
+                excluded.setdefault(_trait_for_excl, []).append({
+                    "sample": sample,
+                    "file_id": fid,
+                    "file_label": _file_label(fid),
+                    "pgs_id": res.get("pgs_id"),
+                    "task_id": rep.get("task_id"),
+                    "reason_code": reason_code,
+                    "reason_human": res.get("failure_reason_human"),
+                    "match_rate": res.get("match_rate_value"),
+                    "z_score": _compare_extract_z(res),
+                })
             status = (res.get("status") or rep.get("status") or "passed").lower()
             if status not in ("passed", "ok", "success", "completed", ""):
+                _excl("SCORE_NOT_COMPUTED")
+                continue
+            # Gate-based exclusion: if the gate says not interpretable,
+            # skip but record why (W0.5).
+            interp = res.get("interpretability_status")
+            if interp and interp != "INTERPRETABLE":
+                _excl(res.get("failure_reason_code") or interp)
                 continue
             mr = res.get("match_rate_value")
             try:
@@ -13348,15 +13417,19 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
             except (TypeError, ValueError):
                 mr = None
             if mr is None or mr < min_match:
+                _excl("MATCH_RATE_BELOW_THRESHOLD")
                 continue
             confidence = (res.get("confidence") or "unknown").lower()
             if high_conf_only and confidence != "high":
+                _excl("LOW_CONFIDENCE")
                 continue
             z = _compare_extract_z(res)
             pct = _compare_extract_pct(res)
             if z is None and pct is None:
+                _excl("NO_Z_OR_PERCENTILE")
                 continue
             if z is not None and abs(z) > max_abs_z:
+                _excl("Z_SCORE_EXTREME")
                 continue
             trait = (res.get("trait")
                      or (rep.get("test_name") or "").split(" (")[0]).strip()
@@ -13436,6 +13509,7 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
             "category": meta.get("category", ""),
             "description": meta.get("description", ""),
             "pgs_ids": sorted(meta.get("pgs_ids") or []),
+            "excluded_samples": excluded.get(trait, []),  # GATE_W0_5
             "avg_match_rate": round(
                 _cmp_stats.fmean([s["mean_match_rate"] for s in sample_aggs]), 1),
             "n_samples": len(sample_aggs),

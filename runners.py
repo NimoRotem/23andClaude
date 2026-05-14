@@ -4431,6 +4431,18 @@ def _postprocess_pgs_result(result):
     if not result.get("confidence_reason") and reasons:
         result["confidence_reason"] = reasons[0]
 
+    # # GATE_W0_4_WIRE_RESULT_GATE: final interpretability decision is made by
+    # pipeline.result_gate.apply_gate. It sets score_computed,
+    # percentile_available, interpretability_status,
+    # failure_reason_code, failure_reason_human and (when not
+    # interpretable) blanks the rendered percentile. See chapter 15
+    # of pipelinesdocsv2. Idempotent and safe on partial dicts.
+    try:
+        from pipeline.result_gate import apply_gate as _apply_gate
+        _apply_gate(result)
+    except Exception as _gate_exc:
+        logger.warning(f"result_gate failed (continuing without gate): {_gate_exc}")
+
     return result
 
 

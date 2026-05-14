@@ -154,105 +154,128 @@ def apply_live_overlay(report: Dict[str, Any]) -> Dict[str, Any]:
     Safe to call on any report dict — non-PGS, failed, or partial reports
     are returned unchanged.
     """
+    # # GATE_W0_4_FINALLY_WRAP: run the deterministic gate on EVERY exit path,
+    # including the early-return branches where new_pctl is None
+    # (schema-invalid stats). Per W0.4 / W0.5.
     try:
-        result = report.get("result")
-        if not isinstance(result, dict):
-            return report
-        if result.get("test_type") != "pgs_score":
-            return report
-        if result.get("status") != "passed":
-            return report
-        raw_score = result.get("raw_score")
-        if raw_score is None:
-            return report
-        pgs_id = result.get("pgs_id")
-        if not pgs_id:
-            return report
-        # Mark cohort-sanity-flagged PGS so the UI can show a warning.
-        # These have demonstrated systematic bias in the user's cohort
-        # vs the 1000G ref panel (KS p<0.01), so percentile interpretation
-        # is unreliable until the bias is resolved upstream.
-        if pgs_id in _load_cohort_flagged_pgs():
-            result["cohort_sanity_flagged"] = True
-            result.setdefault("cohort_sanity_warning", (
-                f"{pgs_id} percentile is statistically unreliable for this "
-                "cohort: the user's samples deviate significantly from the "
-                "1000G reference distribution (cron_cohort_sanity KS p<0.01). "
-                "Treat the percentile as indicative, not diagnostic."
-            ))
-        # Hardcoded "known low portability" warning — fires on first read of
-        # a flagged PGS, before cohort_sanity has enough samples to detect
-        # the bias from the data itself.
-        try:
-            from .portability_warnings import portability_warning
-            pw = portability_warning(pgs_id)
-            if pw:
-                result["portability_warning"] = pw
-                result["low_portability_pgs"] = True
-        except Exception:
-            pass
-        # Cohort-relative percentile: rank within all OTHER reports for the
-        # same PGS in this system. Useful when the absolute percentile is
-        # unreliable due to AF divergence from 1000G — gives a within-cohort
-        # comparison that doesn't depend on the ref panel matching.
-        try:
-            cohort = _cohort_relative_percentile(pgs_id, float(raw_score),
-                                                  exclude_self=True)
-            if cohort is not None:
-                result["cohort_relative_percentile"] = cohort["percentile"]
-                result["cohort_size"] = cohort["n_cohort"]
-                result["cohort_median_raw_score"] = cohort["cohort_median"]
-        except Exception as e:
-            logger.warning(f"cohort percentile failed for {pgs_id}: {e}")
-        pop = result.get("selected_ref") or "EUR"
-        score_sum = result.get("score_sum")
+      try:
+          result = report.get("result")
+          if not isinstance(result, dict):
+              return report
+          if result.get("test_type") != "pgs_score":
+              return report
+          if result.get("status") != "passed":
+              return report
+          raw_score = result.get("raw_score")
+          if raw_score is None:
+              return report
+          pgs_id = result.get("pgs_id")
+          if not pgs_id:
+              return report
+          # Mark cohort-sanity-flagged PGS so the UI can show a warning.
+          # These have demonstrated systematic bias in the user's cohort
+          # vs the 1000G ref panel (KS p<0.01), so percentile interpretation
+          # is unreliable until the bias is resolved upstream.
+          if pgs_id in _load_cohort_flagged_pgs():
+              result["cohort_sanity_flagged"] = True
+              result.setdefault("cohort_sanity_warning", (
+                  f"{pgs_id} percentile is statistically unreliable for this "
+                  "cohort: the user's samples deviate significantly from the "
+                  "1000G reference distribution (cron_cohort_sanity KS p<0.01). "
+                  "Treat the percentile as indicative, not diagnostic."
+              ))
+          # Hardcoded "known low portability" warning — fires on first read of
+          # a flagged PGS, before cohort_sanity has enough samples to detect
+          # the bias from the data itself.
+          try:
+              from .portability_warnings import portability_warning
+              pw = portability_warning(pgs_id)
+              if pw:
+                  result["portability_warning"] = pw
+                  result["low_portability_pgs"] = True
+          except Exception:
+              pass
+          # Cohort-relative percentile: rank within all OTHER reports for the
+          # same PGS in this system. Useful when the absolute percentile is
+          # unreliable due to AF divergence from 1000G — gives a within-cohort
+          # comparison that doesn't depend on the ref panel matching.
+          try:
+              cohort = _cohort_relative_percentile(pgs_id, float(raw_score),
+                                                    exclude_self=True)
+              if cohort is not None:
+                  result["cohort_relative_percentile"] = cohort["percentile"]
+                  result["cohort_size"] = cohort["n_cohort"]
+                  result["cohort_median_raw_score"] = cohort["cohort_median"]
+          except Exception as e:
+              logger.warning(f"cohort percentile failed for {pgs_id}: {e}")
+          pop = result.get("selected_ref") or "EUR"
+          score_sum = result.get("score_sum")
 
-        from .scoring import compute_percentile_for_ref
-        from . import registry as _ref_registry
+          from .scoring import compute_percentile_for_ref
+          from . import registry as _ref_registry
 
-        new_pctl, details = compute_percentile_for_ref(
-            pgs_id, float(raw_score), pop, score_sum=score_sum
-        )
-        if new_pctl is None:
-            # incompatible_ref_stats / unavailable / extreme z → don't overwrite,
-            # but surface the reason so the UI can show the gap.
-            result["live_percentile_unavailable_reason"] = details.get("reason") or details.get("method")
-            return report
+          new_pctl, details = compute_percentile_for_ref(
+              pgs_id, float(raw_score), pop, score_sum=score_sum
+          )
+          if new_pctl is None:
+              # incompatible_ref_stats / unavailable / extreme z → don't overwrite,
+              # but surface the reason so the UI can show the gap.
+              result["live_percentile_unavailable_reason"] = details.get("reason") or details.get("method")
+              return report
 
-        stored_pctl = result.get("percentile")
-        # Drift threshold — anything > 0.1 percentile change is worth recording.
-        if stored_pctl is not None and abs(float(stored_pctl) - new_pctl) <= 0.1:
-            return report
+          stored_pctl = result.get("percentile")
+          # Drift threshold — anything > 0.1 percentile change is worth recording.
+          if stored_pctl is not None and abs(float(stored_pctl) - new_pctl) <= 0.1:
+              return report
 
-        current_entry = _ref_registry.entry(pgs_id, pop) or {}
-        if stored_pctl is not None:
-            result["percentile_at_scoring"] = stored_pctl
-        result["percentile"] = new_pctl
-        result["percentile_recomputed_on_read"] = True
-        result["live_ref_mean"] = details.get("ref_mean")
-        result["live_ref_std"] = details.get("ref_std")
-        result["live_z_score"] = details.get("z_score")
-        result["live_stats_file"] = details.get("stats_file")
-        if current_entry:
-            result["live_stats_variant_ids_sha256"] = current_entry.get("variant_ids_sha256")
+          current_entry = _ref_registry.entry(pgs_id, pop) or {}
+          if stored_pctl is not None:
+              result["percentile_at_scoring"] = stored_pctl
+          result["percentile"] = new_pctl
+          result["percentile_recomputed_on_read"] = True
+          result["live_ref_mean"] = details.get("ref_mean")
+          result["live_ref_std"] = details.get("ref_std")
+          result["live_z_score"] = details.get("z_score")
+          result["live_stats_file"] = details.get("stats_file")
+          if current_entry:
+              result["live_stats_variant_ids_sha256"] = current_entry.get("variant_ids_sha256")
 
-        # Patch derived strings so the UI doesn't show stale numbers
-        # alongside the corrected percentile.
-        summary = result.get("summary")
-        if isinstance(summary, str) and stored_pctl is not None:
-            old_str = f"{stored_pctl}%"
-            new_str = f"{new_pctl}%"
-            if old_str in summary:
-                result["summary"] = summary.replace(old_str, new_str)
-        headline = result.get("headline")
-        if isinstance(headline, str) and stored_pctl is not None:
-            old_str = f"{stored_pctl}%ile"
-            new_str = f"{new_pctl}%ile"
-            if old_str in headline:
-                result["headline"] = headline.replace(old_str, new_str)
-    except Exception as e:
+          # Patch derived strings so the UI doesn't show stale numbers
+          # alongside the corrected percentile.
+          summary = result.get("summary")
+          if isinstance(summary, str) and stored_pctl is not None:
+              old_str = f"{stored_pctl}%"
+              new_str = f"{new_pctl}%"
+              if old_str in summary:
+                  result["summary"] = summary.replace(old_str, new_str)
+          headline = result.get("headline")
+          if isinstance(headline, str) and stored_pctl is not None:
+              old_str = f"{stored_pctl}%ile"
+              new_str = f"{new_pctl}%ile"
+              if old_str in headline:
+                  result["headline"] = headline.replace(old_str, new_str)
+
+          # # GATE_W0_4_READ_TIME: run the deterministic gate on every read.
+          # Old reports (pre-gate) get a fresh interpretability verdict
+          # and stale unsafe percentiles are blanked. Per W0.4 / W1.5.
+          try:
+              from .result_gate import apply_gate as _apply_gate
+              _apply_gate(result)
+          except Exception as _gate_exc:
+              logger.warning(f"result_gate (read-time) failed: {_gate_exc}")
+      except Exception as e:
         # Never break a read because of overlay failure.
         logger.warning(f"live_percentile overlay failed: {e}")
+      finally:
+        try:
+          result = report.get("result") if isinstance(report, dict) else None
+          if isinstance(result, dict):
+            from .result_gate import apply_gate as _apply_gate
+            _apply_gate(result)
+        except Exception as _gate_exc:
+          logger.warning(f"result_gate (read-time) failed: {_gate_exc}")
+    except Exception:
+        pass
     return report
 
 

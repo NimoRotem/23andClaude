@@ -257,6 +257,19 @@ def select_reference(ancestry_result: Optional[Dict], pgs_id: str,
             ancestry_proportions=proportions,
         )
 
+    # # GATE_W0_3_MID_NO_FALLBACK: MID and other unsupported populations must not
+    # fall back to EUR/MIX. If the inferred ancestry is MID with non-trivial
+    # share, surface it as primary="MID" so result_gate maps it to
+    # UNSUPPORTED_ANCESTRY_PANEL and no percentile renders. Per W0.3.
+    mid_share = float(proportions.get("MID", 0) or 0)
+    if mid_share >= 0.40:
+        return RefSelection(
+            primary="MID",
+            secondary=POPS_5,
+            reason=f"MID ancestry={mid_share:.0%} — no reference panel available",
+            ancestry_proportions=proportions,
+        )
+
     sorted_pops = sorted(proportions.items(), key=lambda x: x[1], reverse=True)
     top_pop, top_prop = sorted_pops[0]
     if top_prop >= 0.80:
