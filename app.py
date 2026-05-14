@@ -8461,8 +8461,15 @@ input[type="file"] { display: none; }
           <a href="#/data" data-view="data" onclick="closeMyDataDropdown()">My Files</a>
           <div class="dd-divider"></div>
           <div class="dd-label">Tools</div>
-          <a href="/ancestry/" target="_blank">Ancestry Analysis</a>
           <a href="/convert" target="_blank">File Converter</a>
+        </div>
+      </div>
+      <div class="nav-dropdown" id="moreToolsDropdown">
+        <button class="nav-dropdown-toggle" id="moreToolsToggle" onclick="toggleMoreToolsDropdown(event)">More Tools <span style="font-size:0.6em">&#9662;</span></button>
+        <div class="nav-dropdown-menu">
+          <a href="/compare" onclick="closeMoreToolsDropdown()">Trait Comparison</a>
+          <a href="/ancestry/" target="_blank">Ancestry Analysis</a>
+          <a href="https://scan.23andclaude.com" target="_blank" rel="noopener">Scan</a>
         </div>
       </div>
       <a href="#/settings" data-view="settings" class="nav-settings" title="Settings" style="margin-left:6px;">&#9881;</a>
@@ -11367,13 +11374,26 @@ function showView(name) {
 function toggleMyDataDropdown(e) {
   e.stopPropagation();
   document.getElementById('myDataDropdown').classList.toggle('open');
+  const mt = document.getElementById('moreToolsDropdown');
+  if (mt) mt.classList.remove('open');
 }
 function closeMyDataDropdown() {
   document.getElementById('myDataDropdown').classList.remove('open');
 }
+function toggleMoreToolsDropdown(e) {
+  e.stopPropagation();
+  document.getElementById('moreToolsDropdown').classList.toggle('open');
+  const md = document.getElementById('myDataDropdown');
+  if (md) md.classList.remove('open');
+}
+function closeMoreToolsDropdown() {
+  document.getElementById('moreToolsDropdown').classList.remove('open');
+}
 document.addEventListener('click', function(e) {
   const dd = document.getElementById('myDataDropdown');
   if (dd && !dd.contains(e.target)) dd.classList.remove('open');
+  const dd2 = document.getElementById('moreToolsDropdown');
+  if (dd2 && !dd2.contains(e.target)) dd2.classList.remove('open');
   // Mobile: tap file-tag to show tooltip
   if (e.target.classList.contains('file-tag') && e.target.dataset.tip) {
     e.stopPropagation();
