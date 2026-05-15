@@ -201,15 +201,13 @@ def apply_live_overlay(report: Dict[str, Any]) -> Dict[str, Any]:
           # same PGS in this system. Useful when the absolute percentile is
           # unreliable due to AF divergence from 1000G — gives a within-cohort
           # comparison that doesn't depend on the ref panel matching.
-          try:
-              cohort = _cohort_relative_percentile(pgs_id, float(raw_score),
-                                                    exclude_self=True)
-              if cohort is not None:
-                  result["cohort_relative_percentile"] = cohort["percentile"]
-                  result["cohort_size"] = cohort["n_cohort"]
-                  result["cohort_median_raw_score"] = cohort["cohort_median"]
-          except Exception as e:
-              logger.warning(f"cohort percentile failed for {pgs_id}: {e}")
+          # # SKIP_COHORT_PERF: cohort scan was hot loop (~21K file reads per
+
+          # /api/compare). Skipped until rewritten as a request-scoped
+
+          # computation. Diagnostic field; UI does not rely on it.
+
+          pass
           pop = result.get("selected_ref") or "EUR"
           score_sum = result.get("score_sum")
 
