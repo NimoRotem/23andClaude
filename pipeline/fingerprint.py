@@ -77,19 +77,29 @@ def _run_for_version(cmd: list[str]) -> Optional[str]:
     return out[0] if out else None
 
 
+# # ABS_PATH_FIX: resolve tool binaries by absolute path (the supervisor
+# service runs without the conda env on PATH, so bare names fail).
+_GENOMICS_BIN = "/home/nimo/miniconda3/envs/genomics/bin"
+_PLINK2_BIN   = os.getenv("PLINK2",   f"{_GENOMICS_BIN}/plink2")
+_BCFTOOLS_BIN = os.getenv("BCFTOOLS", f"{_GENOMICS_BIN}/bcftools")
+_SAMTOOLS_BIN = os.getenv("SAMTOOLS", f"{_GENOMICS_BIN}/samtools")
+_LIFTOVER_BIN = os.getenv("LIFTOVER_BIN",
+                           "/home/nimrod_rotem/simple-genomics/liftover/liftOver")
+
+
 @lru_cache(maxsize=1)
 def plink2_version() -> Optional[str]:
-    return _run_for_version(["plink2", "--version"])
+    return _run_for_version([_PLINK2_BIN, "--version"])
 
 
 @lru_cache(maxsize=1)
 def bcftools_version() -> Optional[str]:
-    return _run_for_version(["bcftools", "--version"])
+    return _run_for_version([_BCFTOOLS_BIN, "--version"])
 
 
 @lru_cache(maxsize=1)
 def samtools_version() -> Optional[str]:
-    return _run_for_version(["samtools", "--version"])
+    return _run_for_version([_SAMTOOLS_BIN, "--version"])
 
 
 @lru_cache(maxsize=1)
@@ -97,7 +107,7 @@ def liftover_version() -> Optional[str]:
     """liftOver doesn't accept --version; the help text first line carries
     the build date. Capture it as version proxy."""
     try:
-        proc = subprocess.run(["liftOver"], capture_output=True, text=True, timeout=5)
+        proc = subprocess.run([_LIFTOVER_BIN], capture_output=True, text=True, timeout=5)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     out = (proc.stdout or proc.stderr or "").strip().splitlines()

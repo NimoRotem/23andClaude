@@ -164,7 +164,9 @@ def apply_live_overlay(report: Dict[str, Any]) -> Dict[str, Any]:
               return report
           if result.get("test_type") != "pgs_score":
               return report
-          if result.get("status") != "passed":
+          # # OVERLAY_FINGERPRINT_RECOVERY: include fingerprint_drift_refused as recoverable
+
+          if result.get("status") not in ("passed", "fingerprint_drift_refused", "warning"):
               return report
           raw_score = result.get("raw_score")
           if raw_score is None:
@@ -232,7 +234,16 @@ def apply_live_overlay(report: Dict[str, Any]) -> Dict[str, Any]:
           if stored_pctl is not None:
               result["percentile_at_scoring"] = stored_pctl
           result["percentile"] = new_pctl
+
           result["percentile_recomputed_on_read"] = True
+
+          # # OVERLAY_FINGERPRINT_RECOVERY: promote status when recovered
+
+          if result.get("status") == "fingerprint_drift_refused":
+
+              result["status"] = "passed"
+
+              result["fingerprint_drift_recovered"] = True
           result["live_ref_mean"] = details.get("ref_mean")
           result["live_ref_std"] = details.get("ref_std")
           result["live_z_score"] = details.get("z_score")
