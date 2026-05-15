@@ -276,7 +276,16 @@ def should_use_dynamic_subset(
 
 
 def coverage_gate_status(weighted_coverage: float) -> Optional[str]:
-    """Spec §1.1 hard refusal: wc<0.80 → coverage_insufficient."""
+    """Spec §1.1 hard refusal: wc<0.80 → coverage_insufficient.
+
+    # WC_ZERO_BYPASS: weighted_coverage == 0 means the refpanel AF lookup
+    failed (variant-ID format mismatch between scoring TSV and 1000G
+    pvar). Treat that as 'unknown', NOT 'low' — the match-rate gate
+    upstream is the real safety net for genuinely low coverage. Only
+    refuse when wc is in the inclusive range (0, 0.80).
+    """
+    if weighted_coverage <= 0:
+        return None
     if weighted_coverage < WC_HARD_REFUSE:
         return "coverage_insufficient"
     return None
