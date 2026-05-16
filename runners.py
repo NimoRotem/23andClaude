@@ -1709,7 +1709,7 @@ def _vcf_to_pgen(vcf_path, output_prefix, var_id_template="chr@:#",
 #       this, plink2 --score variance-standardize barfs on records like
 #       1:16949:A:C-style PCA panel hits whose second allele has zero
 #       reference frequency, breaking PCA on gVCF input.
-PGEN_CACHE_SCHEMA = "v6"  # # ITEM_2_CHR_FILTER: --chr 1-22,X,Y,XY filter
+PGEN_CACHE_SCHEMA = "v5"  # reverted from v6: existing v5 caches are still valid
 
 
 def _pgen_cache_key(vcf_path, var_id_template, output_chr):

@@ -3285,15 +3285,35 @@ async def run_category(
     category: str,
     file_id: str = "",
     profile_id: str = "",
+    tab: str = "",
     username: str = Depends(current_user),
 ):
+    """Queue every test in `category`. When `tab` is provided, only queue
+    tests that belong to that tab — so clicking "Run All" inside a
+    category section while on the Curated tab queues just the curated
+    subset, not every test in the category across all tabs.
+    # RUNCAT_TAB_FILTER
+    """
+    def _tests_in_scope():
+        for test in TESTS:
+            if test["category"] != category:
+                continue
+            if tab:
+                if tab == "curated" and test["id"] not in CURATED_IDS:
+                    continue
+                if tab == "common" and test["id"] not in COMMON_PGS_IDS:
+                    continue
+                if tab not in ("curated", "common") and tab in TAB_DEFS:
+                    if _tab_for_category(test["category"]) != tab:
+                        continue
+            yield test
+
     if profile_id:
         task_ids = []
-        for test in TESTS:
-            if test["category"] == category:
-                tid = _queue_task(username, test, None, profile_id=profile_id)
-                if tid:
-                    task_ids.append(tid)
+        for test in _tests_in_scope():
+            tid = _queue_task(username, test, None, profile_id=profile_id)
+            if tid:
+                task_ids.append(tid)
         return {"ok": True, "task_ids": task_ids, "count": len(task_ids), "profile_id": profile_id}
 
     target = _resolve_target_file(username, file_id)
@@ -3301,9 +3321,8 @@ async def run_category(
         return JSONResponse({"ok": False, "error": "No file selected."}, status_code=400)
 
     task_ids = []
-    for test in TESTS:
-        if test["category"] == category:
-            task_ids.append(_queue_task(username, test, target))
+    for test in _tests_in_scope():
+        task_ids.append(_queue_task(username, test, target))
     return {"ok": True, "task_ids": task_ids, "count": len(task_ids), "file_id": target["id"]}
 
 
@@ -10525,7 +10544,7 @@ async function runCategory(cat) {
         `That's ${files.length} × N tasks.`)) return;
   for (const fid of targets) {
     const data = await _postRun(
-      `${BASE}/api/run-category/${encodeURIComponent(cat)}`, fid);
+      `${BASE}/api/run-category/${encodeURIComponent(cat)}?tab=${activeTab}`, fid);
     if (!data.ok) { alert(data.error); continue; }
     if (!fid || fid === activeFileId) {
       for (const tid of data.task_ids) {
@@ -12129,7 +12148,7 @@ async function doLogout() {
   const _origRunCategory = runCategory;
   runCategory = async function(cat) {
     if (activeProfileId) {
-      const resp = await fetch(BASE + `/api/run-category/${encodeURIComponent(cat)}?profile_id=${activeProfileId}`, { method: 'POST' });
+      const resp = await fetch(BASE + `/api/run-category/${encodeURIComponent(cat)}?profile_id=${activeProfileId}&tab=${activeTab}`, { method: 'POST' });
       const data = await resp.json();
       if (!data.ok) { alert(data.error); return; }
       for (const tid of data.task_ids) {
@@ -13297,6 +13316,7 @@ setTimeout(function() {
 # === COMPARE_PAGE_BLOCK_START — auto-inserted ===
 # ── Sample comparison page (auto-aggregates all PGS reports for the
 #    calling user, groups by trait, ranks samples, filters low quality). ──
+import math as _cmp_math
 import statistics as _cmp_stats
 import time as _cmp_time
 from collections import defaultdict as _cmp_defaultdict
@@ -13305,7 +13325,94 @@ from collections import defaultdict as _cmp_defaultdict
 _COMPARE_CACHE = {}            # key: (user, min_match, max_abs_z, high_conf) -> {ts, data}
 _COMPARE_TTL_S = 15.0
 _COMPARE_DEFAULT_MIN_MATCH = 90.0
-_COMPARE_DEFAULT_MAX_ABS_Z = 5.0
+_COMPARE_DEFAULT_MAX_ABS_Z = 20.0
+
+# Approximate per-SD log-odds (β) for a "typical" disease PRS; relative risk =
+# exp(β·z - β²/2). This is intentionally generic — per-trait β would be more
+# accurate but is not stored per report. β=0.3 → per-SD OR ≈ 1.35.
+_COMPARE_PRS_BETA = 0.30
+
+# Rough US-population lifetime risks (decimals). Match by lowercase substring
+# in trait name. These are coarse — the UI shows a clear "approximate" tooltip.
+_COMPARE_BASELINE_PREVALENCE = {
+    "alzheimer": 0.10,
+    "parkinson": 0.02,
+    "stroke": 0.20,
+    "prostate cancer": 0.13,
+    "breast cancer": 0.125,
+    "colorectal": 0.045,
+    "lung cancer": 0.06,
+    "melanoma": 0.025,
+    "ovarian": 0.012,
+    "pancreatic": 0.015,
+    "type 2 diabetes": 0.35,
+    "type 1 diabetes": 0.005,
+    "coronary": 0.30,
+    "ischemic heart": 0.30,
+    "myocardial": 0.20,
+    "atrial fibrillation": 0.25,
+    "hypertension": 0.45,
+    "obesity": 0.42,
+    "asthma": 0.10,
+    "schizophrenia": 0.01,
+    "bipolar": 0.025,
+    "depression": 0.20,
+    "anxiety": 0.30,
+    "rheumatoid": 0.01,
+    "celiac": 0.01,
+    "inflammatory bowel": 0.005,
+    "crohn": 0.003,
+    "ulcerative colitis": 0.003,
+    "lupus": 0.0015,
+    "psoriasis": 0.03,
+    "atopic dermatitis": 0.10,
+    "eczema": 0.10,
+    "glaucoma": 0.03,
+    "macular degeneration": 0.12,
+    "migraine": 0.15,
+    "epilepsy": 0.03,
+    "gout": 0.04,
+    "osteoporosis": 0.20,
+    "kidney disease": 0.14,
+    "chronic kidney": 0.14,
+    "thyroid": 0.05,
+    "gallstones": 0.10,
+}
+
+
+def _compare_baseline_for_trait(trait):
+    if not trait:
+        return None
+    t = trait.lower()
+    for key, val in _COMPARE_BASELINE_PREVALENCE.items():
+        if key in t:
+            return val
+    return None
+
+
+def _compare_z_from_pct(pct):
+    """Inverse-normal approximation for percentile → z."""
+    if pct is None:
+        return None
+    try:
+        p = float(pct) / 100.0
+    except (TypeError, ValueError):
+        return None
+    p = min(max(p, 1e-6), 1 - 1e-6)
+    try:
+        return _cmp_stats.NormalDist().inv_cdf(p)
+    except Exception:
+        return None
+
+
+def _compare_relative_risk(z, beta=_COMPARE_PRS_BETA):
+    """RR = exp(β·z - β²/2), normalized so the population mean RR is 1.0."""
+    if z is None:
+        return None
+    try:
+        return _cmp_math.exp(beta * float(z) - 0.5 * beta * beta)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def _compare_extract_z(res):
@@ -13488,6 +13595,7 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
 
     out = []
     for trait, samples in by_trait.items():
+        baseline = _compare_baseline_for_trait(trait)
         sample_aggs = []
         for sname, reps in samples.items():
             zs = [r["z_score"] for r in reps if r["z_score"] is not None]
@@ -13496,12 +13604,39 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
             if not zs and not pcts:
                 continue
             ancs = sorted({r["ancestry"] for r in reps if r["ancestry"]})
+            mean_z = _cmp_stats.fmean(zs) if zs else None
+            mean_pct = _cmp_stats.fmean(pcts) if pcts else None
+            # If we only have percentile, derive a working z for risk math.
+            risk_z = mean_z if mean_z is not None else _compare_z_from_pct(mean_pct)
+            rel_risk = _compare_relative_risk(risk_z) if risk_z is not None else None
+            abs_risk = (baseline * rel_risk) if (baseline is not None
+                                                  and rel_risk is not None) else None
+            # Per-ancestry breakdown for the Ancestry-pill hover.
+            by_anc = _cmp_defaultdict(list)
+            for r in reps:
+                if r["ancestry"]:
+                    by_anc[r["ancestry"]].append(r)
+            ancestry_breakdown = []
+            for anc, rlist in by_anc.items():
+                anc_zs = [r["z_score"] for r in rlist if r["z_score"] is not None]
+                anc_pcts = [r["percentile"] for r in rlist if r["percentile"] is not None]
+                ancestry_breakdown.append({
+                    "ancestry": anc,
+                    "n_reports": len(rlist),
+                    "mean_z": (_cmp_stats.fmean(anc_zs) if anc_zs else None),
+                    "mean_pct": (_cmp_stats.fmean(anc_pcts) if anc_pcts else None),
+                })
+            ancestry_breakdown.sort(key=lambda a: a["ancestry"])
             sample_aggs.append({
                 "sample": sname,
-                "mean_z": (_cmp_stats.fmean(zs) if zs else None),
-                "mean_pct": (_cmp_stats.fmean(pcts) if pcts else None),
+                "mean_z": mean_z,
+                "mean_pct": mean_pct,
                 "mean_match_rate": _cmp_stats.fmean(mrs),
+                "relative_risk": rel_risk,
+                "absolute_risk": abs_risk,
+                "baseline_prevalence": baseline,
                 "ancestry": "/".join(ancs) if ancs else "EUR",
+                "ancestry_breakdown": ancestry_breakdown,
                 "n_pgs": len({r["pgs_id"] for r in reps if r["pgs_id"]}),
                 "n_reports": len(reps),
                 "reports": reps,
@@ -13530,6 +13665,7 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
             "description": meta.get("description", ""),
             "pgs_ids": sorted(meta.get("pgs_ids") or []),
             "excluded_samples": excluded.get(trait, []),  # GATE_W0_5
+            "baseline_prevalence": baseline,
             "avg_match_rate": round(
                 _cmp_stats.fmean([s["mean_match_rate"] for s in sample_aggs]), 1),
             "n_samples": len(sample_aggs),
@@ -13569,14 +13705,14 @@ def _compare_parse_float(v, default):
 
 
 @app.get("/api/compare")
-async def api_compare(request: Request, username: str = Depends(current_user)):
+def api_compare(request: Request, username: str = Depends(current_user)):
     qp = request.query_params
     min_match = _compare_parse_float(qp.get("min_match"), _COMPARE_DEFAULT_MIN_MATCH)
     max_abs_z = _compare_parse_float(qp.get("max_abs_z"), _COMPARE_DEFAULT_MAX_ABS_Z)
     high_conf = qp.get("high_conf", "").lower() in ("1", "true", "yes", "on")
     # clamp
     min_match = max(0.0, min(100.0, min_match))
-    max_abs_z = max(0.5, min(20.0, max_abs_z))
+    max_abs_z = max(0.5, min(50.0, max_abs_z))
     traits, facets = _compare_data_cached(username, min_match, max_abs_z, high_conf)
     return {
         "username": username,
@@ -13599,12 +13735,294 @@ async def compare_page(request: Request):
     return HTMLResponse(_COMPARE_PAGE_HTML)
 
 
+# ── HTML report viewer with hover-explainers ──────────────────────
+import html
+
+# Glossary of fields that may appear in a PGS report JSON. Keys are
+# dotted paths; the renderer falls back to the leaf-key if a dotted
+# path isn't found.
+_REPORT_FIELD_GLOSSARY = {
+    "task_id": "Internal job ID for this PGS computation.",
+    "test_id": "Internal slug for the trait/score that was run.",
+    "test_name": "Human-readable trait name plus PGS Catalog ID.",
+    "category": "Top-level grouping used in 23 & Claude's UI (e.g. Cancer, Cardiovascular).",
+    "description": "Short paper-level summary of the score: variant count, source publication, and reference ancestry.",
+    "vcf_path": "Server-side path of the input file (BAM/VCF).",
+    "file_id": "Internal ID of the user-uploaded input file.",
+    "username": "Account that ran this analysis.",
+    "result.status": "Whether the score was successfully computed (\"passed\") or failed a gate.",
+    "result.headline": "One-line summary shown in lists: score, percentile, and variant coverage.",
+    "result.method": "Scoring method/version used.",
+    "result.pgs_id": "PGS Catalog identifier (e.g. PGS000018). Click to open the catalog page.",
+    "result.trait": "Trait this PGS predicts.",
+    "result.score": "Sum of variant dosage × weight across all matched variants.",
+    "result.raw_score": "Sum divided by variant count (per-variant average effect).",
+    "result.percentile": "Percentile of this sample's score in the chosen reference panel (0–100).",
+    "result.variants_matched": "How many PGS variants were successfully called from this sample.",
+    "result.variants_total": "Total number of variants in the published PGS.",
+    "result.variants_missing": "Variants that couldn't be called (low coverage, missing site, etc.).",
+    "result.low_coverage": "Variants present but with too few reads to confidently call.",
+    "result.match_rate": "matched / total, expressed as 0.0–1.0.",
+    "result.match_rate_value": "matched / total, expressed as a percentage.",
+    "result.strand_flips": "Variants where the input strand was flipped vs the PGS file before scoring.",
+    "result.genome_build": "Reference genome assembly used by the input file (e.g. GRCh38).",
+    "result.scoring_file_source": "Which PGS-Catalog harmonized file was used.",
+    "result.build_notes": "Any liftover / harmonization notes.",
+    "result.pipeline_info": "Details about the scoring pipeline that produced this result.",
+    "result.pipeline_info.scoring_tool": "Software/algorithm used to compute the score.",
+    "result.pipeline_info.scoring_method": "High-level method name (e.g. pileup Pipeline E+).",
+    "result.pipeline_info.input_file": "Original input filename.",
+    "result.pipeline_info.input_type": "Input format (BAM, VCF, gVCF).",
+    "result.pipeline_info.genome_build": "Genome build of the input.",
+    "result.pipeline_info.scoring_file_build": "Genome build of the PGS scoring file.",
+    "result.pipeline_info.pgs_catalog_id": "PGS Catalog ID linked to the underlying weights file.",
+    "result.pipeline_info.pgs_catalog_url": "Link to the score's PGS Catalog page.",
+    "result.pipeline_info.reference_population": "Reference ancestry used for percentile/z-score (EUR, EAS, AFR, SAS, AMR, or MIX).",
+    "result.pipeline_info.reference_panel": "Reference panel name (e.g. 1000 Genomes Phase 3, 3,202 samples).",
+    "result.pipeline_info.normalization": "How the score was computed (e.g. direct BAM pileup).",
+    "result.pipeline_info.scoring_file_source": "Which catalog-harmonized weights file was used.",
+    "result.pipeline_info.build_notes": "Liftover / harmonization details.",
+    "result.scoring_diagnostics": "Internals of the percentile/z-score computation.",
+    "result.scoring_diagnostics.ref_std": "Standard deviation of the score in the reference panel.",
+    "result.scoring_diagnostics.ref_mean": "Mean score in the reference panel.",
+    "result.scoring_diagnostics.z_score": "(score − ref_mean) / ref_std. Positive = higher than the reference average.",
+    "result.scoring_diagnostics.method_used": "How the z-score / percentile were derived (precomputed stats vs live computation).",
+    "result.summary": "Headline string, repeated for legacy tooling.",
+    "interpretation": "AI-generated plain-English summary of this individual result (Claude).",
+    "interpretation_error": "Any error encountered while generating the interpretation.",
+    "elapsed_seconds": "Wall-clock seconds spent on this PGS.",
+    "completed_at": "UTC timestamp the score finished computing.",
+    "profile_id": "Internal ID of the profile this run was attributed to.",
+    "file_type": "Format of the input (bam, vcf, gvcf, …).",
+    "attempt": "Number of times this score was retried.",
+    "selection_reason": "Why this particular reference panel was selected (auto vs manual override).",
+    "provenance": "File hashes / paths captured for reproducibility.",
+    "provenance.pgs_catalog_id": "PGS Catalog ID.",
+    "provenance.scoring_file_path": "Path of the scoring file used.",
+    "provenance.scoring_file_sha256": "SHA-256 of the scoring file, for audit.",
+    "provenance.stats_file_path": "Path of the reference statistics file (if used).",
+    "provenance.stats_file_sha256": "SHA-256 of the stats file, for audit.",
+    "provenance.ref_panel_path": "Path of the reference panel VCF used.",
+    "provenance.ref_panel_sha256": "SHA-256 of the reference panel, for audit.",
+    "provenance.pipeline_commit": "Git commit of the scoring pipeline at run time.",
+    "interpretability_status": "Result of the W0/W0.5 interpretability gate (INTERPRETABLE if cleared).",
+    "failure_reason_code": "Short code if a gate failed (e.g. MATCH_RATE_BELOW_THRESHOLD).",
+    "failure_reason_human": "Human-readable explanation of why this report was excluded.",
+    "selected_ref": "The reference panel population actually selected for percentile/z (may differ from default).",
+    "confidence": "Pipeline's self-rated confidence (low/medium/high).",
+}
+
+
+def _report_sanitize(d):
+    """Hide raw server paths from the public report view."""
+    if not isinstance(d, dict):
+        return d
+    safe = {}
+    for k, v in d.items():
+        if k in ("vcf_path",) and isinstance(v, str):
+            # Show only the basename, not the server path.
+            safe[k] = v.rsplit("/", 1)[-1] if "/" in v else v
+            continue
+        if isinstance(v, dict):
+            safe[k] = _report_sanitize(v)
+        else:
+            safe[k] = v
+    return safe
+
+
+def _report_html_render(data):
+    """Render a report dict as styled HTML with field tooltips."""
+    glossary = _REPORT_FIELD_GLOSSARY
+    safe = _report_sanitize(data)
+
+    def _is_link_field(path):
+        return path.endswith("pgs_catalog_url") or path.endswith("scoring_file_source")
+
+    def _hint(path, key):
+        return glossary.get(path) or glossary.get(key) or ""
+
+    def _fmt_value(v, path=""):
+        if v is None:
+            return '<span class="v-null">null</span>'
+        if isinstance(v, bool):
+            return f'<span class="v-bool">{str(v).lower()}</span>'
+        if isinstance(v, (int, float)):
+            return f'<span class="v-num">{v}</span>'
+        if isinstance(v, str):
+            s = html.escape(v)
+            if v.startswith("http://") or v.startswith("https://"):
+                return f'<a class="v-link" href="{s}" target="_blank" rel="noopener">{s}</a>'
+            if path.endswith("pgs_id") and v.startswith("PGS"):
+                return (f'<a class="v-link" href="https://www.pgscatalog.org/score/{s}/" '
+                        f'target="_blank" rel="noopener">{s}</a>')
+            return f'<span class="v-str">{s}</span>'
+        if isinstance(v, list):
+            if not v:
+                return '<span class="v-null">[]</span>'
+            items = "".join(f'<li>{_fmt_value(item, path)}</li>' for item in v)
+            return f'<ul class="v-list">{items}</ul>'
+        if isinstance(v, dict):
+            return _render_dict(v, path)
+        return f'<span class="v-str">{html.escape(str(v))}</span>'
+
+    def _render_dict(d, parent_path=""):
+        rows = []
+        for k, v in d.items():
+            full = f"{parent_path}.{k}" if parent_path else k
+            hint = _hint(full, k)
+            label = html.escape(k.replace("_", " "))
+            tip_attr = (' data-tip="' + html.escape(hint, quote=True) + '"') if hint else ""
+            q_mark = '<span class="q">?</span>' if hint else ""
+            klass = "field nested" if isinstance(v, dict) else "field"
+            rows.append(
+                f'<div class="{klass}">'
+                f'<div class="field-key"{tip_attr}><span class="k">{label}</span>{q_mark}</div>'
+                f'<div class="field-val">{_fmt_value(v, full)}</div>'
+                f'</div>'
+            )
+        return f'<div class="dict">{"".join(rows)}</div>'
+
+    body = _render_dict(safe)
+    pgs_id = (safe.get("result") or {}).get("pgs_id") or ""
+    trait = (safe.get("result") or {}).get("trait") or ""
+    title = html.escape(f"{trait} · {pgs_id}" if (trait or pgs_id) else "Report")
+    pretty_json = html.escape(json.dumps(safe, indent=2, default=str))
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title} — 23 &amp; Claude</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M8 2C12 8 20 8 24 2' fill='none' stroke='%2306b6d4' stroke-width='2'/%3E%3Cpath d='M8 10C12 16 20 16 24 10' fill='none' stroke='%238b5cf6' stroke-width='2'/%3E%3Cpath d='M8 18C12 24 20 24 24 18' fill='none' stroke='%2306b6d4' stroke-width='2'/%3E%3Cpath d='M8 26C12 32 20 32 24 26' fill='none' stroke='%238b5cf6' stroke-width='2'/%3E%3C/svg%3E">
+<style>
+  :root {{
+    --bg: #0f1115; --panel: #171a21; --panel2: #1d2129;
+    --border: #2a2f3a; --text: #e6e8ee; --muted: #8b93a7;
+    --accent: #7aa2ff; --good: #4ade80; --warn: #facc15; --bad: #f87171;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         background: var(--bg); color: var(--text); line-height: 1.45; }}
+  header {{ padding: 14px 24px; border-bottom: 1px solid var(--border);
+            display: flex; gap: 14px; align-items: center;
+            background: rgba(15,17,21,.92); position: sticky; top: 0; z-index: 10; }}
+  header h1 {{ margin: 0; font-size: 17px; font-weight: 600; }}
+  header .meta {{ color: var(--muted); font-size: 12.5px; }}
+  header .spacer {{ flex: 1; }}
+  header a, header button {{
+    color: var(--text); background: transparent; border: 1px solid var(--border);
+    padding: 5px 11px; border-radius: 6px; font-size: 12.5px; cursor: pointer;
+    text-decoration: none;
+  }}
+  header a:hover, header button:hover {{ border-color: var(--accent); color: var(--accent); }}
+  main {{ max-width: 1100px; margin: 0 auto; padding: 20px 24px 60px; }}
+
+  .dict {{ display: block; }}
+  .field {{ display: grid; grid-template-columns: 220px 1fr; gap: 14px;
+            padding: 8px 12px; border-bottom: 1px solid var(--border); align-items: start; }}
+  .field.nested {{ grid-template-columns: 1fr; padding: 12px 0; border-bottom: 0; }}
+  .field.nested > .field-key {{ font-size: 13px; color: var(--accent);
+    border-bottom: 1px dashed var(--border); padding-bottom: 4px; margin-bottom: 6px; }}
+  .field.nested > .field-val > .dict {{ background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 4px 14px; }}
+  .field-key {{ position: relative; color: var(--muted); font-size: 12.5px;
+    text-transform: capitalize; cursor: help; }}
+  .field-key .q {{ display: inline-block; width: 13px; height: 13px; line-height: 13px;
+    text-align: center; border-radius: 50%; background: var(--panel2); color: var(--muted);
+    font-size: 9px; margin-left: 5px; vertical-align: 1px; }}
+  .field-key[data-tip]:hover .q {{ background: var(--accent); color: #0f1115; }}
+  .field-key[data-tip]::after {{
+    content: attr(data-tip);
+    position: absolute; left: 0; top: 100%; margin-top: 4px;
+    background: #0a0c10; border: 1px solid var(--border);
+    color: var(--text); padding: 6px 10px; border-radius: 6px;
+    font-size: 12px; font-weight: normal; text-transform: none;
+    line-height: 1.4; max-width: 360px; min-width: 200px;
+    white-space: normal; box-shadow: 0 6px 20px rgba(0,0,0,.5);
+    opacity: 0; pointer-events: none; transition: opacity .12s; z-index: 50;
+  }}
+  .field-key[data-tip]:hover::after {{ opacity: 1; }}
+
+  .field-val {{ font-size: 13px; font-variant-numeric: tabular-nums; word-break: break-word; }}
+  .v-null  {{ color: var(--muted); font-style: italic; }}
+  .v-num   {{ color: #93c5fd; }}
+  .v-bool  {{ color: #fcd34d; }}
+  .v-str   {{ color: var(--text); }}
+  .v-link  {{ color: var(--accent); text-decoration: none; }}
+  .v-link:hover {{ text-decoration: underline; }}
+  .v-list  {{ margin: 0; padding-left: 18px; }}
+
+  .raw-toggle {{ margin-top: 24px; }}
+  .raw-toggle summary {{ cursor: pointer; color: var(--muted); font-size: 12px; padding: 6px 0; }}
+  pre.raw {{ background: #0a0c10; border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px; overflow-x: auto; font-size: 12px; color: #c2c8d6; }}
+</style>
+</head>
+<body>
+<header>
+  <h1>{title}</h1>
+  <span class="meta">Hover any field name for an explanation.</span>
+  <span class="spacer"></span>
+  <a href="javascript:history.back()">← Back</a>
+  <a href="/compare">Compare</a>
+  <a href="/api/report/{html.escape(safe.get('task_id') or '', quote=True)}" target="_blank">Raw JSON</a>
+</header>
+<main>
+  {body}
+  <details class="raw-toggle">
+    <summary>View raw JSON</summary>
+    <pre class="raw">{pretty_json}</pre>
+  </details>
+</main>
+</body>
+</html>"""
+
+
+@app.get("/report/{task_id}", response_class=HTMLResponse)
+def report_html_view(task_id: str, request: Request):
+    sid = request.cookies.get(SESSION_COOKIE)
+    username = _resolve_session(sid)
+    if not username:
+        return RedirectResponse(
+            url=f"/sign-in?next=/report/{task_id}", status_code=303)
+    user_root = user_reports_root(username)
+    data = None
+    if user_root.exists():
+        for d in user_root.iterdir():
+            if d.is_dir():
+                candidate = d / f"{task_id}.json"
+                if candidate.exists():
+                    try:
+                        with open(candidate) as f:
+                            data = _apply_live_pctl(json.load(f))
+                    except Exception:
+                        data = None
+                    break
+    if data is None:
+        legacy = user_root / f"{task_id}.json"
+        if legacy.exists():
+            try:
+                with open(legacy) as f:
+                    data = _apply_live_pctl(json.load(f))
+            except Exception:
+                data = None
+    if data is None and task_id in task_results:
+        data = task_results[task_id]
+    if data is None:
+        return HTMLResponse(
+            "<h1>Report not found</h1><p><a href='/compare'>Back to compare</a></p>",
+            status_code=404)
+    return HTMLResponse(_report_html_render(data))
+
+
 _COMPARE_PAGE_HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sample Comparison &mdash; 23 &amp; Claude</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M8 2C12 8 20 8 24 2' fill='none' stroke='%2306b6d4' stroke-width='2'/%3E%3Cpath d='M8 10C12 16 20 16 24 10' fill='none' stroke='%238b5cf6' stroke-width='2'/%3E%3Cpath d='M8 18C12 24 20 24 24 18' fill='none' stroke='%2306b6d4' stroke-width='2'/%3E%3Cpath d='M8 26C12 32 20 32 24 26' fill='none' stroke='%238b5cf6' stroke-width='2'/%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --panel2: #1d2129;
@@ -13763,6 +14181,82 @@ _COMPARE_PAGE_HTML = r"""<!DOCTYPE html>
   .footer-note {
     color: var(--muted); font-size: 12px; padding: 22px 0; text-align: center;
   }
+
+  /* ── Multi-select dropdown ───────────────────────────────────── */
+  .ms { position: relative; display: inline-block; }
+  .ms-btn {
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 26px 4px 10px; font-size: 12px; cursor: pointer;
+    min-width: 130px; text-align: left; position: relative;
+  }
+  .ms-btn::after {
+    content: "▾"; position: absolute; right: 8px; top: 50%;
+    transform: translateY(-50%); color: var(--muted); font-size: 10px;
+  }
+  .ms-btn:hover { border-color: var(--accent); }
+  .ms-btn .count {
+    display: inline-block; background: var(--accent); color: #0f1115;
+    border-radius: 999px; padding: 1px 6px; font-size: 10px;
+    font-weight: 700; margin-left: 6px;
+  }
+  .ms-pop {
+    display: none; position: absolute; top: calc(100% + 4px); left: 0;
+    background: var(--panel); border: 1px solid var(--border2);
+    border-radius: 8px; padding: 6px 4px; min-width: 220px;
+    max-height: 320px; overflow-y: auto; z-index: 30;
+    box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  }
+  .ms.open .ms-pop { display: block; }
+  .ms-pop label {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 10px; font-size: 12.5px; cursor: pointer;
+    border-radius: 4px;
+  }
+  .ms-pop label:hover { background: var(--panel2); }
+  .ms-pop label input { accent-color: var(--accent); }
+  .ms-pop .ms-actions {
+    display: flex; gap: 6px; padding: 4px 8px 2px;
+    border-bottom: 1px solid var(--border); margin-bottom: 4px;
+  }
+  .ms-pop .ms-actions button {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--muted); padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; cursor: pointer;
+  }
+  .ms-pop .ms-actions button:hover { color: var(--accent); border-color: var(--accent); }
+  .ms-pop .ms-empty { color: var(--muted); font-size: 12px; padding: 8px 10px; }
+
+  select.numsel {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 10px; font-size: 12px;
+  }
+
+  /* ── Inline tooltips (for header cells, ancestry, etc.) ────── */
+  [data-tip] { position: relative; }
+  [data-tip]:hover::after {
+    content: attr(data-tip); position: absolute; left: 50%; bottom: 100%;
+    transform: translateX(-50%); margin-bottom: 6px;
+    background: #0a0c10; color: var(--text); border: 1px solid var(--border);
+    padding: 6px 10px; border-radius: 6px; font-size: 11.5px;
+    line-height: 1.4; white-space: pre-line;
+    max-width: 280px; width: max-content;
+    box-shadow: 0 6px 20px rgba(0,0,0,.5); z-index: 60;
+    pointer-events: none;
+  }
+  [data-tip]:hover::before {
+    content: ""; position: absolute; left: 50%; bottom: 100%;
+    transform: translateX(-50%); margin-bottom: 1px;
+    border: 4px solid transparent; border-top-color: var(--border);
+    z-index: 60;
+  }
+  th[data-tip] { cursor: help; border-bottom-style: dashed; }
+  .anc[data-tip] { cursor: help; }
+
+  td.rr-up   { color: #fdba74; }
+  td.rr-dn   { color: #a7f3d0; }
+  td.ar-cell { color: var(--text); }
+  td.ar-na   { color: var(--muted); font-style: italic; }
 </style>
 </head>
 <body>
@@ -13786,32 +14280,15 @@ _COMPARE_PAGE_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
   <div class="fgroup">
-    <span class="flabel">Max |z|</span>
-    <div class="seg" id="seg-z">
-      <button data-v="3">3</button>
-      <button data-v="5" class="on">5</button>
-      <button data-v="10">10</button>
-    </div>
-  </div>
-  <div class="fgroup">
     <label class="check"><input type="checkbox" id="hi-conf" /> High-confidence only</label>
   </div>
   <div class="fgroup">
     <span class="flabel">Min samples</span>
-    <div class="seg" id="seg-minsamp">
-      <button data-v="1" class="on">1+</button>
-      <button data-v="2">2+</button>
-      <button data-v="3">3+</button>
-      <button data-v="4">4+</button>
-    </div>
+    <select class="numsel" id="sel-minsamp"></select>
   </div>
   <div class="fgroup">
     <span class="flabel">Min PGS</span>
-    <div class="seg" id="seg-minpgs">
-      <button data-v="1" class="on">1+</button>
-      <button data-v="2">2+</button>
-      <button data-v="3">3+</button>
-    </div>
+    <select class="numsel" id="sel-minpgs"></select>
   </div>
   <div class="fgroup">
     <span class="flabel">Sort</span>
@@ -13824,13 +14301,19 @@ _COMPARE_PAGE_HTML = r"""<!DOCTYPE html>
       <option value="match">Highest match rate</option>
     </select>
   </div>
-  <div class="fgroup" id="cat-group">
+  <div class="fgroup">
     <span class="flabel">Categories</span>
-    <span id="cat-chips"></span>
+    <div class="ms" id="ms-cats">
+      <button type="button" class="ms-btn">All</button>
+      <div class="ms-pop"></div>
+    </div>
   </div>
-  <div class="fgroup" id="samp-group">
+  <div class="fgroup">
     <span class="flabel">Samples</span>
-    <span id="samp-chips"></span>
+    <div class="ms" id="ms-samps">
+      <button type="button" class="ms-btn">All</button>
+      <div class="ms-pop"></div>
+    </div>
   </div>
   <button class="reset" id="reset">Reset filters</button>
 </div>
@@ -13853,6 +14336,18 @@ function fmtPct(p) {
   if (p == null) return '—';
   return p.toFixed(1) + '%';
 }
+function fmtRR(rr) {
+  if (rr == null || !isFinite(rr)) return '—';
+  if (rr >= 10) return rr.toFixed(0) + '×';
+  if (rr >= 1)  return rr.toFixed(2).replace(/\.?0+$/, '') + '×';
+  return rr.toFixed(2).replace(/^0/, '').replace(/\.?0+$/, '') + '×';
+}
+function fmtAbs(ar) {
+  if (ar == null) return '—';
+  if (ar >= 0.1)  return (ar * 100).toFixed(1) + '%';
+  if (ar >= 0.01) return (ar * 100).toFixed(2) + '%';
+  return (ar * 100).toFixed(3) + '%';
+}
 function riskClass(label) {
   if (!label || label === '—') return 'risk risk-None';
   return 'risk risk-' + label.split(' ')[0];
@@ -13862,7 +14357,6 @@ function riskClass(label) {
 const STATE = {
   q: '',
   minMatch: 90,
-  maxZ: 5,
   highConf: false,
   minSamples: 1,
   minPgs: 1,
@@ -13871,6 +14365,9 @@ const STATE = {
   samples: new Set(),    // active sample filters (empty = all)
 };
 let DATA = null;
+// Track which (trait, sample) reports-detail panels are open so we can
+// re-open them after a re-render (auto-refresh would otherwise collapse them).
+const OPEN_REPORTS = new Set();
 
 function readHash() {
   const h = (window.location.hash || '').replace(/^#/, '');
@@ -13878,7 +14375,6 @@ function readHash() {
   const qp = new URLSearchParams(h);
   if (qp.has('q'))         STATE.q = qp.get('q');
   if (qp.has('mm'))        STATE.minMatch = +qp.get('mm');
-  if (qp.has('mz'))        STATE.maxZ = +qp.get('mz');
   if (qp.has('hc'))        STATE.highConf = qp.get('hc') === '1';
   if (qp.has('ms'))        STATE.minSamples = +qp.get('ms');
   if (qp.has('mp'))        STATE.minPgs = +qp.get('mp');
@@ -13890,7 +14386,6 @@ function writeHash() {
   const qp = new URLSearchParams();
   if (STATE.q) qp.set('q', STATE.q);
   if (STATE.minMatch !== 90) qp.set('mm', STATE.minMatch);
-  if (STATE.maxZ !== 5)      qp.set('mz', STATE.maxZ);
   if (STATE.highConf)        qp.set('hc', '1');
   if (STATE.minSamples > 1)  qp.set('ms', STATE.minSamples);
   if (STATE.minPgs > 1)      qp.set('mp', STATE.minPgs);
@@ -13902,45 +14397,94 @@ function writeHash() {
 }
 
 // ── Render filter bar ────────────────────────────────────────────
+function buildNumSelect(id, max) {
+  const sel = document.getElementById(id);
+  sel.innerHTML = '';
+  for (let i = 1; i <= max; i++) {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = i + '+';
+    sel.appendChild(opt);
+  }
+}
 function syncBar() {
   document.getElementById('filter').value = STATE.q || '';
   document.getElementById('hi-conf').checked = STATE.highConf;
   document.getElementById('sortsel').value = STATE.sort;
-  for (const [id, val] of [['seg-match',STATE.minMatch],['seg-z',STATE.maxZ],
-                           ['seg-minsamp',STATE.minSamples],['seg-minpgs',STATE.minPgs]]) {
-    document.querySelectorAll('#'+id+' button').forEach(b => {
-      b.classList.toggle('on', +b.dataset.v === val);
-    });
+  document.getElementById('sel-minsamp').value = STATE.minSamples;
+  document.getElementById('sel-minpgs').value  = STATE.minPgs;
+  document.querySelectorAll('#seg-match button').forEach(b => {
+    b.classList.toggle('on', +b.dataset.v === STATE.minMatch);
+  });
+  // Multi-select labels
+  syncMsLabel('ms-cats', STATE.cats, 'category', 'categories');
+  syncMsLabel('ms-samps', STATE.samples, 'sample', 'samples');
+}
+function syncMsLabel(id, set, sing, plur) {
+  const btn = document.querySelector('#'+id+' .ms-btn');
+  if (!btn) return;
+  if (!set.size) {
+    btn.innerHTML = 'All ' + plur;
+  } else if (set.size === 1) {
+    const v = [...set][0];
+    btn.innerHTML = escapeHtml(v.replace(/^PGS\s*-\s*/i, ''))
+      + ` <span class="count">1</span>`;
+  } else {
+    btn.innerHTML = set.size + ' ' + plur + ` <span class="count">${set.size}</span>`;
   }
+}
+function buildMs(id, opts, set, onChange) {
+  const pop = document.querySelector('#'+id+' .ms-pop');
+  if (!pop) return;
+  const items = opts.map(v => {
+    const label = v.replace(/^PGS\s*-\s*/i, '');
+    const checked = set.has(v) ? 'checked' : '';
+    return `<label><input type="checkbox" value="${escapeHtml(v)}" ${checked}>
+            ${escapeHtml(label)}</label>`;
+  }).join('');
+  pop.innerHTML = `
+    <div class="ms-actions">
+      <button type="button" data-act="all">Select all</button>
+      <button type="button" data-act="none">Clear</button>
+    </div>
+    ${items || '<div class="ms-empty">No options</div>'}
+  `;
+  pop.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      cb.checked ? set.add(cb.value) : set.delete(cb.value);
+      onChange();
+    });
+  });
+  pop.querySelectorAll('button[data-act]').forEach(b => {
+    b.addEventListener('click', () => {
+      set.clear();
+      if (b.dataset.act === 'all') opts.forEach(v => set.add(v));
+      // re-render the popup checks
+      pop.querySelectorAll('input[type=checkbox]').forEach(cb => {
+        cb.checked = set.has(cb.value);
+      });
+      onChange();
+    });
+  });
 }
 function buildFacetChips() {
   const facets = (DATA && DATA.facets) || {categories:[], samples:[]};
-  const catWrap = document.getElementById('cat-chips');
-  catWrap.innerHTML = facets.categories.map(c => {
-    const short = c.replace(/^PGS\s*-\s*/i, '');
-    const on = STATE.cats.has(c);
-    return `<button class="chip${on?' on':''}" data-cat="${escapeHtml(c)}">${escapeHtml(short)}${on?'<span class="x">×</span>':''}</button>`;
-  }).join(' ');
-  catWrap.querySelectorAll('button').forEach(b => {
-    b.onclick = () => {
-      const c = b.dataset.cat;
-      STATE.cats.has(c) ? STATE.cats.delete(c) : STATE.cats.add(c);
-      writeHash(); buildFacetChips(); render();
-    };
+  buildMs('ms-cats', facets.categories, STATE.cats, () => {
+    syncMsLabel('ms-cats', STATE.cats, 'category', 'categories');
+    writeHash(); render();
   });
-  const sampWrap = document.getElementById('samp-chips');
-  sampWrap.innerHTML = facets.samples.map(s => {
-    const on = STATE.samples.has(s);
-    return `<button class="chip${on?' on':''}" data-samp="${escapeHtml(s)}">${escapeHtml(s)}${on?'<span class="x">×</span>':''}</button>`;
-  }).join(' ');
-  sampWrap.querySelectorAll('button').forEach(b => {
-    b.onclick = () => {
-      const s = b.dataset.samp;
-      STATE.samples.has(s) ? STATE.samples.delete(s) : STATE.samples.add(s);
-      writeHash(); buildFacetChips(); render();
-    };
+  buildMs('ms-samps', facets.samples, STATE.samples, () => {
+    syncMsLabel('ms-samps', STATE.samples, 'sample', 'samples');
+    writeHash(); render();
   });
+  syncMsLabel('ms-cats', STATE.cats, 'category', 'categories');
+  syncMsLabel('ms-samps', STATE.samples, 'sample', 'samples');
 }
+// Click outside to close any open dropdowns.
+document.addEventListener('click', e => {
+  document.querySelectorAll('.ms.open').forEach(m => {
+    if (!m.contains(e.target)) m.classList.remove('open');
+  });
+});
 
 // ── Sort + filter then render ────────────────────────────────────
 function visibleTraits() {
@@ -13972,7 +14516,23 @@ function visibleTraits() {
     .sort(sortFns[STATE.sort] || sortFns.cat);
 }
 
+function captureOpenReports() {
+  document.querySelectorAll('details[data-key]').forEach(d => {
+    const k = d.getAttribute('data-key');
+    if (d.open) OPEN_REPORTS.add(k); else OPEN_REPORTS.delete(k);
+  });
+}
+function wireOpenReports() {
+  document.querySelectorAll('details[data-key]').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const k = d.getAttribute('data-key');
+      if (d.open) OPEN_REPORTS.add(k); else OPEN_REPORTS.delete(k);
+    });
+  });
+}
+
 function render() {
+  captureOpenReports();
   const root = document.getElementById('root');
   if (!DATA) { root.innerHTML = '<div class="loading">Loading…</div>'; return; }
 
@@ -13988,7 +14548,6 @@ function render() {
   let summary = `<div class="summary">`
     + `<span><b>${visible.length}</b> of <b>${all.length}</b> traits shown</span>`
     + `<span>match rate ≥ <b>${DATA.filters.min_match_rate_pct}%</b></span>`
-    + `<span>|z| ≤ <b>${DATA.filters.max_abs_z}</b></span>`
     + (DATA.filters.high_conf_only ? `<span>· <b>high-confidence only</b></span>` : '')
     + (STATE.minSamples > 1 ? `<span>· min <b>${STATE.minSamples}</b> samples</span>` : '')
     + (STATE.minPgs > 1    ? `<span>· min <b>${STATE.minPgs}</b> PGS</span>` : '')
@@ -14006,35 +14565,71 @@ function render() {
 
   root.innerHTML = summary
     + visible.map(renderTrait).join('')
-    + '<div class="footer-note">Ranks compare averaged z-scores across all PGS run on each sample for that trait. Reports failing quality filters are excluded.</div>';
+    + '<div class="footer-note">Ranks compare averaged z-scores across all PGS run on each sample for that trait. Reports failing quality filters are excluded. Relative/absolute risk estimates are coarse; they assume a typical PRS effect size (per-SD OR ≈ 1.35) and use rough population baselines.</div>';
+  wireOpenReports();
+}
+
+function ancestryTip(s) {
+  const br = s.ancestry_breakdown || [];
+  if (br.length <= 1) return '';
+  const lines = br.map(a => {
+    const parts = [];
+    if (a.mean_pct != null) parts.push(fmtPct(a.mean_pct) + 'ile');
+    if (a.mean_z   != null) parts.push('z=' + fmtZ(a.mean_z));
+    parts.push(a.n_reports + ' run' + (a.n_reports === 1 ? '' : 's'));
+    return a.ancestry + ': ' + parts.join(' · ');
+  });
+  return 'Compared to each reference panel:\n' + lines.join('\n');
 }
 
 function renderTrait(t) {
   const morePgs = t.pgs_ids.length > 5
     ? t.pgs_ids.slice(0,5).map(linkPgs).join(', ') + ` <span style="color:var(--muted)">(+${t.pgs_ids.length-5} more)</span>`
     : t.pgs_ids.map(linkPgs).join(', ');
+  const baselinePct = t.baseline_prevalence != null
+    ? (t.baseline_prevalence * 100).toFixed(t.baseline_prevalence >= 0.1 ? 1 : 2) + '%'
+    : null;
+  const absTipBase = baselinePct
+    ? `Estimated lifetime probability = population baseline (${baselinePct}) × relative risk. Coarse estimate; not a clinical diagnosis.`
+    : 'No population baseline is known for this trait, so absolute risk cannot be estimated.';
   const rows = t.samples.map(s => {
+    const key = t.trait + '||' + s.sample;
+    const isOpen = OPEN_REPORTS.has(key);
     const reps = s.reports.map(r =>
-      `<li><a href="/api/report/${encodeURIComponent(r.task_id)}" target="_blank">${escapeHtml(r.pgs_id || r.task_id)}</a>`
+      `<li><a href="/report/${encodeURIComponent(r.task_id)}" target="_blank">${escapeHtml(r.pgs_id || r.task_id)}</a>`
       + ` · ${escapeHtml(r.file_label || r.file_id)}`
       + ` · match ${r.match_rate.toFixed(1)}%`
       + (r.z_score != null ? ` · z=${fmtZ(r.z_score)}` : '')
       + (r.percentile != null ? ` · ${r.percentile.toFixed(1)}%ile` : '')
+      + (r.ancestry ? ` · <span class="anc">${escapeHtml(r.ancestry)}</span>` : '')
       + `</li>`
     ).join('');
+    const ancTip = ancestryTip(s);
+    const ancAttrs = ancTip ? ` data-tip="${escapeHtml(ancTip)}"` : '';
+    const ancHint = ancTip ? ' *' : '';
+    const rr = s.relative_risk;
+    const rrClass = rr == null ? '' : (rr >= 1.05 ? 'rr-up' : rr <= 0.95 ? 'rr-dn' : '');
+    const rrTip = 'Relative to population average, derived from z-score (per-SD OR ≈ 1.35). Approximate.';
+    const ar = s.absolute_risk;
+    const arClass = ar == null ? 'ar-na' : 'ar-cell';
     return `<tr>
         <td class="sample">${escapeHtml(s.sample)}</td>
         <td class="rank">${s.rank}</td>
         <td class="num">${fmtZ(s.mean_z)}</td>
         <td class="num">${fmtPct(s.mean_pct)}</td>
+        <td class="num ${rrClass}" data-tip="${escapeHtml(rrTip)}">${fmtRR(rr)}</td>
+        <td class="num ${arClass}" data-tip="${escapeHtml(absTipBase)}">${fmtAbs(ar)}</td>
         <td><span class="${riskClass(s.risk)}">${escapeHtml(s.risk)}</span></td>
-        <td><span class="anc">${escapeHtml(s.ancestry)}</span></td>
+        <td><span class="anc"${ancAttrs}>${escapeHtml(s.ancestry)}${ancHint}</span></td>
         <td style="font-size:11px;color:var(--muted)">
           ${s.n_pgs} PGS · ${s.n_reports} run${s.n_reports===1?'':'s'}
-          <details><summary>reports</summary><ul>${reps}</ul></details>
+          <details data-key="${escapeHtml(key)}"${isOpen?' open':''}><summary>reports</summary><ul>${reps}</ul></details>
         </td>
       </tr>`;
   }).join('');
+  const baselineNote = baselinePct
+    ? ` <span style="color:var(--muted)" data-tip="${escapeHtml('Population lifetime risk used as the baseline for absolute-risk estimates.')}">baseline ~${baselinePct}</span>`
+    : '';
   return `
     <section class="trait">
       <h2>${escapeHtml(t.trait)}${t.category ? ` <span class="cat">${escapeHtml(t.category.replace(/^PGS\s*-\s*/i,''))}</span>` : ''}</h2>
@@ -14043,12 +14638,19 @@ function renderTrait(t) {
         <span>avg call rate <b>${t.avg_match_rate}%</b></span>
         <span><b>${t.n_samples}</b> sample${t.n_samples===1?'':'s'}</span>
         ${t.spread_z > 0 ? `<span>z-spread <b>${t.spread_z.toFixed(2)}</b></span>` : ''}
+        ${baselineNote}
       </div>
       ${t.description ? `<div class="desc">${escapeHtml(t.description)}</div>` : ''}
       <table class="cmp">
         <thead><tr>
-          <th>Sample</th><th>Rank</th><th class="num">Z-score</th>
-          <th class="num">Percentile</th><th>Risk</th><th>Ancestry</th><th></th>
+          <th>Sample</th><th>Rank</th>
+          <th class="num" data-tip="Z-score: how many standard deviations from the population mean (averaged across all PGS for this sample/trait).">Z-score</th>
+          <th class="num" data-tip="Position in the reference population: 50% = average.">Percentile</th>
+          <th class="num" data-tip="Relative risk: estimated multiplier vs population average (e.g. 1.5× = ~50% more likely). Approximate, derived from z-score.">Relative risk</th>
+          <th class="num" data-tip="Absolute risk: estimated lifetime probability of the trait, based on population baseline × relative risk. Coarse estimate.">Absolute risk</th>
+          <th>Risk band</th>
+          <th data-tip="Reference panel ancestry used for the percentile/z-score. Hover the pill to see breakdown when more than one was used.">Ancestry</th>
+          <th></th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -14064,7 +14666,7 @@ function linkPgs(id) {
 function load() {
   const qp = new URLSearchParams();
   if (STATE.minMatch !== 90)    qp.set('min_match', STATE.minMatch);
-  if (STATE.maxZ !== 5)         qp.set('max_abs_z', STATE.maxZ);
+  qp.set('max_abs_z', 50);  // permissive: |z| filter removed from UI
   if (STATE.highConf)           qp.set('high_conf', '1');
   fetch('/api/compare?' + qp.toString(), { credentials: 'same-origin' })
     .then(r => {
@@ -14079,22 +14681,23 @@ function load() {
 }
 
 // ── Wire UI ──────────────────────────────────────────────────────
-function bindSeg(id, key, isFloat) {
-  document.querySelectorAll('#'+id+' button').forEach(b => {
-    b.onclick = () => {
-      STATE[key] = isFloat ? parseFloat(b.dataset.v) : parseInt(b.dataset.v, 10);
-      syncBar(); writeHash();
-      // server-side filters need a refetch
-      if (key === 'minMatch' || key === 'maxZ') load();
-      else render();
-    };
-  });
-}
-bindSeg('seg-match', 'minMatch', true);
-bindSeg('seg-z',     'maxZ',     true);
-bindSeg('seg-minsamp', 'minSamples', false);
-bindSeg('seg-minpgs',  'minPgs',     false);
+buildNumSelect('sel-minsamp', 10);
+buildNumSelect('sel-minpgs',  10);
 
+document.querySelectorAll('#seg-match button').forEach(b => {
+  b.onclick = () => {
+    STATE.minMatch = parseFloat(b.dataset.v);
+    syncBar(); writeHash(); load();
+  };
+});
+document.getElementById('sel-minsamp').addEventListener('change', e => {
+  STATE.minSamples = parseInt(e.target.value, 10) || 1;
+  writeHash(); render();
+});
+document.getElementById('sel-minpgs').addEventListener('change', e => {
+  STATE.minPgs = parseInt(e.target.value, 10) || 1;
+  writeHash(); render();
+});
 document.getElementById('hi-conf').addEventListener('change', e => {
   STATE.highConf = e.target.checked; writeHash(); load();
 });
@@ -14107,11 +14710,22 @@ document.getElementById('filter').addEventListener('input', e => {
 document.getElementById('refresh').addEventListener('click', load);
 document.getElementById('reset').addEventListener('click', () => {
   Object.assign(STATE, {
-    q:'', minMatch:90, maxZ:5, highConf:false,
+    q:'', minMatch:90, highConf:false,
     minSamples:1, minPgs:1, sort:'cat',
     cats:new Set(), samples:new Set()
   });
-  syncBar(); writeHash(); load();
+  syncBar(); writeHash(); buildFacetChips(); load();
+});
+
+// Multi-select dropdown toggles
+['ms-cats','ms-samps'].forEach(id => {
+  const m = document.getElementById(id);
+  if (!m) return;
+  m.querySelector('.ms-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    document.querySelectorAll('.ms.open').forEach(o => { if (o !== m) o.classList.remove('open'); });
+    m.classList.toggle('open');
+  });
 });
 
 readHash();

@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>23andclaude — Sub-app Reports</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --border: #262a34;
+    --text: #e6e8ee;
+    --muted: #9aa0ad;
+    --link: #6ea8ff;
+    --link-hover: #a5c6ff;
+    --code-bg: #0b0d12;
+    --code-border: #2a2f3a;
+    --hl: #ffd166;
+    --hl-bg: rgba(255, 209, 102, 0.12);
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .layout { display: grid; grid-template-columns: 320px 1fr; min-height: 100vh; }
+  aside { background: var(--panel); border-right: 1px solid var(--border); padding: 22px 18px; overflow-y: auto; position: sticky; top: 0; max-height: 100vh; }
+  aside h1 { font-size: 16px; margin: 0 0 4px; }
+  aside .sub { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
+  aside ol { list-style: none; padding: 0; margin: 0; }
+  aside li { margin: 4px 0; }
+  aside a { color: var(--text); text-decoration: none; display: block; padding: 8px 10px; border-radius: 6px; font-size: 13.5px; }
+  aside a:hover { background: rgba(255,255,255,0.06); color: var(--link-hover); }
+  aside a.active { background: rgba(110,168,255,0.12); color: var(--link); }
+  aside .meta { color: var(--muted); font-size: 11px; }
+  aside .footer { color: var(--muted); font-size: 11.5px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+  aside .footer a { color: var(--link); padding: 0; display: inline; }
+  main { padding: 28px 36px 80px; max-width: 920px; }
+  main h1 { font-size: 28px; margin: 0 0 8px; }
+  main h2 { margin-top: 32px; padding-top: 8px; border-top: 1px solid var(--border); }
+  main h3 { margin-top: 26px; }
+  main h2:first-of-type, main h3:first-of-type { border: none; padding: 0; }
+  main a { color: var(--link); }
+  main a:hover { color: var(--link-hover); }
+  main code { background: var(--code-bg); border: 1px solid var(--code-border); border-radius: 4px; padding: 1.5px 5px; font-size: 13px; font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace; }
+  main pre { background: var(--code-bg); border: 1px solid var(--code-border); border-radius: 6px; padding: 12px 14px; overflow-x: auto; font-size: 12.5px; line-height: 1.5; }
+  main pre code { background: none; border: none; padding: 0; }
+  main blockquote { border-left: 3px solid var(--hl); margin: 12px 0; padding: 4px 14px; color: var(--muted); }
+  main table { border-collapse: collapse; margin: 10px 0; font-size: 13.5px; }
+  main th, main td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  main th { background: var(--panel); }
+  main hr { border: 0; border-top: 1px solid var(--border); margin: 28px 0; }
+  .raw-link { display: inline-block; margin-top: 12px; font-size: 12px; color: var(--muted); }
+  .raw-link a { color: var(--muted); }
+  .loading, .error { color: var(--muted); padding: 24px 0; }
+  .error { color: #ff8080; }
+  @media (max-width: 880px) {
+    .layout { grid-template-columns: 1fr; }
+    aside { position: static; max-height: none; border-right: none; border-bottom: 1px solid var(--border); }
+    main { padding: 22px 18px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <h1>Sub-app reports</h1>
+    <div class="sub">23andclaude.com — adjacent apps</div>
+    <ol id="nav">
+      <li><a data-file="README.md"                       href="#README">Inventory &amp; overview</a></li>
+      <li><a data-file="simple-genomics-internals.md"    href="#sg">simple-genomics internals<br><span class="meta">/compare, chat, profiles, files</span></a></li>
+      <li><a data-file="bam-converter.md"                href="#bc">bam-converter<br><span class="meta">/convert/ — port 8720</span></a></li>
+      <li><a data-file="simple-ancestry.md"              href="#sa">simple-ancestry<br><span class="meta">/ancestry/ — port 8710</span></a></li>
+      <li><a data-file="legacy-ancestry.md"              href="#la">legacy ancestry<br><span class="meta">/ancestry2/, /v1/ — port 8700</span></a></li>
+      <li><a data-file="translocation-scanner-v2.md"     href="#tsv2">translocation-scanner-v2<br><span class="meta">port 8760</span></a></li>
+      <li><a data-file="translocation-scanner-v3.md"     href="#tsv3">translocation-scanner-v3<br><span class="meta">port 8770</span></a></li>
+      <li><a data-file="translocation-scanner-v4.md"     href="#tsv4">translocation-scanner-v4<br><span class="meta">port 8780</span></a></li>
+      <li><a data-file="llm-webui.md"                    href="#llm">LLM WebUI<br><span class="meta">/LLM — llm.23andclaude.com</span></a></li>
+    </ol>
+    <div class="footer">
+      Back to main packet: <a href="../">/pipelinesdocsv2/</a><br>
+      Raw markdown at this URL.
+    </div>
+  </aside>
+  <main>
+    <div id="content"><div class="loading">Loading…</div></div>
+    <div class="raw-link"><a id="raw-link" href="README.md" target="_blank">View raw markdown ↗</a></div>
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script>
+  const HASH_TO_FILE = {
+    '':         'README.md',
+    'README':   'README.md',
+    'sg':       'simple-genomics-internals.md',
+    'bc':       'bam-converter.md',
+    'sa':       'simple-ancestry.md',
+    'la':       'legacy-ancestry.md',
+    'tsv2':     'translocation-scanner-v2.md',
+    'tsv3':     'translocation-scanner-v3.md',
+    'tsv4':     'translocation-scanner-v4.md',
+    'llm':      'llm-webui.md',
+  };
+
+  function setActive(file) {
+    document.querySelectorAll('#nav a').forEach(a => {
+      a.classList.toggle('active', a.dataset.file === file);
+    });
+    document.getElementById('raw-link').href = file;
+  }
+
+  async function load() {
+    const hash = location.hash.replace(/^#/, '');
+    const file = HASH_TO_FILE[hash] || 'README.md';
+    setActive(file);
+    const content = document.getElementById('content');
+    content.innerHTML = '<div class="loading">Loading ' + file + '…</div>';
+    try {
+      const r = await fetch(file + '?cb=' + Date.now());
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const md = await r.text();
+      const rewritten = md
+        .replace(/\]\((simple-genomics-internals|bam-converter|simple-ancestry|legacy-ancestry|translocation-scanner-v[234]|llm-webui)\.md\)/g, (m, p1) => {
+          const map = {
+            'simple-genomics-internals': 'sg',
+            'bam-converter': 'bc',
+            'simple-ancestry': 'sa',
+            'legacy-ancestry': 'la',
+            'translocation-scanner-v2': 'tsv2',
+            'translocation-scanner-v3': 'tsv3',
+            'translocation-scanner-v4': 'tsv4',
+            'llm-webui': 'llm',
+          };
+          return '](#' + (map[p1] || p1) + ')';
+        })
+        .replace(/\]\(README\.md\)/g, '](#README)');
+      content.innerHTML = marked.parse(rewritten, { breaks: false, gfm: true });
+      window.scrollTo(0, 0);
+    } catch (e) {
+      content.innerHTML = '<div class="error">Failed to load ' + file + ': ' + e.message + '</div>';
+    }
+  }
+
+  window.addEventListener('hashchange', load);
+  document.addEventListener('DOMContentLoaded', load);
+</script>
+</body>
+</html>
