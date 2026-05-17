@@ -97,8 +97,13 @@ def _warm_live_percentile_cache():
     except Exception:
         pass
 
-import threading as _live_pctl_threading
-_live_pctl_threading.Thread(target=_warm_live_percentile_cache, daemon=True).start()
+# # WARMUP_DISABLED: 1,464 registry entries × ~5s SHA compute each = 2+ hours
+# of warmup work that kept getting killed by the watchdog. The on-demand
+# path works fine; first request to each PGS pays the SHA cost, subsequent
+# requests hit memo cache. Disabled until warmup is rewritten to filter to
+# PGSes present in the user's reports (much smaller set).
+# import threading as _live_pctl_threading
+# _live_pctl_threading.Thread(target=_warm_live_percentile_cache, daemon=True).start()
 # === LIVE_PERCENTILE_WARMUP_END ===
 
 from runners import (set_task_context, clear_task_context, cancel_task,
@@ -996,12 +1001,21 @@ def _scan_converter_outputs(username):
         dv_dir = os.path.join(output_dir, "dv")
         if not os.path.isdir(dv_dir):
             continue
-        for fname in sorted(os.listdir(dv_dir)):
+        # # CONVERTER_SKIP_VARIANT_VCF: skip the variant-only VCF when a sibling
+        # gVCF exists in the same dv/ output dir. The variant-only VCF has
+        # ~45% match rate for PGS scoring (no homozygous-reference blocks);
+        # the gVCF has ~97%. Registering both surfaces a useless file row.
+        _dv_listing = sorted(os.listdir(dv_dir))
+        _has_gvcf_sibling = any(o.endswith(".g.vcf.gz") for o in _dv_listing)
+        for fname in _dv_listing:
             fpath = os.path.join(dv_dir, fname)
             if not os.path.isfile(fpath):
                 continue
             ftype = _normalize_file_type(fname)
             if not ftype or ftype in ("bam", "cram"):
+                continue
+            # Variant-only VCF + sibling gVCF → skip
+            if fname.endswith(".vcf.gz") and not fname.endswith(".g.vcf.gz") and _has_gvcf_sibling:
                 continue
             if fpath in registered_paths:
                 continue
@@ -3193,6 +3207,20 @@ def _queue_task(username, test_def, active, profile_id=None,
     if not file_type:
         file_type = _normalize_file_type(active.get("path", ""))
 
+    # # PROFILE_REFPOP_INJECT: fall back to profile-level default ancestry if no
+    # explicit ref_pop. PCA-based inference can return UNRESOLVED for samples
+    # with low coverage at PCA loci, which then wipes the top-level percentile
+    # via the §1.5 gate. Profiles carry an authoritative ancestry hint that
+    # was either user-provided or inferred from prior runs.
+    effective_ref_pop = ref_pop
+    if not effective_ref_pop and profile_id:
+        try:
+            data = _load_profiles(username)
+            prof = data["profiles"].get(profile_id) or {}
+            effective_ref_pop = prof.get("default_ref_pop") or ""
+        except Exception:
+            pass
+
     task_id = f"{test_id}_{uuid.uuid4().hex[:8]}"
     task = {
         "id": task_id,
@@ -3206,7 +3234,7 @@ def _queue_task(username, test_def, active, profile_id=None,
         "attempt": attempt,
         "exclude_file_ids": list(exclude_file_ids or []),
         "selection_reason": selection_reason,
-        "ref_pop": ref_pop or "",
+        "ref_pop": effective_ref_pop or "",
     }
     with queue_lock:
         task_queue.append(task)
@@ -3220,6 +3248,7 @@ def _queue_task(username, test_def, active, profile_id=None,
         "profile_id": profile_id or "",
         "file_type": file_type,
         "selection_reason": selection_reason,
+        "ref_pop": effective_ref_pop or "",
     }
     return task_id
 
@@ -3381,7 +3410,14 @@ def _load_reports_for_file(username, file_id):
         completed = rep.get("completed_at", "")
         if test_id in latest and latest[test_id][0] > completed:
             continue
-        _apply_live_pctl(rep)
+        # # SKIP_LIVE_OVERLAY_IN_LIST: live overlay does ref-stats validation
+        # (catalog SHA recompute) per report, ~5s each for cold SHA cache;
+        # with 60+ unique PGSes in a profile that's 5+ min and the watchdog
+        # kills the service. The stored percentile is already the value we
+        # want for listing/aggregation; only skip if user explicitly opts in
+        # via env flag.
+        if os.environ.get("SIMPLE_GENOMICS_LIVE_OVERLAY") == "1":
+            _apply_live_pctl(rep)
         result = rep.get("result") or {}
         latest[test_id] = (completed, {
             "task_id": rep.get("task_id"),
