@@ -13545,7 +13545,11 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
                 rep = json.load(open(jf))
             except Exception:
                 continue
-            _apply_live_pctl(rep)
+            # # SKIP_LIVE_OVERLAY_IN_COMPARE: cold-cache SHA validation per report kills
+            # this endpoint (5s × ~290 unique PGSes = 24+ min hang). Skip
+            # unless explicitly enabled.
+            if os.environ.get("SIMPLE_GENOMICS_LIVE_OVERLAY") == "1":
+                _apply_live_pctl(rep)
             res = rep.get("result") or {}
             # # GATE_W0_5_COMPARE_EXCLUDED: record-not-silently-drop. Per W0.5.
             _trait_for_excl = (res.get("trait") or
