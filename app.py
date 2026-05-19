@@ -3483,10 +3483,17 @@ def get_status(request: Request, username: str = Depends(current_user)):
 
         results = {}
         profile_reports = _load_reports_for_profile(username, _profile_id)
-        # profile_reports is {test_id: [entries...]}  — flatten into results
+        # # STATUS_KEY_FALLBACK: when task_id is None (focused-runner reports),
+        # fall back to a synthetic key (test_id + "_" + file_id) so each
+        # unique (test, file) survives. The frontend strips the trailing
+        # suffix to recover test_id.
         for test_id, entries in profile_reports.items():
             for entry in entries:
-                results[entry["task_id"]] = entry
+                tid = entry.get("task_id")
+                if not tid:
+                    tid = f"{test_id}_{entry.get('file_id') or 'nofile'}"
+                    entry["task_id"] = tid
+                results[tid] = entry
 
         for task_id, res in task_results.items():
             if res.get("username") == user_lc and res.get("file_id") in _prof_file_ids:
@@ -3503,7 +3510,11 @@ def get_status(request: Request, username: str = Depends(current_user)):
         if active_id:
             latest_per_test = _load_reports_for_file(username, active_id)
             for entry in latest_per_test.values():
-                results[entry["task_id"]] = entry
+                tid = entry.get("task_id")
+                if not tid:
+                    tid = f"{entry.get('test_id') or 'unknown'}_{active_id}"
+                    entry["task_id"] = tid
+                results[tid] = entry
 
         for task_id, res in task_results.items():
             if res.get("username") == user_lc and res.get("file_id") == active_id:
