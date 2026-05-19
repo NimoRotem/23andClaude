@@ -13531,6 +13531,56 @@ def _compare_risk_labels(n):
             + ["Above Avg", "High", "Highest"])
 
 
+# # TRAIT_NORMALIZE_FOR_COMPARE: collapse synonym trait strings so 'Height' /
+# 'Adult standing height' / 'Standing height' group into one row in
+# /api/compare. Keeps display name = the canonical form.
+_TRAIT_ALIAS = {
+    "adult standing height": "Height",
+    "standing height": "Height",
+    "height": "Height",
+    "fluid intelligence": "Intelligence",
+    "fluid intelligence score": "Intelligence",
+    "intelligence quotient": "Intelligence",
+    "intelligence / cognitive ability": "Intelligence",
+    "iq score": "Intelligence",
+    "cognitive performance": "Intelligence",
+    "cognitive ability": "Intelligence",
+    "verbal-numerical reasoning": "Intelligence",
+    "serum testosterone levels": "Testosterone",
+    "serum testosterone levels in males": "Testosterone",
+    "testosterone (male only)": "Testosterone",
+    "testosterone [nmol/l]": "Testosterone",
+    "testosterone": "Testosterone",
+    "major depression": "Major depression",
+    "depression": "Major depression",
+    "mdd": "Major depression",
+    "type 1 diabetes": "Type 1 diabetes",
+    "insulin-dependent diabetes mellitus (time-to-event)": "Type 1 diabetes",
+    "type 2 diabetes": "Type 2 diabetes",
+    "alzheimer's disease": "Alzheimer's disease",
+    "alzheimers disease": "Alzheimer's disease",
+    "average total household income before tax": "Household income",
+    "income": "Household income",
+    "college education": "Educational attainment",
+    "educational attainment": "Educational attainment",
+    "qualifications (years of education)": "Educational attainment",
+}
+
+def _normalize_trait_for_compare(raw_trait: str) -> str:
+    if not raw_trait:
+        return raw_trait
+    key = raw_trait.strip().lower()
+    if key in _TRAIT_ALIAS:
+        return _TRAIT_ALIAS[key]
+    # Strip trailing parenthetical qualifier: "X (PRSmix)" -> "X"
+    import re as _re
+    stripped = _re.sub(r"\s*\([^)]*\)\s*$", "", raw_trait).strip()
+    sk = stripped.lower()
+    if sk in _TRAIT_ALIAS:
+        return _TRAIT_ALIAS[sk]
+    return stripped or raw_trait
+
+
 def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
     udir = user_dir(username)
     files_data = {}
@@ -13584,6 +13634,7 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
             # # GATE_W0_5_COMPARE_EXCLUDED: record-not-silently-drop. Per W0.5.
             _trait_for_excl = (res.get("trait") or
                                 (rep.get("test_name") or "").split(" (")[0]).strip()
+            _trait_for_excl = _normalize_trait_for_compare(_trait_for_excl)
             def _excl(reason_code):
                 if not _trait_for_excl:
                     return
@@ -13632,6 +13683,8 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
                 continue
             trait = (res.get("trait")
                      or (rep.get("test_name") or "").split(" (")[0]).strip()
+            # # TRAIT_NORMALIZE_FOR_COMPARE: collapse synonyms before grouping
+            trait = _normalize_trait_for_compare(trait)
             if not trait:
                 continue
             pgs_id = res.get("pgs_id")
