@@ -3789,6 +3789,24 @@ async def get_report(task_id: str, username: str = Depends(current_user)):
     if task_id in task_results:
         return task_results[task_id]
 
+    # # REPORT_SYNTHETIC_TASK_ID: synthetic task_id from /api/status fallback is
+    # f"{test_id}_{file_id}" when on-disk reports had task_id=None.
+    # On-disk filenames are f"{test_id}_<rand8hex>.json"; look up the
+    # most recent matching file in the file_id's reports dir.
+    parts = task_id.rsplit("_", 1)
+    if len(parts) == 2:
+        test_id_guess, file_id_guess = parts
+        sub = user_root / file_id_guess
+        if sub.is_dir():
+            matches = sorted(
+                sub.glob(f"{test_id_guess}_*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if matches:
+                with open(matches[0]) as f:
+                    return _apply_live_pctl(json.load(f))
+
     return JSONResponse({"error": "Report not found"}, status_code=404)
 
 
