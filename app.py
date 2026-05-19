@@ -13377,7 +13377,7 @@ from collections import defaultdict as _cmp_defaultdict
 # Cache up to a few filter combinations per user so toggling presets is cheap.
 _COMPARE_CACHE = {}            # key: (user, min_match, max_abs_z, high_conf) -> {ts, data}
 _COMPARE_TTL_S = 15.0
-_COMPARE_DEFAULT_MIN_MATCH = 90.0
+_COMPARE_DEFAULT_MIN_MATCH = 60.0  # was 90 — too strict, hid many valid results
 _COMPARE_DEFAULT_MAX_ABS_Z = 20.0
 
 # Approximate per-SD log-odds (β) for a "typical" disease PRS; relative risk =
@@ -13555,7 +13555,9 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
             continue
         fid = fid_dir.name
         sample = _sample_name(fid)
-        for jf in fid_dir.glob("pgs_*.json"):
+        # COMPARE_INCLUDE_CUSTOM_PGS: also pick up custom_pgs_*.json reports
+        _compare_files = list(fid_dir.glob("pgs_*.json")) + list(fid_dir.glob("custom_pgs*.json"))
+        for jf in _compare_files:
             if jf.suffix != ".json":
                 continue
             try:
@@ -13586,7 +13588,9 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
                     "z_score": _compare_extract_z(res),
                 })
             status = (res.get("status") or rep.get("status") or "passed").lower()
-            if status not in ("passed", "ok", "success", "completed", ""):
+            # COMPARE_ACCEPT_WARNING: include "warning" status (score is
+            # computed, just below 85% match rate). User wants visibility.
+            if status not in ("passed", "ok", "success", "completed", "warning", ""):
                 _excl("SCORE_NOT_COMPUTED")
                 continue
             # Gate-based exclusion: if the gate says not interpretable,

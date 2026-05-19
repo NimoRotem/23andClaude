@@ -112,9 +112,10 @@ def _decide_reason_code(result: Dict[str, Any]) -> Optional[str]:
     Order is meaningful — earliest match wins so the most specific cause
     surfaces. Returns None when the result is interpretable.
     """
-    # Policy hide (sensitive traits)
-    if _is_hidden_trait(result):
-        return RC.TRAIT_HIDDEN_BY_POLICY
+    # TRAIT_HIDDEN_BY_POLICY_DISABLED: per user request, show all traits
+    # including cognitive/intelligence/education PGSes.
+    # if _is_hidden_trait(result):
+    #     return RC.TRAIT_HIDDEN_BY_POLICY
 
     # If we never computed a score at all, raw_only is the right verdict
     raw_score = result.get("raw_score")
