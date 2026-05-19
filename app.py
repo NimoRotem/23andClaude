@@ -7322,6 +7322,12 @@ input[type="file"] { display: none; }
 .variant-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
 .variant-table th { text-align: left; font-size: 0.65rem; text-transform: uppercase; color: var(--text2); padding: 4px 8px; border-bottom: 1px solid var(--border); }
 .variant-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.apoe-diplo-section { background: rgba(96, 165, 250, 0.06); border-radius: 8px; padding: 12px; }
+.apoe-diplo { margin: 0 0 4px 0; font-size: 0.95rem; }
+.apoe-diplo-label { color: var(--text2); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; margin-right: 8px; }
+.apoe-diplo-value { font-size: 1.4rem; color: var(--accent); letter-spacing: 0.5px; }
+.apoe-risk { margin: 4px 0 0 0; font-size: 0.85rem; color: var(--text2); }
+.rare-tag { font-size: 0.65rem; text-transform: uppercase; background: #3d3a1a; color: #facc15; padding: 2px 6px; border-radius: 3px; margin-left: 8px; vertical-align: middle; }
 .findings-section { background: rgba(248, 113, 113, 0.05); border-radius: 8px; padding: 12px; }
 .error-section { background: rgba(248, 113, 113, 0.1); border-radius: 8px; padding: 12px; }
 .error-section h4 { color: #f87171; }
@@ -12081,11 +12087,22 @@ function _openReportModal(report) {
     html += '</div>';
   }
 
-  // ── APOE Status ──
+  // ── APOE Status (diplotype headline) ──
   if (result.apoe_status) {
-    html += '<div class="report-section">';
-    html += `<h4>APOE Genotype</h4>`;
-    html += `<p><strong>${escapeHtml(result.apoe_status.genotype)}</strong> — Risk: ${escapeHtml(result.apoe_status.risk)}</p>`;
+    const apoe = result.apoe_status;
+    const display = apoe.diplotype_display || apoe.genotype || '—';
+    const rareTag = apoe.rare ? ' <span class="rare-tag" title="ε1 alleles are very rare — recommend a confirmatory phased assay.">rare</span>' : '';
+    html += '<div class="report-section apoe-diplo-section">';
+    html += `<h4>APOE Diplotype</h4>`;
+    html += `<p class="apoe-diplo"><span class="apoe-diplo-label">Diplotype:</span> `
+          + `<strong class="apoe-diplo-value">${escapeHtml(display)}</strong>${rareTag}</p>`;
+    html += `<p class="apoe-risk">${escapeHtml(apoe.risk || '')}</p>`;
+    html += '</div>';
+  } else if (result.diplotype) {
+    // Generic fallback if a runner emits a diplotype without an apoe_status block.
+    html += '<div class="report-section apoe-diplo-section">';
+    html += `<h4>Diplotype</h4>`;
+    html += `<p class="apoe-diplo"><strong class="apoe-diplo-value">${escapeHtml(result.diplotype)}</strong></p>`;
     html += '</div>';
   }
 
@@ -13722,6 +13739,347 @@ def _compare_build_for_user(username, min_match, max_abs_z, high_conf_only):
     return out, facets
 
 
+# ── Monogenic / single-variant comparison ────────────────────────
+# These results are NOT percentiles. Each sample produces a discrete
+# call (diplotype, genotype, "carrier"/"ref/ref"), so the compare tab
+# needs a different display from the polygenic one.
+
+_COMPARE_MONO_CACHE = {}   # key: username -> {ts, data, facets}
+_COMPARE_MONO_TTL_S = 15.0
+# Report filename prefixes that produce discrete (non-percentile) calls.
+# # MONO_PREFIXES_EXPANDED: include all non-PGS test types so the /compare
+# monogenic tab shows mono_, pgx_, carrier_, nutri_, fun_, sport_, sleep_
+# reports (was var_ only).
+_MONOGENIC_PREFIXES = (
+    "var_", "mono_", "pgx_", "carrier_",
+    "nutri_", "sports_", "sleep_", "fun_",
+    "single_", "ancestry_",
+)
+
+
+def _mono_dosage_label(dosage):
+    if dosage is None:
+        return None
+    try:
+        d = int(dosage)
+    except (TypeError, ValueError):
+        return None
+    return {0: "ref/ref", 1: "het", 2: "hom"}.get(d)
+
+
+def _mono_dosage_from_genotype(gt):
+    """Parse a genotype string (e.g. "0/1", "1|1", "0/0 (ref/ref — no variant)")
+    into a dosage 0/1/2. Returns None when unknown."""
+    if not gt or not isinstance(gt, str):
+        return None
+    s = gt.lower()
+    if "ref/ref" in s or "0/0" in s or "0|0" in s:
+        return 0
+    if "1/1" in s or "1|1" in s:
+        return 2
+    if "0/1" in s or "1/0" in s or "0|1" in s or "1|0" in s:
+        return 1
+    return None
+
+
+def _infer_apoe_from_variants(variants):
+    """Re-derive an APOE diplotype from older reports that pre-date the
+    apoe_status / diplotype fields. Looks for rs429358 + rs7412 in the
+    variants array and returns (display, genotype, risk, rare) or None."""
+    by_rs = {}
+    for v in variants or []:
+        rs = v.get("rs") or v.get("variant")
+        if rs:
+            by_rs[rs] = v
+    if "rs429358" not in by_rs or "rs7412" not in by_rs:
+        return None
+    try:
+        # Lazy-import to avoid touching runners.py at module load.
+        from runners import _interpret_apoe  # type: ignore
+    except Exception:
+        return None
+    pseudo_results = [
+        {"variant": "rs429358", "rs": "rs429358",
+         "genotype": by_rs["rs429358"].get("genotype", "")},
+        {"variant": "rs7412", "rs": "rs7412",
+         "genotype": by_rs["rs7412"].get("genotype", "")},
+    ]
+    info = _interpret_apoe(pseudo_results)
+    if not info or not info.get("alleles"):
+        return None
+    return info
+
+
+def _mono_summarize_call(res):
+    """Pick the most informative one-line genotype summary for a monogenic
+    result. Order of preference:
+      1. APOE diplotype from apoe_status (e.g. "ε3/ε4")
+      2. Top-level "diplotype" field (e.g. star alleles)
+      3. Inferred APOE diplotype from variant-level genotypes (legacy reports)
+      4. Carrier call: 'het carrier', 'hom carrier', 'ref/ref'
+    Returns dict: {call, kind, risk, depth_min}."""
+    apoe = res.get("apoe_status") or {}
+    if apoe.get("diplotype_display"):
+        return {
+            "call": apoe["diplotype_display"],
+            "kind": "diplotype",
+            "risk": apoe.get("risk"),
+            "rare": bool(apoe.get("rare")),
+            "depth_min": _mono_min_depth(res),
+        }
+    if res.get("diplotype"):
+        return {
+            "call": res["diplotype"],
+            "kind": "diplotype",
+            "risk": None,
+            "rare": False,
+            "depth_min": _mono_min_depth(res),
+        }
+    # Legacy reports: derive APOE diplotype from variant rows on the fly.
+    inferred = _infer_apoe_from_variants(res.get("variants"))
+    if inferred:
+        return {
+            "call": inferred.get("diplotype_display") or inferred.get("genotype"),
+            "kind": "diplotype",
+            "risk": inferred.get("risk"),
+            "rare": bool(inferred.get("rare")),
+            "depth_min": _mono_min_depth(res),
+        }
+    variants = res.get("variants") or []
+    if not variants:
+        return {"call": "—", "kind": "unknown", "risk": None,
+                "rare": False, "depth_min": None}
+    # Take the strongest dosage across the panel. Prefer the structured
+    # dosage field; fall back to parsing the genotype string (which is
+    # what the older VCF-based variant_lookup runner emitted).
+    best_dose = -1
+    for v in variants:
+        d = v.get("dosage")
+        try:
+            d_int = int(d) if d is not None else None
+        except (TypeError, ValueError):
+            d_int = None
+        if d_int is None:
+            d_int = _mono_dosage_from_genotype(v.get("genotype"))
+        if d_int is not None and d_int > best_dose:
+            best_dose = d_int
+    if best_dose < 0:
+        return {"call": "no call", "kind": "unknown", "risk": None,
+                "rare": False, "depth_min": _mono_min_depth(res)}
+    if best_dose == 0:
+        return {"call": "ref/ref", "kind": "carrier", "risk": None,
+                "rare": False, "depth_min": _mono_min_depth(res)}
+    if best_dose == 1:
+        return {"call": "het carrier", "kind": "carrier", "risk": None,
+                "rare": False, "depth_min": _mono_min_depth(res)}
+    return {"call": "hom carrier", "kind": "carrier", "risk": None,
+            "rare": False, "depth_min": _mono_min_depth(res)}
+
+
+def _mono_min_depth(res):
+    variants = res.get("variants") or []
+    depths = [v.get("depth") for v in variants
+              if isinstance(v.get("depth"), (int, float)) and v.get("depth") > 0]
+    return int(min(depths)) if depths else None
+
+
+def _compare_build_monogenic_for_user(username):
+    udir = user_dir(username)
+    files_data = {}
+    fpath = udir / "files.json"
+    if fpath.exists():
+        try:
+            files_data = (json.load(open(fpath)) or {}).get("files", {}) or {}
+        except Exception:
+            files_data = {}
+
+    def _sample_name(fid):
+        f = files_data.get(fid) or {}
+        return (f.get("sample_name")
+                or (f.get("name", "").split(".")[0])
+                or fid[:8])
+
+    def _file_label(fid):
+        f = files_data.get(fid) or {}
+        return f.get("name") or f.get("file_type") or fid[:8]
+
+    reports_root = udir / "reports"
+    if not reports_root.exists():
+        return [], {"categories": [], "samples": []}
+
+    # tests[test_id] = {test_name, category, description, gene, samples: {sname: [entry,...]}}
+    tests = {}
+    all_categories = set()
+    all_samples = set()
+
+    for fid_dir in reports_root.iterdir():
+        if not fid_dir.is_dir():
+            continue
+        fid = fid_dir.name
+        sample = _sample_name(fid)
+        for jf in fid_dir.iterdir():
+            if jf.suffix != ".json":
+                continue
+            stem = jf.name
+            if not any(stem.startswith(pref) for pref in _MONOGENIC_PREFIXES):
+                continue
+            try:
+                rep = json.load(open(jf))
+            except Exception:
+                continue
+            res = rep.get("result") or {}
+            status = (res.get("status") or rep.get("status") or "").lower()
+            # Accept passed and fingerprint_drift_refused — the variant
+            # calls themselves are valid even when downstream gates fail.
+            if status not in ("passed", "ok", "success", "completed",
+                              "fingerprint_drift_refused", ""):
+                continue
+            test_id = rep.get("test_id") or stem.split("_", 2)[0]
+            test_name = rep.get("test_name") or test_id
+            category = rep.get("category") or "Monogenic"
+            description = rep.get("description") or ""
+            # Gene comes from the variant table when present.
+            gene = ""
+            variants = res.get("variants") or []
+            for v in variants:
+                if v.get("gene"):
+                    gene = v["gene"]
+                    break
+
+            call = _mono_summarize_call(res)
+            entry = {
+                "task_id": rep.get("task_id"),
+                "file_id": fid,
+                "file_label": _file_label(fid),
+                "completed_at": rep.get("completed_at"),
+                "call": call["call"],
+                "call_kind": call["kind"],
+                "risk": call["risk"],
+                "rare": call["rare"],
+                "depth_min": call["depth_min"],
+                "headline": res.get("headline"),
+                "status": status or "passed",
+                "variants": [
+                    {
+                        "gene": v.get("gene", ""),
+                        "name": v.get("name", v.get("variant", "")),
+                        "rs": v.get("rs") or v.get("variant"),
+                        "genotype": v.get("genotype", ""),
+                        "dosage": (v.get("dosage")
+                                   if v.get("dosage") is not None
+                                   else _mono_dosage_from_genotype(v.get("genotype"))),
+                        "dosage_label": (_mono_dosage_label(v.get("dosage"))
+                                         or _mono_dosage_label(
+                                             _mono_dosage_from_genotype(v.get("genotype")))),
+                        "depth": v.get("depth"),
+                        "expected_ref": v.get("expected_ref"),
+                        "expected_alt": v.get("expected_alt"),
+                    }
+                    for v in variants
+                ],
+            }
+            t = tests.setdefault(test_id, {
+                "test_id": test_id,
+                "test_name": test_name,
+                "category": category,
+                "description": description,
+                "gene": gene,
+                "samples": {},
+            })
+            # Keep the most-recent entry per (test, sample) so reruns win.
+            existing_list = t["samples"].setdefault(sample, [])
+            existing_list.append(entry)
+            if category:
+                all_categories.add(category)
+            if not t["gene"] and gene:
+                t["gene"] = gene
+            all_samples.add(sample)
+
+    # Build output rows. Sort samples by call rarity (carriers/diplotypes
+    # with elevated risk first) so divergence is obvious.
+    out = []
+    for t in tests.values():
+        sample_rows = []
+        for sname, entries in t["samples"].items():
+            # Most-recent first.
+            entries.sort(key=lambda e: (e.get("completed_at") or ""), reverse=True)
+            latest = entries[0]
+            sample_rows.append({
+                "sample": sname,
+                "call": latest["call"],
+                "call_kind": latest["call_kind"],
+                "risk": latest["risk"],
+                "rare": latest["rare"],
+                "depth_min": latest["depth_min"],
+                "headline": latest["headline"],
+                "status": latest["status"],
+                "task_id": latest["task_id"],
+                "file_label": latest["file_label"],
+                "completed_at": latest["completed_at"],
+                "variants": latest["variants"],
+                "n_runs": len(entries),
+            })
+
+        # Sort: diplotypes with elevated risk first, then carriers, then ref/ref.
+        def _row_rank(r):
+            # Lower number = more notable, appears first.
+            if r["call_kind"] == "diplotype":
+                # ε4 carriers / homozygotes float to top.
+                c = r["call"]
+                if "ε4" in c and c.count("ε4") >= 2:
+                    return 0
+                if "ε4" in c:
+                    return 1
+                return 5
+            if r["call"] in ("hom carrier",):
+                return 2
+            if r["call"] in ("het carrier",):
+                return 3
+            if r["call"] == "ref/ref":
+                return 7
+            return 8
+
+        sample_rows.sort(key=_row_rank)
+
+        # Distinct calls across this test (used by the UI to render
+        # divergence badges).
+        distinct_calls = sorted({r["call"] for r in sample_rows})
+
+        out.append({
+            "test_id": t["test_id"],
+            "test_name": t["test_name"],
+            "category": t["category"],
+            "description": t["description"],
+            "gene": t["gene"],
+            "n_samples": len(sample_rows),
+            "distinct_calls": distinct_calls,
+            "samples": sample_rows,
+        })
+
+    # Group by category, then by gene/test name.
+    out.sort(key=lambda t: ((t["category"] or "ZZZ").lower(),
+                            (t["gene"] or "").lower(),
+                            t["test_name"].lower()))
+    facets = {
+        "categories": sorted(all_categories),
+        "samples": sorted(all_samples),
+    }
+    return out, facets
+
+
+def _compare_mono_cached(username):
+    now = _cmp_time.time()
+    hit = _COMPARE_MONO_CACHE.get(username)
+    if hit and now - hit["ts"] < _COMPARE_MONO_TTL_S:
+        return hit["data"], hit["facets"]
+    data, facets = _compare_build_monogenic_for_user(username)
+    _COMPARE_MONO_CACHE[username] = {"ts": now, "data": data, "facets": facets}
+    if len(_COMPARE_MONO_CACHE) > 32:
+        oldest = min(_COMPARE_MONO_CACHE.items(), key=lambda kv: kv[1]["ts"])[0]
+        _COMPARE_MONO_CACHE.pop(oldest, None)
+    return data, facets
+
+
 def _compare_data_cached(username, min_match, max_abs_z, high_conf_only):
     key = (username, round(min_match, 2), round(max_abs_z, 2), bool(high_conf_only))
     now = _cmp_time.time()
@@ -13763,6 +14121,17 @@ def api_compare(request: Request, username: str = Depends(current_user)):
             "max_abs_z": max_abs_z,
             "high_conf_only": high_conf,
         },
+        "generated_at": _cmp_time.time(),
+    }
+
+
+@app.get("/api/compare/monogenic")
+def api_compare_monogenic(request: Request, username: str = Depends(current_user)):
+    tests, facets = _compare_mono_cached(username)
+    return {
+        "username": username,
+        "tests": tests,
+        "facets": facets,
         "generated_at": _cmp_time.time(),
     }
 
@@ -14095,6 +14464,76 @@ _COMPARE_PAGE_HTML = r"""<!DOCTYPE html>
     padding: 5px 10px; border-radius: 6px; font-size: 12.5px; width: 220px;
   }
 
+  .tabs {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 0 24px; display: flex; gap: 0;
+  }
+  .tab {
+    background: transparent; border: 0; color: var(--muted);
+    padding: 10px 16px; font-size: 13px; cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+    font-family: inherit;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.on { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+  /* Monogenic table */
+  .mono-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 20px; margin-bottom: 16px;
+  }
+  .mono-card h2 {
+    margin: 0 0 4px 0; font-size: 16.5px; font-weight: 600;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .mono-card h2 .gene-tag {
+    font-size: 11px; font-weight: 600; color: var(--accent);
+    background: rgba(96, 165, 250, 0.12); padding: 2px 8px; border-radius: 4px;
+    letter-spacing: .04em;
+  }
+  .mono-card h2 .cat {
+    font-size: 10.5px; font-weight: 500; color: var(--muted);
+    background: var(--panel2); padding: 2px 8px; border-radius: 4px;
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  .mono-card .stat-line {
+    font-size: 12px; color: var(--muted); margin: 4px 0 10px 0;
+    display: flex; gap: 14px; flex-wrap: wrap;
+  }
+  .mono-card .stat-line b { color: var(--text); }
+  .mono-card .desc { font-size: 12.5px; color: var(--muted); margin: 0 0 10px 0; }
+  table.mono { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 13px; }
+  table.mono th, table.mono td {
+    text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border);
+  }
+  table.mono th {
+    color: var(--muted); font-weight: 500; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  table.mono td.sample { font-weight: 600; }
+  td.mono-call {
+    font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums;
+    letter-spacing: .5px;
+  }
+  td.mono-call.diplotype { color: var(--accent); }
+  td.mono-call.carrier-het { color: #fbbf24; }
+  td.mono-call.carrier-hom { color: #f87171; }
+  td.mono-call.refref { color: var(--muted); font-weight: 500; }
+  td.mono-call.unknown { color: var(--muted); font-style: italic; }
+  .mono-risk { font-size: 11.5px; color: var(--muted); display: block; margin-top: 2px; }
+  .mono-rare-tag {
+    font-size: 10px; text-transform: uppercase; background: #3d3a1a; color: #facc15;
+    padding: 1px 6px; border-radius: 3px; margin-left: 8px; vertical-align: middle;
+    letter-spacing: .04em;
+  }
+  .mono-divergent {
+    color: #fbbf24; font-size: 11px; padding: 2px 6px; border-radius: 4px;
+    background: rgba(251, 191, 36, .1); margin-left: 8px;
+  }
+  details.mono-variants summary { font-size: 11px; color: var(--muted); cursor: pointer; }
+  details.mono-variants ul { margin: 4px 0 0 14px; padding: 0; font-size: 11px; color: var(--muted); }
+  details.mono-variants li { padding: 1px 0; font-variant-numeric: tabular-nums; }
+
   .filterbar {
     background: var(--panel); border-bottom: 1px solid var(--border);
     padding: 10px 24px; display: flex; flex-wrap: wrap; gap: 14px 18px;
@@ -14309,6 +14748,11 @@ _COMPARE_PAGE_HTML = r"""<!DOCTYPE html>
   <button id="refresh">Refresh</button>
 </header>
 
+<nav class="tabs" id="tabs" role="tablist">
+  <button class="tab on" data-tab="polygenic" role="tab" aria-selected="true">Polygenic (percentiles)</button>
+  <button class="tab" data-tab="monogenic" role="tab" aria-selected="false">Monogenic (discrete calls)</button>
+</nav>
+
 <div class="filterbar" id="filterbar">
   <div class="fgroup">
     <span class="flabel">Min match</span>
@@ -14405,6 +14849,8 @@ const STATE = {
   samples: new Set(),    // active sample filters (empty = all)
 };
 let DATA = null;
+let MONO_DATA = null;
+let CURRENT_TAB = 'polygenic';   // 'polygenic' | 'monogenic'
 // Track which (trait, sample) reports-detail panels are open so we can
 // re-open them after a re-render (auto-refresh would otherwise collapse them).
 const OPEN_REPORTS = new Set();
@@ -14413,6 +14859,7 @@ function readHash() {
   const h = (window.location.hash || '').replace(/^#/, '');
   if (!h) return;
   const qp = new URLSearchParams(h);
+  if (qp.has('tab'))       CURRENT_TAB = qp.get('tab') === 'monogenic' ? 'monogenic' : 'polygenic';
   if (qp.has('q'))         STATE.q = qp.get('q');
   if (qp.has('mm'))        STATE.minMatch = +qp.get('mm');
   if (qp.has('hc'))        STATE.highConf = qp.get('hc') === '1';
@@ -14424,6 +14871,7 @@ function readHash() {
 }
 function writeHash() {
   const qp = new URLSearchParams();
+  if (CURRENT_TAB !== 'polygenic') qp.set('tab', CURRENT_TAB);
   if (STATE.q) qp.set('q', STATE.q);
   if (STATE.minMatch !== 90) qp.set('mm', STATE.minMatch);
   if (STATE.highConf)        qp.set('hc', '1');
@@ -14572,6 +15020,10 @@ function wireOpenReports() {
 }
 
 function render() {
+  if (CURRENT_TAB === 'monogenic') {
+    renderMonogenic();
+    return;
+  }
   captureOpenReports();
   const root = document.getElementById('root');
   if (!DATA) { root.innerHTML = '<div class="loading">Loading…</div>'; return; }
@@ -14702,8 +15154,122 @@ function linkPgs(id) {
   return `<a href="https://www.pgscatalog.org/score/${encodeURIComponent(id)}/" target="_blank" rel="noopener">${escapeHtml(id)}</a>`;
 }
 
+// ── Monogenic rendering ──────────────────────────────────────────
+function monoCallClass(r) {
+  if (r.call_kind === 'diplotype') return 'diplotype';
+  if (r.call === 'hom carrier') return 'carrier-hom';
+  if (r.call === 'het carrier') return 'carrier-het';
+  if (r.call === 'ref/ref') return 'refref';
+  return 'unknown';
+}
+
+function renderMonoVariantRow(v) {
+  const dl = v.dosage_label ? ` <span style="color:var(--muted)">(${escapeHtml(v.dosage_label)})</span>` : '';
+  const dp = (v.depth != null) ? ` · ${v.depth}× depth` : '';
+  const rs = v.rs ? ` <span style="color:var(--muted)">${escapeHtml(v.rs)}</span>` : '';
+  return `<li>${escapeHtml(v.gene || '')} ${escapeHtml(v.name || '')}${rs}: <b>${escapeHtml(v.genotype || '—')}</b>${dl}${dp}</li>`;
+}
+
+function renderMonoTest(t) {
+  const divergent = t.distinct_calls && t.distinct_calls.length > 1;
+  const rows = t.samples.map(s => {
+    const cls = monoCallClass(s);
+    const rareTag = s.rare ? ' <span class="mono-rare-tag" title="ε1 alleles are very rare; recommend confirmatory phased assay.">rare</span>' : '';
+    const riskLine = s.risk ? `<span class="mono-risk">${escapeHtml(s.risk)}</span>` : '';
+    const depthLine = s.depth_min != null
+      ? `<span class="mono-risk">min depth ${s.depth_min}×</span>` : '';
+    const variants = (s.variants || []).map(renderMonoVariantRow).join('');
+    const reportLink = s.task_id
+      ? `<a href="/report/${encodeURIComponent(s.task_id)}" target="_blank" style="color:var(--accent);text-decoration:none;font-size:11px;margin-left:8px;">[report]</a>`
+      : '';
+    return `<tr>
+        <td class="sample">${escapeHtml(s.sample)}</td>
+        <td class="mono-call ${cls}">${escapeHtml(s.call || '—')}${rareTag}
+          ${riskLine}${depthLine}
+        </td>
+        <td style="font-size:11px;color:var(--muted)">
+          ${escapeHtml(s.file_label || '')}${reportLink}
+          ${variants ? `<details class="mono-variants"><summary>variants</summary><ul>${variants}</ul></details>` : ''}
+        </td>
+      </tr>`;
+  }).join('');
+
+  const geneTag = t.gene ? `<span class="gene-tag">${escapeHtml(t.gene)}</span>` : '';
+  const catTag = t.category ? `<span class="cat">${escapeHtml(t.category)}</span>` : '';
+  const divergentTag = divergent
+    ? `<span class="mono-divergent" title="Samples differ on this test — see the per-sample call below.">${t.distinct_calls.length} distinct calls</span>` : '';
+
+  return `
+    <section class="mono-card">
+      <h2>${escapeHtml(t.test_name)} ${geneTag} ${catTag}${divergentTag}</h2>
+      ${t.description ? `<div class="desc">${escapeHtml(t.description)}</div>` : ''}
+      <div class="stat-line">
+        <span><b>${t.n_samples}</b> sample${t.n_samples===1?'':'s'}</span>
+        ${divergent ? `<span>Distinct calls: <b>${t.distinct_calls.map(escapeHtml).join(', ')}</b></span>`
+                    : `<span>Call: <b>${escapeHtml(t.distinct_calls[0] || '—')}</b> across all samples</span>`}
+      </div>
+      <table class="mono">
+        <thead><tr>
+          <th>Sample</th>
+          <th>Call</th>
+          <th>Source &amp; variants</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </section>`;
+}
+
+function visibleMonoTests() {
+  const tests = (MONO_DATA && MONO_DATA.tests) || [];
+  const q = (STATE.q || '').toLowerCase().trim();
+  return tests
+    .filter(t => !STATE.cats.size || STATE.cats.has(t.category))
+    .filter(t => {
+      if (!STATE.samples.size) return true;
+      const present = new Set(t.samples.map(s => s.sample));
+      for (const s of STATE.samples) if (!present.has(s)) return false;
+      return true;
+    })
+    .filter(t => !q
+      || (t.test_name || '').toLowerCase().includes(q)
+      || (t.gene || '').toLowerCase().includes(q)
+      || (t.category || '').toLowerCase().includes(q)
+      || (t.description || '').toLowerCase().includes(q));
+}
+
+function renderMonogenic() {
+  const root = document.getElementById('root');
+  if (!MONO_DATA) { root.innerHTML = '<div class="loading">Loading monogenic results…</div>'; return; }
+
+  const tests = MONO_DATA.tests || [];
+  const visible = visibleMonoTests();
+  const allSamples = new Set();
+  for (const t of tests) for (const s of t.samples) allSamples.add(s.sample);
+  document.getElementById('meta').textContent =
+    `${tests.length} test${tests.length===1?'':'s'} · ${allSamples.size} sample${allSamples.size===1?'':'s'}`;
+
+  const summary = `<div class="summary">`
+    + `<span><b>${visible.length}</b> of <b>${tests.length}</b> tests shown</span>`
+    + (STATE.cats.size    ? `<span>· <b>${STATE.cats.size}</b> categories</span>` : '')
+    + (STATE.samples.size ? `<span>· requires sample(s): <b>${[...STATE.samples].join(', ')}</b></span>` : '')
+    + `<span style="margin-left:auto"><a href="/api/compare/monogenic">JSON</a></span>`
+    + `</div>`;
+
+  if (!visible.length) {
+    root.innerHTML = summary
+      + '<div class="empty">No monogenic / single-variant runs match the current filters.<br>'
+      + '<small>Run a test in the Single Variants / Monogenic category for one of your samples.</small></div>';
+    return;
+  }
+
+  root.innerHTML = summary
+    + visible.map(renderMonoTest).join('')
+    + '<div class="footer-note">Monogenic results are discrete calls (diplotype, het/hom carrier, ref/ref) — not percentiles. Most-recent run per (test, sample) is shown.</div>';
+}
+
 // ── Network ──────────────────────────────────────────────────────
 function load() {
+  if (CURRENT_TAB === 'monogenic') { loadMono(); return; }
   const qp = new URLSearchParams();
   if (STATE.minMatch !== 90)    qp.set('min_match', STATE.minMatch);
   qp.set('max_abs_z', 50);  // permissive: |z| filter removed from UI
@@ -14718,6 +15284,59 @@ function load() {
       document.getElementById('root').innerHTML =
         '<div class="empty">Failed to load: ' + escapeHtml(e.message) + '</div>';
     });
+}
+
+function loadMono() {
+  fetch('/api/compare/monogenic', { credentials: 'same-origin' })
+    .then(r => {
+      if (r.status === 401) { window.location = '/sign-in?next=/compare'; return null; }
+      return r.json();
+    })
+    .then(d => { if (d) { MONO_DATA = d; buildMonoFacets(); renderMonogenic(); } })
+    .catch(e => {
+      document.getElementById('root').innerHTML =
+        '<div class="empty">Failed to load: ' + escapeHtml(e.message) + '</div>';
+    });
+}
+
+function buildMonoFacets() {
+  const facets = (MONO_DATA && MONO_DATA.facets) || {categories:[], samples:[]};
+  buildMs('ms-cats', facets.categories, STATE.cats, () => {
+    syncMsLabel('ms-cats', STATE.cats, 'category', 'categories');
+    writeHash(); renderMonogenic();
+  });
+  buildMs('ms-samps', facets.samples, STATE.samples, () => {
+    syncMsLabel('ms-samps', STATE.samples, 'sample', 'samples');
+    writeHash(); renderMonogenic();
+  });
+  syncMsLabel('ms-cats', STATE.cats, 'category', 'categories');
+  syncMsLabel('ms-samps', STATE.samples, 'sample', 'samples');
+}
+
+function applyTabUi() {
+  // Hide polygenic-only filter groups when on monogenic tab.
+  document.querySelectorAll('.tab').forEach(b => {
+    b.classList.toggle('on', b.dataset.tab === CURRENT_TAB);
+    b.setAttribute('aria-selected', b.dataset.tab === CURRENT_TAB ? 'true' : 'false');
+  });
+  // Filter bar: only the search, categories and samples make sense for monogenic.
+  const polyOnly = ['seg-match', 'sel-minsamp', 'sel-minpgs', 'sortsel', 'hi-conf'];
+  document.querySelectorAll('.filterbar .fgroup').forEach(fg => {
+    const hasPolyOnly = polyOnly.some(id => fg.querySelector('#' + id));
+    fg.style.display = (CURRENT_TAB === 'monogenic' && hasPolyOnly) ? 'none' : '';
+  });
+}
+
+function switchTab(tab) {
+  if (tab !== 'polygenic' && tab !== 'monogenic') return;
+  if (CURRENT_TAB === tab) return;
+  CURRENT_TAB = tab;
+  // Reset multi-select filters when crossing tabs (different facet domains).
+  STATE.cats = new Set();
+  STATE.samples = new Set();
+  applyTabUi();
+  writeHash();
+  load();
 }
 
 // ── Wire UI ──────────────────────────────────────────────────────
@@ -14768,8 +15387,14 @@ document.getElementById('reset').addEventListener('click', () => {
   });
 });
 
+// Tab click handler
+document.querySelectorAll('.tab').forEach(b => {
+  b.addEventListener('click', () => switchTab(b.dataset.tab));
+});
+
 readHash();
 syncBar();
+applyTabUi();
 load();
 setInterval(load, 30000);
 </script>
