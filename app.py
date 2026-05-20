@@ -9273,7 +9273,68 @@ const FILTERS = {
     }
   },
 };
-const FILTER_ORDER = ['female', 'male', 'pediatric', 'carrier', 'actionable'];
+// # YEAR_FILTER_BLOCK: year/date filters extracted from test description.
+// Match against the latest 4-digit year mentioned in name/description.
+// Filters EXCLUDE tests that don't fit, like the existing chips.
+function _extractTestYear(t) {
+  const txt = (t.name || '') + ' ' + (t.description || '');
+  const m = txt.match(/\b(19[7-9]\d|20[0-2]\d)\b/g);
+  if (!m) return null;
+  return Math.max.apply(null, m.map(Number));
+}
+FILTERS.year_2024 = {
+  label: '\u22652024',
+  desc: 'Hide tests older than 2024 (publication year from description).',
+  match: t => { const y = _extractTestYear(t); return y === null || y < 2024; }
+};
+FILTERS.year_2022 = {
+  label: '\u22652022',
+  desc: 'Hide tests older than 2022.',
+  match: t => { const y = _extractTestYear(t); return y === null || y < 2022; }
+};
+FILTERS.year_2020 = {
+  label: '\u22652020',
+  desc: 'Hide tests older than 2020.',
+  match: t => { const y = _extractTestYear(t); return y === null || y < 2020; }
+};
+FILTERS.year_legacy = {
+  label: '<2020',
+  desc: 'Hide tests from 2020 onwards (show only legacy/older scores).',
+  match: t => { const y = _extractTestYear(t); return y !== null && y >= 2020; }
+};
+// Other generally-useful cross-tab filters:
+FILTERS.high_mr = {
+  label: 'MR\u226595%',
+  desc: 'Hide tests where my best run has match-rate < 95%.',
+  match: t => {
+    const st = testStatus && testStatus[t.id];
+    const mr = st && st.match_rate_value;
+    if (mr === null || mr === undefined) return false;
+    return mr < 95;
+  }
+};
+FILTERS.has_result = {
+  label: 'Scored',
+  desc: 'Hide tests with no result yet for the active profile.',
+  match: t => {
+    const st = testStatus && testStatus[t.id];
+    return !st || !st.status;
+  }
+};
+FILTERS.meaningful = {
+  label: 'With %ile',
+  desc: 'Hide tests without a valid percentile.',
+  match: t => {
+    const st = testStatus && testStatus[t.id];
+    if (!st) return true;
+    const p = st.percentile;
+    return p === null || p === undefined;
+  }
+};
+
+const FILTER_ORDER = ['female', 'male', 'pediatric', 'carrier', 'actionable',
+                      'year_2024', 'year_2022', 'year_2020', 'year_legacy',
+                      'high_mr', 'has_result', 'meaningful'];
 
 function applyFilter(testList) {
   if (activeFilters.size === 0) return testList;
