@@ -1272,7 +1272,7 @@ _t('carrier_mcad', 'Carrier Status', 'MCAD deficiency (ACADM)',
 
 # ── Single Variants ─────────────────────────────────────────────
 _t('var_apoe', 'Single Variants', "APOE e4 (Alzheimer's)",
-   'rs429358 + rs7412. e4/e4 = 12-15x AD risk. e4 freq: 14%',
+   "APOE (apolipoprotein E) is the strongest known genetic risk factor for late-onset Alzheimer's disease. This test reads rs429358 and rs7412 to determine the diplotype (ε2/ε3/ε4 combination).",
    'variant_lookup', {'variants': [{'rs': 'rs429358', 'gene': 'APOE', 'name': 'APOE-C112R'}, {'rs': 'rs7412', 'gene': 'APOE', 'name': 'APOE-R158C'}], 'disease': "Alzheimer's risk (APOE)", 'interpretation': 'apoe'})
 
 _t('var_fvl', 'Single Variants', 'Factor V Leiden',
@@ -1683,6 +1683,21 @@ CURATED_IDS = {
     'pgs_edu_2012', 'pgs_intelligence_3723',
     # Lifestyle / Behavioral
     'pgs_longevity_906',
+    # # CURATED_HEIGHT_BLOCK: Physical Traits (Height set, user-added 2026-05-20)
+    'custom_pgs000297',  # Height (PGS000297) — Xie et al. 2020
+    'custom_pgs000758',  # Adult standing height (PGS000758) — Lu et al. 2021
+    'custom_pgs001405',  # Height (PGS001405)
+    'custom_pgs001929',  # Standing height (PGS001929)
+    'custom_pgs002965',  # Body height (PGS002965)
+    'custom_pgs002972',  # Body height full genome (PGS002972)
+    'custom_pgs002973',  # Body height (PGS002973)
+    'custom_pgs003895',  # Body height (PGS003895)
+    'custom_pgs004211',  # Height Ridge (PGS004211)
+    'custom_pgs004212',  # Height Elastic Net (PGS004212)
+    'custom_pgs004213',  # Height BOLT-LMM (PGS004213)
+    'pgs_height_4214',   # Height LASSO (PGS004214)
+    'custom_pgs004999',  # Body height multi-ancestry (PGS004999)
+    'custom_pgs005001',  # Body height multi-ancestry (PGS005001)
     # Validation (one each)
     'sex_xy_ratio', 'ancestry_pca',
 }
