@@ -2049,6 +2049,56 @@ app.include_router(chat_router, prefix="/api/chat", tags=["chat"])
 
 
 # ── Custom PGS registry (per-user) ────────────────────────────────
+# # CUSTOM_PGS_CATEGORY_BY_TRAIT: map custom PGS trait → existing TAB_DEFS-registered
+# category so the test appears in the Polygenic Scores tab. The "PGS -
+# Custom" bucket is unmapped and was hiding all user-added PGSes.
+_CUSTOM_PGS_TRAIT_TO_CATEGORY = [
+    # (substring matched against lowercase trait, category)
+    (("breast cancer", "ovarian", "endometrial", "prostate", "colorectal",
+      "lung cancer", "pancreatic", "melanoma", "skin cancer", "basal cell",
+      "thyroid cancer", "leukemia", "lymphoma", "myeloma", "kidney cancer",
+      "bladder cancer", "liver cancer", "gastric cancer", "stomach cancer",
+      "esophageal", "cancer", "tumor", "neoplasm", "carcinoma"),
+     "PGS - Cancer"),
+    (("coronary", "heart failure", "atrial fibrillation", "atrial fib",
+      "myocardial", "stroke", "aortic", "vte ", "venous thromboembolism",
+      "hypertension", "blood pressure", "cardiomyopathy", "cardiovascular"),
+     "PGS - Cardiovascular"),
+    (("diabetes", "obesity", "bmi ", "body mass", "ldl", "hdl",
+      "triglycerides", "cholesterol", "lipid", "thyroid",
+      "celiac", "bone mineral", "osteoporosis", "metabolic"),
+     "PGS - Metabolic / Endocrine"),
+    (("ibd", "inflammatory bowel", "crohn", "ulcerative colitis",
+      "rheumatoid", "asthma", "psoriasis", "lupus", "sle",
+      "multiple sclerosis", "atopic", "eczema", "allergy",
+      "autoimmune", "type 1 diabetes"),
+     "PGS - Autoimmune / Inflammatory"),
+    (("alzheimer", "parkinson", "schizophrenia", "bipolar", "depression",
+      "adhd", "autism", "anxiety", "migraine", "epilepsy", "ptsd",
+      "addiction", "neuroticism", "alcoholism"),
+     "PGS - Neurological / Mental Health"),
+    (("ckd", "chronic kidney", "renal", "kidney disease"),
+     "PGS - Renal / Urinary"),
+    (("glaucoma", "amd", "macular degeneration", "myopia", "cataract",
+      "diabetic retinopathy"),
+     "PGS - Eye / Vision"),
+    (("intelligence", "iq score", "cognitive", "educational attainment",
+      "household income", "qualifications", "verbal-numerical",
+      "college education", "fluid intelligence"),
+     "PGS - Cognitive & Educational"),
+    (("height", "body height", "stature", "hair", "eye color",
+      "skin color", "skin pigment"),
+     "PGS - Physical Traits"),
+    (("longevity", "lifespan", "coffee", "smoking", "alcohol consumption"),
+     "PGS - Lifestyle / Behavioral"),
+]
+def _category_for_custom_pgs(trait: str) -> str:
+    t = (trait or "").lower()
+    for keywords, cat in _CUSTOM_PGS_TRAIT_TO_CATEGORY:
+        if any(k in t for k in keywords):
+            return cat
+    return "PGS - Custom"  # fallback (still injected, but UI may not surface)
+
 def _add_custom_pgs_to_tests(pgs_info):
     """Inject a custom PGS into the in-memory TESTS list so it shows up
     alongside the built-ins in the dashboard. Idempotent — a duplicate
@@ -2059,18 +2109,20 @@ def _add_custom_pgs_to_tests(pgs_info):
     test_id = f"custom_{pgs_id.lower()}"
     if test_id in TESTS_BY_ID:
         return False
+    trait = pgs_info.get("trait", pgs_id)
+    category = _category_for_custom_pgs(trait)
     test_def = {
         "id": test_id,
-        "category": "PGS - Custom",
-        "name": pgs_info.get("name") or f"{pgs_info.get('trait', pgs_id)} ({pgs_id})",
+        "category": category,
+        "name": pgs_info.get("name") or f"{trait} ({pgs_id})",
         "description": pgs_info.get("description", ""),
         "test_type": "pgs_score",
-        "params": {"pgs_id": pgs_id, "trait": pgs_info.get("trait", pgs_id)},
+        "params": {"pgs_id": pgs_id, "trait": trait},
     }
     TESTS.append(test_def)
     TESTS_BY_ID[test_id] = test_def
-    if "PGS - Custom" not in CATEGORIES:
-        CATEGORIES.append("PGS - Custom")
+    if category not in CATEGORIES:
+        CATEGORIES.append(category)
     return True
 
 
